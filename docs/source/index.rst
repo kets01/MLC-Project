@@ -23,3 +23,16 @@ Team Members
 ------------
 * Ketsia Kemkuini
 * Mariza Yamdjeu
+
+Weekly Tasks & Progress
+-----------------------
+
+Week 1: Assembly Language (Inner and Outer product in AArch64)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+In this first week, we established our initialsoftware engineering workflow:
+* **Task:** Implemented the inner product in AArch64 assembly.
+* **Build System:** CMake integration
+* **Unit Testing:** Integrated catch2 to verify our assembly implementation.
+* ** CI/CD:** Set up GitHub Actions for continuous integration.
+
+**GenAI Disclosure:** Used to assist with writing CMakeLists.txt file framework.
