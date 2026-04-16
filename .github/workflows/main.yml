@@ -1,10 +1,16 @@
-name: CI 
+name: CI
 
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+
+# Permissions needed for GitHub Pages deployment
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
   build-and-test:
@@ -16,8 +22,6 @@ jobs:
       - name: Install Build Tools
         run: |
           sudo apt-get update
-          # g++-aarch64-linux-gnu is the cross-compiler
-          # qemu-user allows running ARM64 binaries on x86 servers
           sudo apt-get install -y cmake gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user
 
       - name: Configure CMake
@@ -37,13 +41,40 @@ jobs:
         run: |
           qemu-aarch64 -L /usr/aarch64-linux-gnu/ ./build/unit_tests
 
+
   build-docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
       - name: Install Sphinx
         run: pip install sphinx sphinx-rtd-theme
+      
       - name: Build Documentation
         run: |
           cd docs
           make html
+      
+      # This step helps us debug by showing exactly what folders exist
+      - name: List files to verify path
+        run: ls -R docs/
+      
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # Try changing '_build' to 'build' here
+          path: 'docs/build/html'
+
+  deploy-docs:
+    runs-on: ubuntu-latest
+    # This job only starts if the two previous ones finished successfully
+    needs: [build-and-test, build-docs] 
+    # Only deploy on pushes to the main branch
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
