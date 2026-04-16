@@ -1,14 +1,30 @@
 #include <catch2/catch_test_macros.hpp>
-#include <vector>
-#include "base_math.hpp"
+#include <cstdint>
+#include "base_math.hpp" 
 
-TEST_CASE("Infrastructure Check", "[stub]") {
-    SECTION("Basic Linkage") {
-        uint32_t a = 0;
-        // Verify we can call the function without crashing
-        // (Since it's a stub that returns 0, this should pass)
-        REQUIRE(inner_product_asm(&a, &a, 0) == 0);
+TEST_CASE("Inner Product Calculation", "[inner_product]") {
+    
+    SECTION("Standard 4-element vectors") {
+        uint32_t a[] = {1, 2, 3, 4};
+        uint32_t b[] = {5, 6, 7, 8};
+        uint32_t size = 4;
+        int64_t expected = 70; // (1*5) + (2*6) + (3*7) + (4*8) = 70
+        
+        int64_t result = inner_product_asm(a, b, size);
+        
+        // Catch2 uses REQUIRE with standard C++ operators (==)
+        REQUIRE(result == expected);
     }
+
+    SECTION("Empty arrays return zero") {
+        uint32_t a[] = {0};
+        uint32_t b[] = {0};
+        int64_t expected = 0;
+        
+        REQUIRE(inner_product_asm(a, b, 0) == expected);
+
+    }
+    
 }
 
 TEST_CASE("Outer Product Functional Test", "[outer]") {
