@@ -37,7 +37,7 @@ SYMBOL(outer_product_asm):
     // x1 = pointer to b
     // w2 = size (uint32_t const i_size)
     // x3 = pointer to c
-    cbz w2, .done               // If size is 0, exit
+    cbz w2, .end               // If size is 0, exit
     mov x10, x1                 // Save the base address of i_b in x10
     mov w4, w2                  // w4 = outer loop counter (starts at i_size)
 
@@ -62,5 +62,5 @@ SYMBOL(outer_product_asm):
     subs w4, w4, #1             // w4 = w4 - 1
     cbnz w4, .loop_i            // If i counter != 0, repeat outer
 
-.done:
+.end:
     ret
