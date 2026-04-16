@@ -41,21 +41,29 @@ jobs:
         run: |
           qemu-aarch64 -L /usr/aarch64-linux-gnu/ ./build/unit_tests
 
+
   build-docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
       - name: Install Sphinx
         run: pip install sphinx sphinx-rtd-theme
+      
       - name: Build Documentation
         run: |
           cd docs
           make html
-      # We upload the artifact here so the next job can find it
+      
+      # This step helps us debug by showing exactly what folders exist
+      - name: List files to verify path
+        run: ls -R docs/
+      
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: 'docs/_build/html'
+          # Try changing '_build' to 'build' here
+          path: 'docs/build/html'
 
   deploy-docs:
     runs-on: ubuntu-latest
