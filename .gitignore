@@ -46,3 +46,5 @@ mlcenv/
 #build files
 build/
 docs/_build/
+
+.vscode/
