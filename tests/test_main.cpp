@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
-#include "base_math.hpp" // Use your header for the prototypes
+#include "base_math.hpp" 
 
 TEST_CASE("Inner Product Calculation", "[inner_product]") {
     
@@ -25,4 +25,20 @@ TEST_CASE("Inner Product Calculation", "[inner_product]") {
 
     }
     
+}
+
+TEST_CASE("Outer Product Functional Test", "[outer]") {
+    uint32_t a[] = {1, 2};
+    uint32_t b[] = {3, 4};
+    uint64_t c[4] = {0}; // 2x2 matrix
+    
+    outer_product_asm(a, b, 2, c);
+    
+    // Matrix should be:
+    // [ 1*3  1*4 ]  => [ 3  4 ]
+    // [ 2*3  2*4 ]     [ 6  8 ]
+    REQUIRE(c[0] == 3);
+    REQUIRE(c[1] == 4);
+    REQUIRE(c[2] == 6);
+    REQUIRE(c[3] == 8);
 }
