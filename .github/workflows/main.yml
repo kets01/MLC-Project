@@ -1,0 +1,50 @@
+name: CI 
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Build Tools
+        run: |
+          sudo apt-get update
+          # g++-aarch64-linux-gnu is the cross-compiler
+          # qemu-user allows running ARM64 binaries on x86 servers
+          sudo apt-get install -y cmake gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user
+
+      - name: Configure CMake
+        run: |
+          mkdir build && cd build
+          # We tell CMake to use the AArch64 cross-compiler
+          cmake .. \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++
+
+      - name: Build Project
+        run: cmake --build build
+
+      - name: Run Unit Tests (via QEMU)
+        run: |
+          qemu-aarch64 -L /usr/aarch64-linux-gnu/ ./build/unit_tests
+
+  build-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Sphinx
+        run: pip install sphinx sphinx-rtd-theme
+      - name: Build Documentation
+        run: |
+          cd docs
+          make html
+          

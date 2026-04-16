@@ -39,3 +39,10 @@
 
 # debug information files
 *.dwo
+
+# pyenv
+mlcenv/
+
+#build files
+build/
+docs/_build/
