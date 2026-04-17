@@ -30,12 +30,14 @@ FetchContent_MakeAvailable(Catch2)
 add_library(math_logic 
     src/week1/base_math.cpp 
     src/week1/base_math.S
+    src/week2/fmadd.cpp
+    src/week2/fmadd_asm.S
 )
 target_include_directories(math_logic PUBLIC include)
 
 # 4. Create the Unit Tests
 enable_testing()
-add_executable(unit_tests tests/test_week1.cpp)
+add_executable(unit_tests tests/test_week1.cpp tests/test_week2.cpp)
 
 # Link to our logic AND Catch2
 # 'Catch2::Catch2WithMain' provides a main() function automatically
