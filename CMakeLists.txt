@@ -35,7 +35,7 @@ target_include_directories(math_logic PUBLIC include)
 
 # 4. Create the Unit Tests
 enable_testing()
-add_executable(unit_tests tests/test_weeek1.cpp)
+add_executable(unit_tests tests/test_week1.cpp)
 
 # Link to our logic AND Catch2
 # 'Catch2::Catch2WithMain' provides a main() function automatically

@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <cstdint>
-#include "base_math.hpp" 
+#include "week1/base_math.hpp" 
 
 TEST_CASE("Inner Product Calculation", "[inner_product]") {
     
