@@ -39,7 +39,9 @@ jobs:
 
       - name: Run Unit Tests (via QEMU)
         run: |
-          qemu-aarch64 -L /usr/aarch64-linux-gnu/ ./build/unit_tests
+          qemu-aarch64 -L /usr/aarch64-linux-gnu/ ./build/src/week1/test_week1
+
+          qemu-aarch64 -L /usr/aarch64-linux-gnu/ ./build/src/week2/test_week2
 
 
   build-docs:

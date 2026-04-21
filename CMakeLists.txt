@@ -1,7 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-
-# 1. Initialize Project (Enables C++ and AArch64 Assembly)
-project(MLC-project CXX ASM)
+project(MLC-Project CXX ASM)
 
 # Requirement: C++17 and strict warnings (the "No Hacks" rule)
 set(CMAKE_CXX_STANDARD 17)
@@ -26,24 +24,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 
-# 3. Create the Math Logic Library
-add_library(math_logic 
-    src/week1/base_math.cpp 
-    src/week1/base_math.S
-    src/week2/fmadd.cpp
-    src/week2/fmadd_asm.S
-)
-target_include_directories(math_logic PUBLIC include)
+# Tell CMake where to find the headers for all weeks
+include_directories(include)
 
-# 4. Create the Unit Tests
+# Now "Enter" the weekly folders
+add_subdirectory(src/week1)
+add_subdirectory(src/week2)
+
 enable_testing()
-add_executable(unit_tests tests/test_week1.cpp tests/test_week2.cpp)
-
-# Link to our logic AND Catch2
-# 'Catch2::Catch2WithMain' provides a main() function automatically
-target_link_libraries(unit_tests PRIVATE math_logic Catch2::Catch2WithMain)
-
-# Add the test command for CI
-include(Catch)
-catch_discover_tests(unit_tests)
-
