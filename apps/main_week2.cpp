@@ -96,10 +96,59 @@ void run_fmadd_benchmark() {
 
 }
 
+void run_massive_benchmark(int64_t size_c, int64_t total_iterations) {
+    const int64_t dim_a = 8;
+    const int64_t dim_b = 4;
+    const int64_t elements = dim_a * dim_b * size_c;
+    
+    std::vector<float> input(elements, 1.23f);
+    std::vector<float> output(elements, 0.0f);
+
+    // 1. WARM-UP: Ensure CPU is at max clock speed and caches are hot
+    int64_t warmup_iters = (size_c > 512) ? 100 : 10000;
+    for (int64_t i = 0; i < warmup_iters; ++i) {
+        perm_neon_abc_cba(size_c, input.data(), output.data());
+    }
+
+    // 2. MEASUREMENT
+    auto start = std::chrono::high_resolution_clock::now();
+    for (int64_t i = 0; i < total_iterations; ++i) {
+        perm_neon_abc_cba(size_c, input.data(), output.data());
+    }
+    auto end = std::chrono::high_resolution_clock::now();
+
+    // 3. MATH
+    std::chrono::duration<double> diff = end - start;
+    double seconds = diff.count();
+    double bytes_processed = (double)total_iterations * elements * sizeof(float) * 2.0; // Read + Write
+    double gib_per_sec = (bytes_processed / (1024.0 * 1024.0 * 1024.0)) / seconds;
+
+    std::cout << "c=" << std::setw(5) << size_c 
+              << " | Iters: " << std::setw(10) << total_iterations 
+              << " | Time: " << std::setw(8) << std::fixed << std::setprecision(3) << seconds << "s"
+              << " | Speed: " << std::setw(8) << std::setprecision(2) << gib_per_sec << " GiB/s" << std::endl;
+}
+
+
+void run_performance_suite() {
+    std::cout << "Starting Massive Microbenchmark (Neon abc->cba)" << std::endl;
+    std::cout << "------------------------------------------------------------" << std::endl;
+
+    // List of sizes to test
+    std::vector<int64_t> sizes = {2, 4, 8, 16, 32, 64, 128, 256, 512, 1024};
+
+    for (int64_t c : sizes) {
+        int64_t iters = 10000000; 
+
+        run_massive_benchmark(c, iters);
+    }
+}
+
 
 int main() {
     run_fmadd_benchmark(); // Second, measure throughput
     verify_permutation(2);
     verify_permutation(4);
+    run_performance_suite();
     return 0;
 }
