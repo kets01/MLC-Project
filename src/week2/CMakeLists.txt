@@ -1,6 +1,8 @@
 # Create Library for Week 2
 add_library(week2_lib 
     fmadd_asm.S 
+    perm.S
+    perm.cpp
 )
 
 # Benchmark App for Week 2

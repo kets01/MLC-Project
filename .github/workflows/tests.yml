@@ -1,0 +1,28 @@
+name: Native ARM64 Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-apple-silicon:
+    # This uses GitHub's M1/M2 runners. Native AArch64!
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: |
+          mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run Week 1 Tests
+        run: ./build/src/week1/test_week1
+
+      - name: Run Week 2 Tests
+        run: ./build/src/week2/test_week2
