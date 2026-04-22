@@ -15,16 +15,6 @@ Week 1
     * Configured the GitHub Actions CI pipeline.
     * Sphinx documentation .
 
-Week 2
-------
-* **Ketsia Kemkuini**:
-    * Implemented the C++ reference for the permutation kernel.
-    * Developed the unified benchmark application (``bench_week2``).
-    * Conducted performance analysis and GiB/s scaling measurements.
-* **Mariza Yamdjeu**:
-    * Implemented the optimized AArch64 Neon permutation kernel.
-    * Developed the ``TRN1/TRN2`` in-register transpose logic.
-    * Handled the modularization of the CMake system into weekly subdirectories.
 
 Week 2
 ------
