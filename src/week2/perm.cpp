@@ -1,13 +1,6 @@
 #include "week2/perm.hpp"
 
-//extern "C" {
-    // Stub implementation so the project compiles
-    //void perm_cpp_abc_cba(int64_t size_c, float const * abc, float * cba) {
-        //(void)size_c; (void)abc; (void)cba; // Prevents "unused" warnings
-   // }
-//}
-
-// Reference code to verify your Assembly
+// Reference code to verify the Assembly
 void perm_cpp_abc_cba(int64_t size_c, float const * abc, float * cba) {
     for (int i = 0; i < 8; ++i) {
         for (int j = 0; j < 4; ++j) {
