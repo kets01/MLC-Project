@@ -41,7 +41,7 @@
 *.dwo
 
 # pyenv
-mlcenv/
+mlc_env/
 
 #build files
 build/
