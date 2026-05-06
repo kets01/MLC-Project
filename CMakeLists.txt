@@ -26,5 +26,6 @@ include_directories(include)
 # The weekly logic is now ONLY in these folders
 add_subdirectory(src/week1)
 add_subdirectory(src/week2)
+add_subdirectory(src/week3)
 
 enable_testing()
