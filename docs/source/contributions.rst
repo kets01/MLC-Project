@@ -28,3 +28,28 @@ Week 2
     * **Permutation Reference**: Implemented the C++ baseline for the `abc` to `cba` permutation for validation.
     * **Analysis**: Performed the scaling measurements for `|c|` and analyzed the "Memory Wall" effect on GiB/s.
     
+
+Week 3
+------
+
+* **Mariza Yamdjeu**:
+    * **Unary Kernel Suite**: Implemented the full set of Week 3 unary operations 
+      (``identity``, ``zero``, ``relu``) in AArch64 SME/SVE, including both the 
+      optimized assembly kernels and their C++ reference baselines.
+    * **Validation & Benchmarking**: Developed the unified test harness and 
+      high‑resolution microbenchmarks for 16×16 FP32 tiles, including correctness 
+      verification, structured matrix printers, and GiB/s throughput analysis.
+    * **Integration**: Extended and merged the Week 3 build system to support 
+      combined unary + GEMM workflows, resolving cross‑module conflicts and 
+      ensuring a clean, modular CMake structure.
+
+* **Ketsia Kemkuini**:
+    * **SME GEMM Kernel**: Designed and implemented the optimized 
+      512×512×512 FP32 GEMM kernel using Arm SME streaming mode, including 
+      correct handling of mixed row/column‑major layouts and SME tile configuration.
+    * **Performance Engineering**: Built the GEMM benchmarking pipeline with 
+      warm‑up phases, FLOP accounting, and GFLOPS reporting, enabling stable 
+      performance measurements across 100+ iterations.
+    * **Project Evolution**: Contributed the structural changes required to 
+      integrate SME kernels into the Week 3 module, ensuring compatibility with 
+      the existing unary‑ops framework and CI infrastructure.
