@@ -5,7 +5,7 @@
 #include <iomanip>
 #include "week3/unary.hpp"
 #include "week3/gemm_sme.hpp"
-#include "utility.hpp"
+#include "week3/utility.hpp"
 
 
 // ------------------------------------------------------------
