@@ -68,48 +68,62 @@ void benchmark_unary() {
 
 
 // ============================================================================
-//                         Benchmark: GEMM (512x512x512)
+//                         Benchmark: Binary-GEMM 
 // ============================================================================
-void benchmark_gemm() {
-    const int64_t M = 512;
-    const int64_t N = 512;
-    const int64_t K = 512;
-    const int num_iterations = 100;
+template <typename Func>
+void run_bench(const char* name, int iters, double flops_per_call, Func func) {
+    // Warmup
+    func();
+    using namespace std::chrono;
 
-    std::vector<float> A(M * K, 1.1f);
-    std::vector<float> B(K * N, 1.2f);
-    std::vector<float> C(M * N, 0.0f);
-
-    std::cout << "\n============================================\n";
-    std::cout << "          Benchmarking SME GEMM\n";
-    std::cout << "============================================\n";
-    std::cout << "Matrix size: " << M << " x " << N << " x " << K << "\n";
-    std::cout << "Iterations:  " << num_iterations << "\n\n";
-
-    // Warm-up run (important for SME/streaming mode)
-    gemm_512_512_512(A.data(), B.data(), C.data(), M, K, M);
-
-    // Timed benchmark
-    auto start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < num_iterations; ++i) {
-        gemm_512_512_512(A.data(), B.data(), C.data(), M, K, M);
+    auto start = high_resolution_clock::now();
+    for (int i = 0; i < iters; ++i) {
+        func();
     }
-    auto end = std::chrono::high_resolution_clock::now();
+    auto end = high_resolution_clock::now();
 
-    std::chrono::duration<double> diff = end - start;
+    double seconds = duration<double>(end - start).count() / iters;
+    double gflops = (flops_per_call / seconds) * 1e-9;
 
-    double seconds = diff.count();
-    double avg_seconds = seconds / num_iterations;
+    std::cout << std::left << std::setw(20) << name 
+              << " | Performance: " << std::fixed << std::setprecision(2) 
+              << std::right << std::setw(8) << gflops << " GFLOPS" << std::endl;
+}
 
-    // Total FLOPs = 2 * M * N * K
-    double total_flops = 2.0 * M * N * K;
-    double gflops = (total_flops / avg_seconds) * 1e-9;
+int benchmark_binary() {
+    const int iters = 100;
+    const int64_t DIM = 512;
+    const int64_t TILE = 32;
 
-    std::cout << std::fixed << std::setprecision(2);
-    std::cout << "Total Time:    " << seconds << " s\n";
-    std::cout << "Avg Time:      " << avg_seconds << " s\n";
-    std::cout << "Performance:   " << gflops << " GFLOPS\n";
-    std::cout << "--------------------------------------------\n";
+    std::vector<float> A(DIM * DIM, 1.1f);
+    std::vector<float> B(DIM * DIM, 1.2f);
+    std::vector<float> C(DIM * DIM, 0.0f);
+
+    std::cout << "SME GEMM Performance Benchmark\n";
+    std::cout << "========================================\n";
+
+    // Bench Level 1 (Expected to be slowest due to Load/Store ratio)
+    run_bench("gemm_32_32_1", 10000, 2.0 * TILE * TILE * 1, [&]() {
+        gemm_32_32_1(A.data(), B.data(), C.data(), TILE, TILE, TILE);
+    });
+
+    // Bench Level 2 (Middle ground)
+    run_bench("gemm_32_32_512", 1000, 2.0 * TILE * TILE * DIM, [&]() {
+        gemm_32_32_512(A.data(), B.data(), C.data(), TILE, TILE, TILE);
+    });
+
+    // Bench Level 3 (Tiled M)
+    run_bench("gemm_512_32_512", 200, 2.0 * DIM * TILE * DIM, [&]() {
+        gemm_512_32_512(A.data(), B.data(), C.data(), DIM, TILE, DIM);
+    });
+
+    // Bench Level 4 (Full Matrix - Should be fastest)
+    run_bench("gemm_512_512_512", iters, 2.0 * DIM * DIM * DIM, [&]() {
+        gemm_512_512_512(A.data(), B.data(), C.data(), DIM, DIM, DIM);
+    });
+
+    std::cout << "========================================\n";
+    return 0;
 }
 
 
@@ -119,6 +133,6 @@ void benchmark_gemm() {
 // ============================================================================
 int main() {
     benchmark_unary();
-    benchmark_gemm();
+    benchmark_binary();
     return 0;
 }

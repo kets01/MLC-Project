@@ -8,7 +8,10 @@ add_library(week3_lib
 
     # Exercise 3.2 — GEMM
     gemm_sme.cpp
-    gemm_sme.S
+    gemm_32_32_1.S
+    gemm_32_32_512.S
+    gemm_512_32_512.S
+    gemm_512_512_512.S
 )
 
 # Enable SME/SVE features
