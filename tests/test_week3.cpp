@@ -5,6 +5,7 @@
 #include <iomanip>
 #include "week3/unary.hpp"
 #include "week3/gemm_sme.hpp"
+#include "utility.hpp"
 
 
 // ------------------------------------------------------------
@@ -33,6 +34,10 @@ void print_16x16(const std::string& label, const std::vector<float>& data, int64
 const float EPS = 0.5f;
 
 TEST_CASE("SME Kernel Verification against C++ Reference", "[gemm]") {
+    if (!cpu_supports_sme()) {
+        SKIP("CPU does not support SME instructions (Likely running on M1/M2 runner).");
+    }
+
     const int64_t M = 512;
     const int64_t N = 512;
     const int64_t K = 512;
