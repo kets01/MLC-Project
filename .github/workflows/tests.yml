@@ -26,3 +26,6 @@ jobs:
 
       - name: Run Week 2 Tests
         run: ./build/src/week2/test_week2
+
+      - name: Run Week 3 Tests
+        run: ./build/src/week3/test_week3
