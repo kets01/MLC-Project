@@ -53,3 +53,19 @@ Week 3
     * **Project Evolution**: Contributed the structural changes required to 
       integrate SME kernels into the Week 3 module, ensuring compatibility with 
       the existing unary‑ops framework and CI infrastructure.
+
+
+Week 5
+------
+* **Ketsia Kemkuini**
+    * Generated runtime opcode sequences for unary kernels
+    * Adapted Week 3 SME kernels for JIT execution
+    * Built correctness tests
+    * Performed debugging and opcode validation experiments
+
+* **Mariza Yamdjeu**
+    * Designed and implemented the JIT runtime infrastructure
+    * Integrated executable memory allocation using ``MAP_JIT``
+    * Developed runtime benchmark pipeline
+
+

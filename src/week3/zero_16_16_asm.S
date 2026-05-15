@@ -12,10 +12,10 @@ SYMBOL(zero_16_16_asm):
 // x0: a (target matrix), x1: ld_a
 zero_16_16:
     smstart sm
-    ptrue   p0.s
+    ptrue   p0.s, vl16
     dup     z0.s, #0       
     mov     x2, #4         // Unroll: 4 iterations * 4 stores = 16 columns
-.loop:
+1:
     st1w    {z0.s}, p0, [x0]
     add     x3, x0, x1, lsl #2
     st1w    {z0.s}, p0, [x3]
@@ -26,6 +26,6 @@ zero_16_16:
 
     add     x0, x5, x1, lsl #2 // Jump to start of next block
     subs    x2, x2, #1
-    b.ne    .loop
+    b.ne    1b
     smstop  sm
     ret

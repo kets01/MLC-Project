@@ -27,5 +27,6 @@ include_directories(include)
 add_subdirectory(src/week1)
 add_subdirectory(src/week2)
 add_subdirectory(src/week3)
+add_subdirectory(src/week5)
 
 enable_testing()

@@ -5,6 +5,7 @@
 #include <iomanip>
 #include "week3/unary.hpp"
 #include "week3/gemm_sme.hpp"
+#include "week3/utility.hpp"
 
 
 // ------------------------------------------------------------
@@ -29,19 +30,85 @@ void print_16x16(const std::string& label, const std::vector<float>& data, int64
 // ============================================================================
 //                           TEST SUITE 1 — GEMM
 // ============================================================================
-TEST_CASE("SME GEMM 512x512x512", "[week3][gemm]") {
-    const int64_t DIM = 512;
+// Small epsilon for float comparison 
+const float EPS = 0.5f;
 
-    std::vector<float> A(DIM * DIM, 1.0f);
-    std::vector<float> B(DIM * DIM, 1.0f);
-    std::vector<float> C(DIM * DIM, 0.0f);
+TEST_CASE("SME Kernel Verification against C++ Reference", "[gemm]") {
+    if (!cpu_supports_sme()) {
+        SKIP("CPU does not support SME instructions (Likely running on M1/M2 runner).");
+    }
 
-    // A: Col-major, B: Row-major, C: Col-major
-    gemm_512_512_512(A.data(), B.data(), C.data(), DIM, DIM, DIM);
+    const int64_t M = 512;
+    const int64_t N = 512;
+    const int64_t K = 512;
 
-    // If A and B are all 1s, every element of C should be 512
-    for (int i = 0; i < 100; ++i) {
-        REQUIRE(C[i] == 512.0f);
+    // Initialize with test data
+    std::vector<float> A(M * K, 0.1f);
+    std::vector<float> B(K * N, 0.2f);
+    
+    // Fill with some gradients to catch indexing errors
+    for(size_t i=0; i<A.size(); ++i) A[i] = (float)(i % 100) * 0.01f;
+    for(size_t i=0; i<B.size(); ++i) B[i] = (float)(i % 100) * 0.01f;
+
+    SECTION("Level 1: 32x32 result, K=1") {
+        std::vector<float> C_asm(M * N, 0.0f);
+        std::vector<float> C_ref(M * N, 0.0f);
+
+        gemm_32_32_1(A.data(), B.data(), C_asm.data(), M, K, M);
+        ref_gemm_32_32_1(A.data(), B.data(), C_ref.data(), M, K, M);
+
+        for (int j = 0; j < 32; ++j) {
+            for (int i = 0; i < 32; ++i) {
+                float diff = std::abs(C_asm[j * M + i] - C_ref[j * M + i]);
+                REQUIRE(diff < EPS);
+            }
+        }
+    }
+
+    SECTION("Level 2: 32x32 result, K=512") {
+        std::vector<float> C_asm(M * N, 0.0f);
+        std::vector<float> C_ref(M * N, 0.0f);
+
+        gemm_32_32_512(A.data(), B.data(), C_asm.data(), M, K, M);
+        ref_gemm_32_32_512(A.data(), B.data(), C_ref.data(), M, K, M);
+
+        for (int j = 0; j < 32; ++j) {
+            for (int i = 0; i < 32; ++i) {
+                float diff = std::abs(C_asm[j * M + i] - C_ref[j * M + i]);
+                REQUIRE(diff < EPS);
+            }
+        }
+    }
+
+    SECTION("Level 3: 512x32 result, K=512") {
+        std::vector<float> C_asm(M * N, 0.0f);
+        std::vector<float> C_ref(M * N, 0.0f);
+
+        gemm_512_32_512(A.data(), B.data(), C_asm.data(), M, K, M);
+        ref_gemm_512_32_512(A.data(), B.data(), C_ref.data(), M, K, M);
+
+        for (int j = 0; j < 32; ++j) {
+            for (int i = 0; i < 512; ++i) {
+                float diff = std::abs(C_asm[j * M + i] - C_ref[j * M + i]);
+                REQUIRE(diff < EPS);
+            }
+        }
+    }
+
+    SECTION("Level 4: 512x512 result, K=512") {
+        std::vector<float> C_asm(M * N, 0.0f);
+        std::vector<float> C_ref(M * N, 0.0f);
+
+        gemm_512_512_512(A.data(), B.data(), C_asm.data(), M, K, M);
+        ref_gemm_512_512_512(A.data(), B.data(), C_ref.data(), M, K, M);
+
+        // Spot check the whole matrix (every 13th element to save time)
+        for (int j = 0; j < 512; j += 13) {
+            for (int i = 0; i < 512; i += 13) {
+                float diff = std::abs(C_asm[j * M + i] - C_ref[j * M + i]);
+                REQUIRE(diff < EPS);
+            }
+        }
     }
 }
 
