@@ -1,27 +1,64 @@
-
+#pragma once
 #include <sys/mman.h>
-#include <pthread.h>
 #include <vector>
 #include <cstring>
-#include <libkern/OSCacheControl.h> 
+#include <iostream>
+
+#ifdef __APPLE__
+#include <pthread.h>
+#include <libkern/OSCacheControl.h>
+#endif
 
 class JitEngine {
 public:
     template<typename FuncPtr>
     static FuncPtr generate(const std::vector<uint32_t>& opcodes) {
         size_t size = opcodes.size() * sizeof(uint32_t);
-        size = (size + 4095) & ~4095; // Page alignment
+        size = (size + 4095) & ~4095;
 
-        void* ptr = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC, 
-                         MAP_ANON | MAP_PRIVATE | MAP_JIT, -1, 0);
-        
-        if (ptr == MAP_FAILED) return nullptr;
+#ifdef __APPLE__
+        void* ptr = mmap(
+            nullptr,
+            size,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANON | MAP_JIT,
+            -1,
+            0
+        );
+#else
+        void* ptr = mmap(
+            nullptr,
+            size,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANON,
+            -1,
+            0
+        );
+#endif
 
-        pthread_jit_write_protect_np(0); // Enable Writing
-        std::memcpy(ptr, opcodes.data(), opcodes.size() * sizeof(uint32_t));
-        pthread_jit_write_protect_np(1); // Enable Executing
-        
+        if (ptr == MAP_FAILED) {
+            perror("mmap failed");
+            return nullptr;
+        }
+
+#ifdef __APPLE__
+        pthread_jit_write_protect_np(false);
+#endif
+
+        memcpy(ptr, opcodes.data(), opcodes.size()*sizeof(uint32_t));
+
+#ifdef __APPLE__
         sys_icache_invalidate(ptr, size);
+        pthread_jit_write_protect_np(true);
+#endif
+
+        if (mprotect(ptr, size, PROT_READ | PROT_EXEC) != 0) {
+            perror("mprotect failed");
+            munmap(ptr, size);
+            return nullptr;
+        }
+
+        std::cerr << "JIT mapped at " << ptr << "\n";
         return reinterpret_cast<FuncPtr>(ptr);
     }
 };

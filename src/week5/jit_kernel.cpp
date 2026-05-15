@@ -4,7 +4,7 @@
 
 std::vector<uint32_t> get_identity_jit_opcodes() {
     return {
-        0xd50343df, // smstart (both)
+        0xd50343df, // smstart
         0x25381c00, // ptrue p0.s, vl16
         0xd2000209, // mov x9, #16
         0xa5404000, // 1: ld1w {z0.s}, p0/z, [x0]
@@ -13,30 +13,30 @@ std::vector<uint32_t> get_identity_jit_opcodes() {
         0x8b230821, // add x1, x1, x3, lsl #2
         0xf1000529, // subs x9, x9, #1
         0x54ffff21, // b.ne 1b
-        0xd50342df, // smstop (both)
+        0xd50342df, // smstop
         0xd65f03c0  // ret
     };
 }
 
 std::vector<uint32_t> get_zero_jit_opcodes() {
     return {
-        0xd50343df, 0x25381c00, 0x0528c000, 0xd2000209, 
-        0xe4404000, 0x8b210800, 0xf1000529, 0x54ffff61, 
+        0xd50343df, 0x25381c00, 0x0528c000, 0xd2000209,
+        0xe4404000, 0x8b210800, 0xf1000529, 0x54ffff61,
         0xd50342df, 0xd65f03c0
     };
 }
 
 std::vector<uint32_t> get_relu_jit_opcodes() {
     return {
-        0xd50343df, 0x25381c00, 0x0528c01f, 0xd2000209, 0xa5404000, 
-        0x6520a3e0, 0xe4404020, 0x8b220800, 0x8b230821, 0xf1000529, 
+        0xd50343df, 0x25381c00, 0x0528c01f, 0xd2000209, 0xa5404000,
+        0x6520a3e0, 0xe4404020, 0x8b220800, 0x8b230821, 0xf1000529,
         0x54ffff21, 0xd50342df, 0xd65f03c0
     };
 }
 
 std::vector<uint32_t> get_gemm_jit_opcodes() {
     return {
-        0xd50343df, // smstart (CRITICAL: Must enable ZA state)
+        0xd50343df, // smstart
         0x25381c00, // ptrue p0.s, vl16
         0xd2000011, // mov x17, #0
         0xd200000f, // 1: mov x15, #0
