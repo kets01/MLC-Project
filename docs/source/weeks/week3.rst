@@ -60,9 +60,7 @@ A warm‑up phase was used to activate SME streaming mode and stabilize CPU
 frequency before timed execution.
 
 **Results (100 iterations)**
-
-*Total Time:* 1.99 s  
-*Avg Time:*   0.02 s  
-*Performance:* **13.51 GFLOPS**
+ 
+*Performance:* **1529.38 GFLOPS**
 
 
