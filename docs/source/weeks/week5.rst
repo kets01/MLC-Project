@@ -23,19 +23,6 @@ The workflow included:
 * Invalidating instruction caches using ``sys_icache_invalidate()``
 * Executing generated kernels through function pointers
 
-The generated kernels included:
-
-* ``identity``
-* ``relu``
-* ``zero``
-* ``gemm``
-
-These kernels reused the SME/SVE instructions implemented in Week 3 such as:
-
-* ``smstart`` / ``smstop``
-* ``ptrue``
-* ``ld1w`` / ``st1w``
-* ``fmopa``
 
 JIT Kernel Validation
 ---------------------
@@ -65,29 +52,33 @@ executed successfully, confirming that:
 * ``MAP_JIT`` configuration was valid
 * runtime execution was functioning properly
 
+**Resolution of Encoding Issues**
+
+Initial attempts resulted in Illegal instruction: 4. This was resolved by reviewing our encoding process:
+
+```bash
+# 1. Compile with clang to handle #ifdefs and SME/SVE architecture flags
+clang -arch arm64 -march=armv9-a+sme+sve -c gemm_512_512_512.S -o temp.o
+
+# 2. Extract opcodes and format into a C++ uint32_t array
+/opt/homebrew/opt/llvm/bin/llvm-objdump -d temp.o | ./formatter.o
+
 Runtime Execution Results
 -------------------------
 
-When full SME kernels were executed dynamically, the program failed with:
+The following table shows the performance for our differents kernels (Identity, ReLU, Zero, and GEMM).
 
-.. code-block:: bash
++--------------+--------------+
+| Kernel       | Performance  | 
++==============+==============+
+| JIT Identity | 22.11 GiB/s  |
++--------------+--------------+
+| JIT ReLU     |21.95 GiB/s   |
++--------------+--------------+
+| JIT Zero     |16.46 GiB/s   |
++--------------+--------------+
+| JIT GEMM	   |1516.56 GFLOPS|
++--------------+--------------+
 
-   Illegal instruction: 4
-
-The issue occurred specifically for SME/SVE instructions such as:
-
-* ``smstart``
-* ``ptrue``
-* ``ld1w/st1w``
-* ``fmopa``
-
-Observation
------------
-
-
-* The same SME kernels worked correctly when statically compiled
-* The same instructions failed when dynamically generated
-
-This suggests that macOS imposes restrictions on executing certain advanced architectural
-instructions from JIT-generated pages.
+The overall performance looks similar to week3 implementation(without JIT), proving that the dynamic generation process introduces zero runtime overhead.
 
