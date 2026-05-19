@@ -57,8 +57,6 @@ public:
             munmap(ptr, size);
             return nullptr;
         }
-
-        std::cerr << "JIT mapped at " << ptr << "\n";
         return reinterpret_cast<FuncPtr>(ptr);
     }
 };
