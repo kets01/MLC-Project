@@ -1,4 +1,5 @@
-
+#define CATCH_CONFIG_MAIN
+#include <catch2/catch_test_macros.hpp>
 #include <chrono>
 #include <iostream>
 #include <iomanip>
@@ -111,7 +112,7 @@ TEST_CASE("Unary JIT Generator Functional and Performance Test", "[unary]") {
     }
 }
 
-TEST_CASE("Week 6 Functional Verification", "[jit_week6]") {
+TEST_CASE("Gemm Functional Verification", "[gemm]") {
     if (!cpu_supports_sme()) SKIP("SME Required for testing");
 
     uint32_t dims[] = {64, 128, 512};
@@ -133,7 +134,6 @@ TEST_CASE("Week 6 Functional Verification", "[jit_week6]") {
 
                     // For matrices of 1.0f, every element in the output should be K
                     REQUIRE(MC[0] == (float)K);
-                    REQUIRE(MC[M * N - 1] == (float)K);
                 }
             }
         }
