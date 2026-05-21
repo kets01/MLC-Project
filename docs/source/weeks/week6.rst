@@ -37,7 +37,7 @@ reported in GiB/s (Read + Write).
 +--------------+--------------+
 
 The performance increased significantly compared to Week 5 (22 GiB/s).
-This is because larger dimensions amortize the fixed cost of the smstart and
+We believe this is because larger dimensions amortize the fixed cost of the smstart and
 smstop instructions. The peak of 433 GiB/s demonstrates the generator's ability
 to saturate the CPU's cache bandwidth.
 
