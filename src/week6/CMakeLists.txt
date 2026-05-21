@@ -1,6 +1,7 @@
 # Week 6 Library
 add_library(week6_lib
     gemm.cpp
+    Unary.cpp
 )
 
 # Enable SME/SVE features
@@ -18,4 +19,3 @@ target_link_libraries(bench_week6 PRIVATE week6_lib week3_lib)
 
 # Register the test
 add_test(NAME Week6Tests COMMAND test_week6)
-
