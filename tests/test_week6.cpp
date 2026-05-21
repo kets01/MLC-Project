@@ -1,11 +1,13 @@
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch_test_macros.hpp>
-#include <vector>
 #include <chrono>
 #include <iostream>
 #include <iomanip>
+#include "week6/gemm.hpp"
 #include "week6/Unary.h"
 #include "week3/utility.hpp" // This header contains cpu_supports_sme()
+              
+ using namespace mini_jit;
 
 TEST_CASE("Unary JIT Generator Functional and Performance Test", "[unary]") {
     mini_jit::Unary generator;
@@ -105,6 +107,34 @@ TEST_CASE("Unary JIT Generator Functional and Performance Test", "[unary]") {
                           << std::setw(8) << N 
                           << std::setw(15) << "PASSED" 
                           << std::fixed << std::setprecision(2) << gibs << std::endl;
+            }
+        }
+    }
+}
+
+TEST_CASE("Gemm Functional Verification", "[gemm]") {
+    if (!cpu_supports_sme()) SKIP("SME Required for testing");
+
+    uint32_t dims[] = {64, 128, 512};
+
+    SECTION("GEMM Primitive Verification (27 settings)") {
+        Gemm gen;
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                for (int k = 0; k < 3; ++k) {
+                    uint32_t M = dims[i];
+                    uint32_t N = dims[j];
+                    uint32_t K = dims[k];
+
+                    REQUIRE(gen.generate(M, N, K, 0, 0, 0, Gemm::dtype_t::fp32) == Gemm::error_t::success);
+                    auto kernel = gen.get_kernel();
+
+                    std::vector<float> MA(M * K, 1.0f), MB(K * N, 1.0f), MC(M * N, 0.0f);
+                    kernel(MA.data(), MB.data(), MC.data(), M, K, M);
+
+                    // For matrices of 1.0f, every element in the output should be K
+                    REQUIRE(MC[0] == (float)K);
+                }
             }
         }
     }

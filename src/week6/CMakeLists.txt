@@ -1,11 +1,12 @@
 # Week 6 Library
 add_library(week6_lib
+    gemm.cpp
     Unary.cpp
 )
 
 # Enable SME/SVE features
 if(NOT MSVC)
-    target_compile_options(week6_lib PRIVATE -march=armv9-a+sme)
+    target_compile_options(week6_lib PRIVATE -march=armv9-a+sme-f64f64)
 endif()
 
 # Test executable for Week 6

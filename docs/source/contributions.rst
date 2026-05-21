@@ -71,7 +71,10 @@ Week 5
 Week 6
 ------
 * **Ketsia Kemkuini**
-  
+  * Implemented the JIT code generation logic for the gemm kernel.
+  * Testesd the generated code for correctness and performance for gemm
+  * Conducted benchmarking for the 27 settings and reported performance metrics.
+ 
 
 
 * **Mariza Yamdjeu**

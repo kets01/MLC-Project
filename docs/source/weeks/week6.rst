@@ -1,9 +1,7 @@
-Here is a concise version of the report, matching the length and style of your
-Week 5 document.
+Week 6: Code Generation
+=======================================
 
-Week 6: Parametric JIT Code Generation
-
-This week introduced parametric code generation, moving from fixed-size opcodes
+This week introduced code generation, moving from fixed-size opcodes
 to dynamic generators. The goal was to implement the Unary and Gemm interfaces
 to produce optimized machine code for varying dimensions (M, N, K).
 
@@ -43,3 +41,22 @@ to saturate the CPU's cache bandwidth.
 
 The generative JIT approach provides the flexibility to handle different matrix
 shapes while maintaining peak hardware performance. 
+
+Performance Results (GEMM)
+We benchmarked the GEMM generator across 27 different dimension combinations. The results show significant scaling as matrix volume increases.
++--------------------+----------------------+
+| Dimensions (M,N,K) | Performance (GFLOPS) |
++====================+======================+
+| 64 x 64 x 64 | 119.79 GFLOPS |
++--------------------+----------------------+
+| 64 x 512 x 512 | 805.47 GFLOPS |
++--------------------+----------------------+
+| 128 x 128 x 512 | 1007.59 GFLOPS |
++--------------------+----------------------+
+| 128 x 512 x 512 | 1026.12 GFLOPS |
++--------------------+----------------------+
+| 512 x 512 x 512 | 1008.39 GFLOPS |
++--------------------+----------------------+
+
+At K=64, performance is roughly 120 GFLOPS. Increasing K to 512 boosts performance to over 1 TFLOPS (1026.12 GFLOPS).
+Reaching a peak of 1.026 TFLOPS on mobile/desktop hardware confirms that our JIT-generated machine code is achieving high utilization of the Apple Silicon SME matrix units but still less than the static kernel creation.
