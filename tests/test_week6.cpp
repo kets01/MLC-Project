@@ -8,11 +8,6 @@
 #include "week3/utility.hpp" // This header contains cpu_supports_sme()
 
 TEST_CASE("Unary JIT Generator Functional and Performance Test", "[unary]") {
-    // Use the correct hardware check function from your utility library
-    if (!cpu_supports_sme()) {
-        SKIP("SME/SVE Hardware not supported on this host");
-    }
-
     mini_jit::Unary generator;
     std::vector<uint32_t> sizes = {64, 128, 512};
 
@@ -21,7 +16,7 @@ TEST_CASE("Unary JIT Generator Functional and Performance Test", "[unary]") {
               << std::setw(8) << "M" 
               << std::setw(8) << "N" 
               << std::setw(15) << "Status" 
-              << "Throughput (GiB/s)" << std::endl;
+              << "Performance (GiB/s)" << std::endl;
     std::cout << std::string(60, '-') << std::endl;
 
     for (uint32_t M : sizes) {

@@ -58,7 +58,7 @@ Unary::error_t Unary::generate(uint32_t m, uint32_t n,
     emit(0xd503427f); // smstop sm: Exit Streaming mode
     emit(0xd65f03c0); // ret: Return to caller
 
-    // Generate the machine code and store it in the registry using 'this' as the key
+    // Generate the machine code and store the kernel pointer in the registry
     kernel_registry[this] = JitEngine::generate<kernel_t>(opcodes);
     
     return error_t::success;
