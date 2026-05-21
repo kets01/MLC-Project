@@ -59,6 +59,9 @@ class mini_jit::Unary {
      * @return pointer to the generated kernel.
      **/
     kernel_t get_kernel() const;
+
+    private:
+    
 };
 
 #endif

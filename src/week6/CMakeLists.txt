@@ -1,23 +1,20 @@
-cmake_minimum_required(VERSION 3.10)
-project(Week6_JIT)
+# Week 6 Library
+add_library(week6_lib
+    Unary.cpp
+)
 
-# Enable C++17
-set(CMAKE_CXX_STANDARD 17)
-
-# Compilation flags for ARMv9 SME/SVE support
+# Enable SME/SVE features
 if(NOT MSVC)
-    add_compile_options(-march=armv9-a+sme+sve)
+    target_compile_options(week6_lib PRIVATE -march=armv9-a+sme)
 endif()
 
-# Library for Week 6
-add_library(week6_lib Unary.cpp Gemm.cpp)
-# Link with Week 5 to access JitEngine
-target_link_libraries(week6_lib PRIVATE week5_lib)
+# Test executable for Week 6
+add_executable(test_week6 ../../tests/test_week6.cpp)
+target_link_libraries(test_week6 PRIVATE week6_lib week3_lib Catch2::Catch2WithMain)
 
-# Benchmark App
-add_executable(bench_week6 main_week6.cpp)
-target_link_libraries(bench_week6 PRIVATE week6_lib)
+# Benchmark executable for Week 6
+add_executable(bench_week6 ../../apps/main_week6.cpp)
+target_link_libraries(bench_week6 PRIVATE week6_lib week3_lib)
 
-# Tests
-add_executable(test_week6 test_week6.cpp)
-target_link_libraries(test_week6 PRIVATE week6_lib Catch2::Catch2WithMain)
+# Register the test
+add_test(NAME Week6Tests COMMAND test_week6)

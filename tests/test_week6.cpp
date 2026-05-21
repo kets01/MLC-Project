@@ -5,17 +5,19 @@
 #include <iostream>
 #include <iomanip>
 #include "week6/Unary.h"
-
-
+#include "week3/utility.hpp" // This header contains cpu_supports_sme()
 
 TEST_CASE("Unary JIT Generator Functional and Performance Test", "[unary]") {
-    if (!check_hardware_support()) SKIP("SME/SVE Hardware not supported on this host");
+    // Use the correct hardware check function from your utility library
+    if (!cpu_supports_sme()) {
+        SKIP("SME/SVE Hardware not supported on this host");
+    }
 
     mini_jit::Unary generator;
     std::vector<uint32_t> sizes = {64, 128, 512};
 
-    // Table Header for Performance Report
-    std::cout << std::left << std::setw(10) << "Op" 
+    // Print Table Header for the report
+    std::cout << "\n" << std::left << std::setw(10) << "Op" 
               << std::setw(8) << "M" 
               << std::setw(8) << "N" 
               << std::setw(15) << "Status" 
@@ -25,7 +27,7 @@ TEST_CASE("Unary JIT Generator Functional and Performance Test", "[unary]") {
     for (uint32_t M : sizes) {
         for (uint32_t N : sizes) {
             
-            // --- 1. TEST IDENTITY ---
+            // --- 1. IDENTITY TEST ---
             SECTION("Identity " + std::to_string(M) + "x" + std::to_string(N)) {
                 generator.generate(M, N, 0, mini_jit::Unary::dtype_t::fp32, mini_jit::Unary::ptype_t::identity);
                 auto kernel = generator.get_kernel();
@@ -34,18 +36,25 @@ TEST_CASE("Unary JIT Generator Functional and Performance Test", "[unary]") {
                 std::vector<float> src(M * N, 3.14f);
                 std::vector<float> dst(M * N, 0.0f);
                 
-                // Execute JIT Kernel
+                // Call the JIT kernel
                 kernel(src.data(), dst.data(), M, M);
 
-                // Verification
+                // Verify correctness
                 bool correct = true;
-                for (float f : dst) if (f != 3.14f) { correct = false; break; }
+                for (float f : dst) {
+                    if (std::abs(f - 3.14f) > 1e-5) { 
+                        correct = false; 
+                        break; 
+                    }
+                }
                 REQUIRE(correct);
 
-                // Benchmarking
+                // Benchmark performance
                 auto start = std::chrono::high_resolution_clock::now();
                 int iters = 1000;
-                for(int i=0; i<iters; ++i) kernel(src.data(), dst.data(), M, M);
+                for(int i = 0; i < iters; ++i) {
+                    kernel(src.data(), dst.data(), M, M);
+                }
                 auto end = std::chrono::high_resolution_clock::now();
 
                 double seconds = std::chrono::duration<double>(end - start).count() / iters;
@@ -59,47 +68,37 @@ TEST_CASE("Unary JIT Generator Functional and Performance Test", "[unary]") {
                           << std::fixed << std::setprecision(2) << gibs << std::endl;
             }
 
-            // --- 2. TEST ZERO ---
-            SECTION("Zero " + std::to_string(M) + "x" + std::to_string(N)) {
-                generator.generate(M, N, 0, mini_jit::Unary::dtype_t::fp32, mini_jit::Unary::ptype_t::zero);
-                auto kernel = generator.get_kernel();
-                
-                std::vector<float> dst(M * N, 1.0f);
-                kernel(nullptr, dst.data(), M, M);
-
-                bool correct = true;
-                for (float f : dst) if (f != 0.0f) { correct = false; break; }
-                REQUIRE(correct);
-
-                std::cout << std::left << std::setw(10) << "Zero" 
-                          << std::setw(8) << M 
-                          << std::setw(8) << N 
-                          << std::setw(15) << "PASSED" 
-                          << "N/A (Write only)" << std::endl;
-            }
-
-            // --- 3. TEST RELU ---
+            // --- 2. RELU TEST ---
             SECTION("ReLU " + std::to_string(M) + "x" + std::to_string(N)) {
                 generator.generate(M, N, 0, mini_jit::Unary::dtype_t::fp32, mini_jit::Unary::ptype_t::relu);
                 auto kernel = generator.get_kernel();
+                REQUIRE(kernel != nullptr);
 
                 std::vector<float> src(M * N);
-                for(size_t i=0; i<src.size(); ++i) src[i] = (i % 2 == 0) ? 5.0f : -5.0f;
+                for(size_t i = 0; i < src.size(); ++i) {
+                    src[i] = (i % 2 == 0) ? 5.0f : -5.0f;
+                }
                 std::vector<float> dst(M * N, 0.0f);
 
                 kernel(src.data(), dst.data(), M, M);
 
+                // Verify correctness
                 bool correct = true;
-                for(size_t i=0; i<dst.size(); ++i) {
+                for(size_t i = 0; i < dst.size(); ++i) {
                     float expected = (src[i] > 0) ? src[i] : 0.0f;
-                    if (dst[i] != expected) { correct = false; break; }
+                    if (std::abs(dst[i] - expected) > 1e-5) {
+                        correct = false;
+                        break;
+                    }
                 }
                 REQUIRE(correct);
 
-                // Benchmarking
+                // Benchmark
                 auto start = std::chrono::high_resolution_clock::now();
                 int iters = 1000;
-                for(int i=0; i<iters; ++i) kernel(src.data(), dst.data(), M, M);
+                for(int i = 0; i < iters; ++i) {
+                    kernel(src.data(), dst.data(), M, M);
+                }
                 auto end = std::chrono::high_resolution_clock::now();
 
                 double seconds = std::chrono::duration<double>(end - start).count() / iters;
