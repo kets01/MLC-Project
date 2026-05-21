@@ -47,15 +47,15 @@ We benchmarked the GEMM generator across 27 different dimension combinations. Th
 +--------------------+----------------------+
 | Dimensions (M,N,K) | Performance (GFLOPS) |
 +====================+======================+
-| 64 x 64 x 64 | 119.79 GFLOPS |
+| 64 x 64 x 64       | 119.79 GFLOPS        |
 +--------------------+----------------------+
-| 64 x 512 x 512 | 805.47 GFLOPS |
+| 64 x 512 x 512     | 805.47 GFLOPS        |
 +--------------------+----------------------+
-| 128 x 128 x 512 | 1007.59 GFLOPS |
+| 128 x 128 x 512    | 1007.59 GFLOPS       |
 +--------------------+----------------------+
-| 128 x 512 x 512 | 1026.12 GFLOPS |
+| 128 x 512 x 512    | 1026.12 GFLOPS       |
 +--------------------+----------------------+
-| 512 x 512 x 512 | 1008.39 GFLOPS |
+| 512 x 512 x 512    | 1008.39 GFLOPS       |
 +--------------------+----------------------+
 
 At K=64, performance is roughly 120 GFLOPS. Increasing K to 512 boosts performance to over 1 TFLOPS (1026.12 GFLOPS).
