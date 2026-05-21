@@ -68,4 +68,16 @@ Week 5
     * Integrated executable memory allocation using ``MAP_JIT``
     * Developed runtime benchmark pipeline
 
+Week 6
+------
+* **Ketsia Kemkuini**
+  
+
+
+* **Mariza Yamdjeu**
+  * Implemented the JIT code generation logic for the unary kernel.
+  * Testesd the generated code for correctness and performance for each unary primitive (identity, zero, relu).
+  * Conducted benchmarking for the 9 Unary kernel (primitive identity) settings and reported performance metrics in GiB/s.
+ 
+
 
