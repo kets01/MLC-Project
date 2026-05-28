@@ -1,0 +1,19 @@
+teir @transposition {
+  tensor %in  : f32
+  tensor %out : f32
+
+  axis @a extent 96  strides { in: 786432, out: 192     }
+  axis @b extent 128 strides { in: 6144,   out: 17664   }
+  axis @c extent 48  strides { in: 128,    out: 4       }
+  axis @d extent 32  strides { in: 4,      out: 2260992 }
+
+  primitive @copy : Copy axes { M: [@c], N: [@d] } metadata { data_type: f32 }
+
+  schedule {
+    roots [@iter_a]
+
+    iter @iter_a axis @a policy sequential children [@iter_b]
+    iter @iter_b axis @b policy sequential children [@inv_copy]
+    invoke @inv_copy primitive @copy
+  }
+}

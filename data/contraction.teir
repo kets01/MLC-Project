@@ -1,0 +1,25 @@
+teir @contraction {
+  tensor %in0 : f32
+  tensor %in1 : f32
+  tensor %out : f32
+
+  axis @p extent 128 strides { in0: 3145728, out: 2359296 }
+  axis @q extent 96  strides { in0: 32768,   out: 24576   }
+  axis @r extent 96  strides { in1: 65536,   out: 256,    }
+  axis @s extent 64  strides { in1: 4,       out: 4       }
+  axis @t extent 32  strides { in0: 1024,    in1: 6291456 }
+  axis @u extent 256 strides { in0: 4,       in1: 256     }
+
+  primitive @zero : Zero        axes { M: [@q], N: [@s]          } metadata { data_type: f32 }
+  primitive @gemm : Contraction axes { M: [@q], N: [@s], K: [@u] } metadata { data_type: f32 }
+
+  schedule {
+    roots [@iter_p]
+
+    iter @iter_p axis @p policy parallel   children [@iter_r]
+    iter @iter_r axis @r policy parallel   children [@iter_t]
+    iter @iter_t axis @t policy sequential children [@inv_zero, @inv_gemm] 
+    invoke @inv_zero primitive @zero  guard first(@t)
+    invoke @inv_gemm primitive @gemm
+  }
+}
