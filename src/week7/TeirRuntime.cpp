@@ -1,7 +1,6 @@
 #include "week7/TeirRuntime.h"
 #include <iostream>
 
-// Include OpenMP if the compiler supports it
 #if __has_include(<omp.h>)
 #include <omp.h>
 #define HAS_OMP 1
@@ -12,7 +11,7 @@
 namespace mini_jit::teir {
 
 TeirRuntime::TeirRuntime() {
-    // Generate Week 6 kernels for 16x16 fixed-size tiles
+    // Inner tile size is 16x16
     unary_gen.generate(16, 16, 0, Unary::dtype_t::fp32, Unary::ptype_t::identity);
     identity_kernel = unary_gen.get_kernel();
 
@@ -30,7 +29,7 @@ std::shared_ptr<Node> TeirRuntime::load_teir(const std::string& filename) {
     if (filename.find("transposition") != std::string::npos) return build_transposition_tree();
     if (filename.find("matmul") != std::string::npos) return build_matmul_tree();
     if (filename.find("contraction") != std::string::npos) return build_contraction_tree();
-    throw std::runtime_error("Unknown TEIR file: " + filename);
+    throw std::runtime_error("Unknown TEIR file");
 }
 
 void TeirRuntime::execute(Node* root, float* a, float* b, float* c) {
@@ -45,21 +44,18 @@ void TeirRuntime::traverse(Node* node, RuntimeContext& ctx) {
 
         if (iter->is_parallel && HAS_OMP) {
 #if HAS_OMP
-            // Parallelize outer loops using OpenMP
             #pragma omp parallel for schedule(static)
 #endif
             for (uint32_t i = 0; i < ax->range; ++i) {
                 RuntimeContext local_ctx = ctx;
-                // Update pointers based on the current axis stride
+                // Move pointers for this specific iteration
                 if (local_ctx.data_a) local_ctx.data_a += i * ax->stride_a;
                 if (local_ctx.data_b) local_ctx.data_b += i * ax->stride_b;
                 if (local_ctx.data_c) local_ctx.data_c += i * ax->stride_c;
                 traverse(iter->body.get(), local_ctx);
             }
         } else {
-            // Standard serial loop
             for (uint32_t i = 0; i < ax->range; ++i) {
-                // Temporary pointers to restore context after recursion
                 float* old_a = ctx.data_a; float* old_b = ctx.data_b; float* old_c = ctx.data_c;
                 
                 if (ctx.data_a) ctx.data_a += i * ax->stride_a;
@@ -68,13 +64,12 @@ void TeirRuntime::traverse(Node* node, RuntimeContext& ctx) {
                 
                 traverse(iter->body.get(), ctx);
                 
-                // Backtrack pointers for the next iteration
+                // Restore pointers for next iteration
                 ctx.data_a = old_a; ctx.data_b = old_b; ctx.data_c = old_c;
             }
         }
     } 
     else if (auto* call = dynamic_cast<Invocation*>(node)) {
-        // Innermost Leaf: Execute Week 6 JIT Kernels
         if (call->kernel_name == "identity" && identity_kernel) {
             identity_kernel(ctx.data_a, ctx.data_b, 16, 16);
         } else if (call->kernel_name == "gemm" && gemm_kernel) {
@@ -83,10 +78,11 @@ void TeirRuntime::traverse(Node* node, RuntimeContext& ctx) {
     }
 }
 
-// Builds the loop nest for Task 1: Transposition (96, 128, 48, 32)
+// Strides calculated based on Task: (96, 128, 48, 32)
 std::shared_ptr<Node> TeirRuntime::build_transposition_tree() {
-    auto a = new Axis{"a", 96, 128*48*32, 128*48*32};
-    auto b = new Axis{"b", 128, 48*32, 48*32};
+    // Kernel size is 16. Range = Dim / 16.
+    auto a = new Axis{"a", 96/16, 16*128*48*32, 16*128*48*32};
+    auto b = new Axis{"b", 128/16, 16*48*32, 16*48*32};
     auto inv = std::make_shared<Invocation>(); inv->kernel_name = "identity";
     auto lb = std::make_shared<Iteration>(); lb->axis = b; lb->body = inv;
     auto la = std::make_shared<Iteration>(); la->axis = a; la->body = lb;
@@ -94,12 +90,11 @@ std::shared_ptr<Node> TeirRuntime::build_transposition_tree() {
     return la;
 }
 
-// Builds the loop nest for Task 2: Blocked Matmul (8192^3)
 std::shared_ptr<Node> TeirRuntime::build_matmul_tree() {
-    // Basic blocking strides for M*K, K*N -> M*N
-    auto m = new Axis{"m", 512, 512, 0, 512};
-    auto n = new Axis{"n", 512, 0, 1, 1};
-    auto k = new Axis{"k", 512, 1, 512, 0};
+    // 8192^3 Matmul tiled by 16
+    auto m = new Axis{"m", 8192/16, 16*8192, 0, 16*8192};
+    auto n = new Axis{"n", 8192/16, 0, 16, 16};
+    auto k = new Axis{"k", 8192/16, 16, 16*8192, 0};
     auto inv = std::make_shared<Invocation>(); inv->kernel_name = "gemm";
     auto lk = std::make_shared<Iteration>(); lk->axis = k; lk->body = inv;
     auto ln = std::make_shared<Iteration>(); ln->axis = n; ln->body = lk;
@@ -108,26 +103,14 @@ std::shared_ptr<Node> TeirRuntime::build_matmul_tree() {
     return lm;
 }
 
-// Builds the loop nest for Task 3: Contraction
 std::shared_ptr<Node> TeirRuntime::build_contraction_tree() {
-    // Tensor Contraction: pqtu, trus -> pqrs
-    // Dimensions from task: p=128, q=96, t=96, u=64, r=32, s=256
-    
-    // We create the outer loops p and q
-    // Strides are calculated based on tensor shapes
-    auto p = new Axis{"p", 128, 96*96*64, 0, 96*32*256};
-    auto q = new Axis{"q", 96, 96*64, 0, 32*256};
-    
-    auto inv = std::make_shared<Invocation>();
-    inv->kernel_name = "gemm"; // Contraction is math-heavy, use GEMM kernel
-
-    auto lq = std::make_shared<Iteration>();
-    lq->axis = q; lq->body = inv;
-
-    auto lp = std::make_shared<Iteration>();
-    lp->axis = p; lp->body = lq;
-    lp->is_parallel = true; // Use OpenMP for the outermost axis
-
+    // Dimensions: (128, 96, 96, 64, 32, 256)
+    auto p = new Axis{"p", 128/16, 16*96*96*64, 0, 16*96*32*256};
+    auto q = new Axis{"q", 96/16, 16*96*64, 0, 16*32*256};
+    auto inv = std::make_shared<Invocation>(); inv->kernel_name = "gemm";
+    auto lq = std::make_shared<Iteration>(); lq->axis = q; lq->body = inv;
+    auto lp = std::make_shared<Iteration>(); lp->axis = p; lp->body = lq;
+    lp->is_parallel = true;
     return lp;
 }
 

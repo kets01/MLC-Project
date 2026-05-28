@@ -9,11 +9,10 @@
 
 namespace mini_jit::teir {
 
-    // Represents a dimension/loop axis
     struct Axis {
         std::string name;
         uint32_t range;
-        // Memory increments (strides) for the three data pointers
+        // Strides: How many floats to skip for each pointer when this axis increments
         uint64_t stride_a = 0;
         uint64_t stride_b = 0;
         uint64_t stride_c = 0;
@@ -23,22 +22,19 @@ namespace mini_jit::teir {
         virtual ~Node() = default;
     };
 
-    // Iteration node represents a 'for' loop
     struct Iteration : public Node {
         Axis* axis;
         std::shared_ptr<Node> body;
-        bool is_parallel = false; // OpenMP trigger
+        bool is_parallel = false;
     };
 
-    // Invocation node represents the leaf where the Week 6 kernel is called
     struct Invocation : public Node {
         std::string kernel_name;
     };
 
-    // Reusable function pointer type as required by the task
+    // Reusable function pointer type
     using CompiledKernel = std::function<void(float* a, float* b, float* c)>;
 
-    // Execution context to track the moving memory pointers
     struct RuntimeContext {
         float *data_a, *data_b, *data_c;
     };
