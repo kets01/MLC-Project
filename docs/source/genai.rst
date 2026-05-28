@@ -10,3 +10,5 @@ Usage Summary
     * Debugging: Resolving a `Segmentation Fault: 11`.
     * CI Configuration: Adapting the GitHub Actions pipeline to use native Apple Silicon runners 
     * Debugging: `SIGILL - Illegal instruction signal`
+    * Assistance in implementing recursive tree traversal for nested loops.
+    *  Troubleshooting OpenMP discovery issues in macOS/CMake environments.

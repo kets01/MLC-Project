@@ -81,6 +81,21 @@ Week 6
   * Implemented the JIT code generation logic for the unary kernel.
   * Testesd the generated code for correctness and performance for each unary primitive (identity, zero, relu).
   * Conducted benchmarking for the 9 Unary kernel (primitive identity) settings and reported performance metrics in GiB/s.
+
+Week 7
+------
+
+* **Ketsia Kemkuini**
+    * Designed the ``TeirRuntime`` recursive execution engine.
+    * Implemented the ``RuntimeContext`` for tracking data pointers across nested loops.
+    * Developed the pointer arithmetic logic for multi-dimensional data traversal.
+    * Managed the benchmarking process for Transposition and reported GiB/s performance.
+
+* **Mariza Yamdjeu**
+    * Defined the C++ structures for the TEIR Blueprint (Axis, Iteration, Invocation).
+    * Implemented the builders for the Matmul and Contraction TEIR trees.
+    * Integrated the Week 6 SME GEMM micro-kernels into the TEIR leaf nodes.
+    * Performed the GFLOPS performance analysis for the heavy math tasks.
  
 
 

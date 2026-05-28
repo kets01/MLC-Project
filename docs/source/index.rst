@@ -26,6 +26,7 @@ This documentation tracks our progress through the Machine Learning Compiler Lab
    weeks/week3
    weeks/week5
    weeks/week6
+   weeks/week7
 
 
 Team Members
