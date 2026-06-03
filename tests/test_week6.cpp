@@ -4,7 +4,7 @@
 #include <iostream>
 #include <iomanip>
 #include "week6/gemm.hpp"
-#include "week6/Unary.h"
+#include "week6/unary.hpp"
 #include "week3/utility.hpp" // This header contains cpu_supports_sme()
               
  using namespace mini_jit;

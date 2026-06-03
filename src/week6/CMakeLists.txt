@@ -2,6 +2,7 @@
 add_library(week6_lib
     gemm.cpp
     Unary.cpp
+    Instgen.cpp
 )
 
 # Enable SME/SVE features
