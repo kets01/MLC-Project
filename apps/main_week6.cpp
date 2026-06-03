@@ -4,7 +4,7 @@
 #include <chrono>
 #include <vector>
 #include <iomanip>
-#include "week6/Unary.h"
+#include "week6/unary.hpp"
 #include "week6/gemm.hpp"
 
 void run_unary_bench(uint32_t M, uint32_t N) {

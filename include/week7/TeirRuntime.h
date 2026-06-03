@@ -2,7 +2,7 @@
 #define MINI_JIT_TEIR_RUNTIME_H
 
 #include "Teir.h"
-#include "week6/Unary.h"
+#include "week6/unary.hpp"
 #include "week6/gemm.hpp"
 #include <memory>
 #include <string>
