@@ -1,7 +1,8 @@
 # Standard find for CI
 find_package(OpenMP)
 
-add_library(week7_lib TeirRuntime.cpp)
+add_library(week7_lib TeirRuntime.cpp
+                      TeirParser.cpp)
 
 # Specifically add the Homebrew paths found on Edward for local build
 target_include_directories(week7_lib PRIVATE /opt/homebrew/opt/libomp/include)

@@ -1,5 +1,5 @@
-#ifndef MINI_JIT_UNARY_H
-#define MINI_JIT_UNARY_H
+#ifndef MINI_JIT_UNARY_HPP
+#define MINI_JIT_UNARY_HPP
 
 #include <cstdint>
 

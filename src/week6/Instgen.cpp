@@ -59,10 +59,18 @@ uint32_t mini_jit::InstGen::sme_smstart_sm() {
   // MSR SVCR, #1  (SMSTART SM) 
   return 0xd503477fu;
 }
+uint32_t mini_jit::InstGen::sme_smstart_za() {
+  // MSR SVCR, #1  (SMSTART ZA) 
+  return 0xd503457fu;
+}
 
 uint32_t mini_jit::InstGen::sme_smstop_sm() {
   // MSR SVCR, #0  (SMSTOP SM)   
   return 0xd503467fu;
+}
+uint32_t mini_jit::InstGen::sme_smstop_za() {
+  // MSR SVCR, #0  (SMSTOP ZA)   
+  return 0xd503447fu;
 }
 
 uint32_t mini_jit::InstGen::sme_zero_za() {

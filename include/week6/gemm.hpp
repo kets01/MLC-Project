@@ -1,5 +1,5 @@
-#ifndef MINI_JIT_GEMM_H
-#define MINI_JIT_GEMM_H
+#ifndef MINI_JIT_GEMM_HPP
+#define MINI_JIT_GEMM_HPP
 
 #include <cstdint>
 

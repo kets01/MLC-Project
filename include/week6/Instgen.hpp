@@ -1,5 +1,5 @@
-#ifndef MINI_JIT_INSTGEN_H
-#define MINI_JIT_INSTGEN_H
+#ifndef MINI_JIT_INSTGEN_HPP
+#define MINI_JIT_INSTGEN_HPP
 
 #include <cstdint>
 #include <string>
@@ -104,10 +104,22 @@ class mini_jit::InstGen {
     static uint32_t sme_smstart_sm();
 
     /**
+     * @brief SMSTART SM  — enter Streaming SVE mode.
+     * @return instruction encoding.
+     */
+    static uint32_t sme_smstart_za();
+
+    /**
      * @brief SMSTOP SM  — exit Streaming SVE mode.
      * @return instruction encoding.
      */
     static uint32_t sme_smstop_sm();
+
+    /**
+     * @brief SMSTOP SM  — exit Streaming SVE mode.
+     * @return instruction encoding.
+     */
+    static uint32_t sme_smstop_za();
 
     /**
      * @brief ZERO {ZA}  — zero entire ZA storage.
