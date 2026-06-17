@@ -31,15 +31,20 @@ jobs:
       - name: Run Week 2 Tests
         run: ./build/src/week2/test_week2
 
+      - name: Run Norm Tests
+        run: ./build/src/norm/test_norm
+
       # ── SME-guarded (SME sections skip on M1/M2, run fully on M4) ─────────
+      # --allow-running-no-tests suppresses Catch2 exit code 4, which fires
+      # when every test case is skipped (zero assertions executed).
       - name: Run Week 3 Tests
-        run: ./build/src/week3/test_week3
+        run: ./build/src/week3/test_week3 --allow-running-no-tests
 
       - name: Run Week 5 Tests
-        run: ./build/src/week5/test_week5
+        run: ./build/src/week5/test_week5 --allow-running-no-tests
 
       - name: Run Week 6 Tests
-        run: ./build/src/week6/test_week6
+        run: ./build/src/week6/test_week6 --allow-running-no-tests
 
       - name: Run Week 7 Tests
-        run: ./build/src/week7/test_week7
+        run: ./build/src/week7/test_week7 --allow-running-no-tests

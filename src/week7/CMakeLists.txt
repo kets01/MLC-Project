@@ -1,12 +1,8 @@
-# Standard find for CI
+
 find_package(OpenMP)
 
 add_library(week7_lib TeirRuntime.cpp)
 
-# Specifically add the Homebrew paths found on Edward for local build
-target_include_directories(week7_lib PRIVATE /opt/homebrew/opt/libomp/include)
-target_link_libraries(week7_lib PRIVATE /opt/homebrew/opt/libomp/lib/libomp.dylib)
-# Enable SME/SVE features
 if(NOT MSVC)
     target_compile_options(week7_lib PRIVATE -march=armv9-a+sme)
 endif()

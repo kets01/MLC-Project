@@ -30,5 +30,6 @@ add_subdirectory(src/week3)
 add_subdirectory(src/week5)
 add_subdirectory(src/week6)
 add_subdirectory(src/week7)
+add_subdirectory(src/norm)
 
 enable_testing()
