@@ -2,10 +2,12 @@
 #include <catch2/catch_test_macros.hpp>
 #include <vector>
 #include "week7/TeirRuntime.h"
+#include "week3/utility.hpp"
 
 using namespace mini_jit::teir;
 
 TEST_CASE("TEIR Runtime Functional Verification", "[teir]") {
+    if (!cpu_supports_sme()) SKIP("SME required (identity and GEMM kernels use smstart/smstop)");
     TeirRuntime runtime;
 
     SECTION("Task 1: Transposition Verification") {

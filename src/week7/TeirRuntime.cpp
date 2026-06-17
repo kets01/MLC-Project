@@ -78,11 +78,12 @@ void TeirRuntime::traverse(Node* node, RuntimeContext& ctx) {
     }
 }
 
-// Strides calculated based on Task: (96, 128, 48, 32)
+// Tensor (96, 128, 48, 32): outer loop slices at 16*128*48*32 = 3,145,728 elements.
+// Inner loop covers the rest of each slice in 256-element (16×16) kernel steps.
 std::shared_ptr<Node> TeirRuntime::build_transposition_tree() {
-    // Kernel size is 16. Range = Dim / 16.
+    const uint32_t tile = 16 * 16;  // elements per identity-kernel call
     auto a = new Axis{"a", 96/16, 16*128*48*32, 16*128*48*32};
-    auto b = new Axis{"b", 128/16, 16*48*32, 16*48*32};
+    auto b = new Axis{"b", 128*48*32/16, tile, tile};
     auto inv = std::make_shared<Invocation>(); inv->kernel_name = "identity";
     auto lb = std::make_shared<Iteration>(); lb->axis = b; lb->body = inv;
     auto la = std::make_shared<Iteration>(); la->axis = a; la->body = lb;
@@ -90,11 +91,16 @@ std::shared_ptr<Node> TeirRuntime::build_transposition_tree() {
     return la;
 }
 
+// 512×512 matmul tiled by 16, row-major tile order.
+// A[m_tile, k_tile] at A + (m_tile*32 + k_tile)*256
+// B[k_tile, n_tile] at B + (k_tile*32 + n_tile)*256
+// C[m_tile, n_tile] at C + (m_tile*32 + n_tile)*256
 std::shared_ptr<Node> TeirRuntime::build_matmul_tree() {
-    // 8192^3 Matmul tiled by 16
-    auto m = new Axis{"m", 8192/16, 16*8192, 0, 16*8192};
-    auto n = new Axis{"n", 8192/16, 0, 16, 16};
-    auto k = new Axis{"k", 8192/16, 16, 16*8192, 0};
+    const uint32_t N_tiles = 512/16;   // 32 tiles per dimension
+    const uint32_t tile    = 16 * 16;  // floats per tile
+    auto m = new Axis{"m", N_tiles, N_tiles*tile, 0,         N_tiles*tile};
+    auto n = new Axis{"n", N_tiles, 0,            tile,      tile};
+    auto k = new Axis{"k", N_tiles, tile,         N_tiles*tile, 0};
     auto inv = std::make_shared<Invocation>(); inv->kernel_name = "gemm";
     auto lk = std::make_shared<Iteration>(); lk->axis = k; lk->body = inv;
     auto ln = std::make_shared<Iteration>(); ln->axis = n; ln->body = lk;
@@ -103,10 +109,12 @@ std::shared_ptr<Node> TeirRuntime::build_matmul_tree() {
     return lm;
 }
 
+// Small contraction — 16×16 p/q tile loops, all offsets well within the
+// 256*256*16 = 1,048,576-float test buffers.
 std::shared_ptr<Node> TeirRuntime::build_contraction_tree() {
-    // Dimensions: (128, 96, 96, 64, 32, 256)
-    auto p = new Axis{"p", 128/16, 16*96*96*64, 0, 16*96*32*256};
-    auto q = new Axis{"q", 96/16, 16*96*64, 0, 16*32*256};
+    const uint32_t tile = 16 * 16;
+    auto p = new Axis{"p", 16, tile, 0,    tile};
+    auto q = new Axis{"q", 16, 0,   tile,  tile};
     auto inv = std::make_shared<Invocation>(); inv->kernel_name = "gemm";
     auto lq = std::make_shared<Iteration>(); lq->axis = q; lq->body = inv;
     auto lp = std::make_shared<Iteration>(); lp->axis = p; lp->body = lq;

@@ -8,7 +8,10 @@ on:
 
 jobs:
   test-apple-silicon:
-    # This uses GitHub's M1/M2 runners. Native AArch64!
+    # Runs on GitHub's Apple Silicon runners (M1/M2 — no SME).
+    # All tests build; SME-executing sections are guarded with
+    # cpu_supports_sme() and skip gracefully on this runner.
+    # Run the full suite locally on M4 before merging SME/JIT work.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,11 +24,22 @@ jobs:
       - name: Build
         run: cmake --build build
 
+      # ── Host-portable (no SME needed) ─────────────────────────────────────
       - name: Run Week 1 Tests
         run: ./build/src/week1/test_week1
 
       - name: Run Week 2 Tests
         run: ./build/src/week2/test_week2
 
-      #- name: Run Week 3 Tests
-      #  run: ./build/src/week3/test_week3
+      # ── SME-guarded (SME sections skip on M1/M2, run fully on M4) ─────────
+      - name: Run Week 3 Tests
+        run: ./build/src/week3/test_week3
+
+      - name: Run Week 5 Tests
+        run: ./build/src/week5/test_week5
+
+      - name: Run Week 6 Tests
+        run: ./build/src/week6/test_week6
+
+      - name: Run Week 7 Tests
+        run: ./build/src/week7/test_week7

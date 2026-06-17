@@ -118,6 +118,7 @@ TEST_CASE("SME Kernel Verification against C++ Reference", "[gemm]") {
 //                     TEST SUITE 2 — Unary Ops (ReLU, Zero, Identity)
 // ============================================================================
 TEST_CASE("SVE Unary Kernels Verification", "[week3][unary]") {
+    if (!cpu_supports_sme()) SKIP("SME required (relu/zero/identity kernels use smstart sm)");
     const int64_t ld = 16;
     std::vector<float> A(256);
     std::vector<float> B_asm(256, 0.0f);
