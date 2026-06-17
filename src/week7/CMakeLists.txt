@@ -1,12 +1,11 @@
-# Standard find for CI
+# Hint for Homebrew libomp on macOS (no-op on CI where the path doesn't exist)
+if(APPLE AND EXISTS /opt/homebrew/opt/libomp)
+    list(APPEND CMAKE_PREFIX_PATH /opt/homebrew/opt/libomp)
+endif()
 find_package(OpenMP)
 
 add_library(week7_lib TeirRuntime.cpp)
 
-# Specifically add the Homebrew paths found on Edward for local build
-target_include_directories(week7_lib PRIVATE /opt/homebrew/opt/libomp/include)
-target_link_libraries(week7_lib PRIVATE /opt/homebrew/opt/libomp/lib/libomp.dylib)
-# Enable SME/SVE features
 if(NOT MSVC)
     target_compile_options(week7_lib PRIVATE -march=armv9-a+sme)
 endif()
