@@ -89,12 +89,12 @@ A **correct, VLA SSVE kernel** for both norms — verified against the C++ refer
 **Goal:** prove the norm module is wired into the existing build/test/CI/docs machinery, with placeholder logic.
 
 - [x] Lab foundation present (weeks 1–7 built, CI green, Catch2 + CMake + Sphinx pipeline working).
-- [ ] **Verify the baseline first — before adding anything:** on a clean checkout of the current repo, run a fresh `cmake` configure + `cmake --build` and the **full existing test suite** (weeks 1–7); confirm everything passes locally and CI is green on the untouched tree. This establishes a known-good baseline, so any breakage later is attributable to the norm work rather than inherited from the starting state.
-- [ ] Create the norm module following the per-week pattern: `src/norm/` (+ `CMakeLists.txt`), `include/norm/`, `apps/main_norm.cpp`, `tests/test_norm.cpp`; register `add_subdirectory(src/norm)` in the root `CMakeLists.txt`.
-- [ ] Placeholder reference + a trivial Catch2 test that builds and runs (host-portable, no SME yet).
-- [ ] Benchmark app stub in `apps/main_norm.cpp` that prints a GiB/s line (even on dummy data) — establishes the measurement path.
-- [ ] CI: add the norm test to `tests.yml` **in the host-runnable (non-SME) group**, so it runs on the macOS runner like week1/week2.
-- [ ] Docs: add `docs/source/project_norm.rst` (or a `weeks/`-style entry) and list it in `index.rst` — "Sprint 0: scaffold".
+- [x] **Verify the baseline first — before adding anything:** on a clean checkout of the current repo, run a fresh `cmake` configure + `cmake --build` and the **full existing test suite** (weeks 1–7); confirm everything passes locally and CI is green on the untouched tree. This establishes a known-good baseline, so any breakage later is attributable to the norm work rather than inherited from the starting state.
+- [x] Create the norm module following the per-week pattern: `src/norm/` (+ `CMakeLists.txt`), `include/norm/`, `apps/main_norm.cpp`, `tests/test_norm.cpp`; register `add_subdirectory(src/norm)` in the root `CMakeLists.txt`.
+- [x] Placeholder reference + a trivial Catch2 test that builds and runs (host-portable, no SME yet).
+- [x] Benchmark app stub in `apps/main_norm.cpp` that prints a GiB/s line (even on dummy data) — establishes the measurement path.
+- [x] CI: add the norm test to `tests.yml` **in the host-runnable (non-SME) group**, so it runs on the macOS runner like week1/week2.
+- [x] Docs: add `docs/source/project_norm.rst` (or a `weeks/`-style entry) and list it in `index.rst` — "Sprint 0: scaffold".
 - [ ] Feature branch + PR; conventional commit messages; build green.
 
 **Done when:** `cmake --build` produces `test_norm` and `main_norm`, the test passes in CI, and the docs section exists.
