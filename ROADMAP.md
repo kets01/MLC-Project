@@ -95,7 +95,7 @@ A **correct, VLA SSVE kernel** for both norms — verified against the C++ refer
 - [x] Benchmark app stub in `apps/main_norm.cpp` that prints a GiB/s line (even on dummy data) — establishes the measurement path.
 - [x] CI: add the norm test to `tests.yml` **in the host-runnable (non-SME) group**, so it runs on the macOS runner like week1/week2.
 - [x] Docs: add `docs/source/project_norm.rst` (or a `weeks/`-style entry) and list it in `index.rst` — "Sprint 0: scaffold".
-- [ ] Feature branch + PR; conventional commit messages; build green.
+- [x] Feature branch + PR; conventional commit messages; build green.
 
 **Done when:** `cmake --build` produces `test_norm` and `main_norm`, the test passes in CI, and the docs section exists.
 **Tooling:** none required (optionally try skill-creator).
