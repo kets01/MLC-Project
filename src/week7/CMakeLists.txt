@@ -1,7 +1,4 @@
-# Hint for Homebrew libomp on macOS (no-op on CI where the path doesn't exist)
-if(APPLE AND EXISTS /opt/homebrew/opt/libomp)
-    list(APPEND CMAKE_PREFIX_PATH /opt/homebrew/opt/libomp)
-endif()
+
 find_package(OpenMP)
 
 add_library(week7_lib TeirRuntime.cpp)
