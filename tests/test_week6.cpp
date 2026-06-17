@@ -10,6 +10,7 @@
  using namespace mini_jit;
 
 TEST_CASE("Unary JIT Generator Functional and Performance Test", "[unary]") {
+    if (!cpu_supports_sme()) SKIP("SME required (Unary kernels emit smstart/smstop)");
     mini_jit::Unary generator;
     std::vector<uint32_t> sizes = {64, 128, 512};
 
