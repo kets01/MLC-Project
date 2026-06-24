@@ -106,6 +106,8 @@
 - **Small, atomic commits**, one logical change each, with **conventional commit messages** (e.g.
   `feat(norm): add single-pass RMSNorm SSVE kernel`, `test(norm): add cancellation stress cases`). The git
   history should tell the story: reference → SSVE → VLA → SME ZA → JIT → TEIR → evaluation.
+- **One file per commit** — stage and commit each file individually. Never bundle multiple files into one
+  commit unless they are truly inseparable (e.g. a header and the `.cpp` that implements it).
 - **Feature branches + PR into `main`** — never commit straight to `main`. CI runs on PRs, so open the PR and
   let it go green before merging. (Natural fit for a two-person team — review each other's kernels.)
 - Commits are authored under **each author's own git identity**. **Never add a "Co-authored-by" line or any
