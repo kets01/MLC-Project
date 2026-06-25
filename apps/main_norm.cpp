@@ -5,6 +5,7 @@
 #include <numeric>
 #include <vector>
 #include "norm/norm.hpp"
+#include "week3/utility.hpp"  // cpu_supports_sme()
 
 using namespace mini_jit::norm;
 
@@ -95,7 +96,7 @@ static void print_row(const char* label, int64_t m, int64_t n,
 // ---------------------------------------------------------------------------
 
 int main() {
-    std::cout << "=== MLC-Norm Sprint 1: reference bandwidth (C++ scalar) ===\n\n";
+    std::cout << "=== MLC-Norm Sprint 2: reference vs SSVE bandwidth ===\n\n";
 
     // Roofline target
     std::cout << "Measuring peak memory bandwidth (STREAM copy)...\n";
@@ -114,6 +115,10 @@ int main() {
         { 1024, 2048},
     };
 
+    const bool have_sme = cpu_supports_sme();
+    if (!have_sme)
+        std::cout << "Note: SME not detected — rms_norm_ssve rows will be skipped.\n\n";
+
     std::cout << std::left << std::setw(22) << "kernel"
               << "  rows   feat    GiB/s  (% peak)\n";
     std::cout << std::string(60, '-') << "\n";
@@ -123,7 +128,6 @@ int main() {
         std::vector<float> a(ld * s.n), b(ld * s.n, 0.0f);
         std::vector<float> gamma(s.n, 1.0f), beta(s.n, 0.0f);
 
-        // Fill a with harmless values
         for (int64_t i = 0; i < ld * s.n; ++i)
             a[i] = static_cast<float>((i % 17) - 8) * 0.1f;
 
@@ -140,6 +144,18 @@ int main() {
                          s.m, s.n, ld, ld, 1e-5f);
         });
         print_row("rms_norm_ref  ", s.m, s.n, to_gibs(bytes, rms_sec), peak);
+
+        if (have_sme) {
+            // Warm up: one call outside the timing loop so the SME streaming
+            // region is not cold on the first timed iteration.
+            rms_norm_ssve(a.data(), b.data(), gamma.data(),
+                          s.m, s.n, ld, ld, 1e-5f);
+            double ssve_sec = bench([&]() {
+                rms_norm_ssve(a.data(), b.data(), gamma.data(),
+                              s.m, s.n, ld, ld, 1e-5f);
+            });
+            print_row("rms_norm_ssve ", s.m, s.n, to_gibs(bytes, ssve_sec), peak);
+        }
 
         std::cout << "\n";
     }
