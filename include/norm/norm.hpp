@@ -33,4 +33,17 @@ void rms_norm_ref(const float* a,
                   int64_t      ld_b,
                   float        epsilon);
 
+// LayerNorm — hand-written SSVE kernel (Sprint 2).
+// Same signature as layer_norm_ref; verified against it in tests.
+// Requires SME/streaming SVE hardware — guard with cpu_supports_sme().
+void layer_norm_ssve(const float* a,
+                     float*       b,
+                     const float* gamma,
+                     const float* beta,
+                     int64_t      m,
+                     int64_t      n,
+                     int64_t      ld_a,
+                     int64_t      ld_b,
+                     float        epsilon);
+
 } // namespace mini_jit::norm
