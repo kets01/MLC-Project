@@ -129,45 +129,61 @@ Bandwidth harness and roofline (decision E)
 2. **Norm effective bandwidth** — ``bytes = 2 × M × N × 4`` (one FP32 read +
    one FP32 write; γ/β assumed L1-resident), best-of-50 runs, for six shapes:
 
-.. list-table:: Sprint 1 — reference GiB/s (scalar C++, run on Apple M4)
+**Roofline target (STREAM-style probe, single-threaded scalar):** 10.62 GiB/s.
+This is the single-threaded scalar ceiling; the SSVE and JIT kernels will
+target the vectorised peak, which is significantly higher.
+
+.. list-table:: Sprint 1 — reference GiB/s (scalar C++, Apple M4)
    :header-rows: 1
-   :widths: 10 10 20 20
+   :widths: 10 10 20 20 20
 
    * - M (rows)
      - N (features)
      - ``layer_norm_ref`` GiB/s
      - ``rms_norm_ref`` GiB/s
+     - Notes
    * - 128
      - 64
-     - —
-     - —
+     - 1.91 (18% of peak)
+     - 3.10 (29% of peak)
+     - Small working set, fits in L1/L2
    * - 128
      - 512
-     - —
-     - —
+     - 1.66 (16% of peak)
+     - 2.47 (23% of peak)
+     -
    * - 128
      - 2048
-     - —
-     - —
+     - 1.60 (15% of peak)
+     - 2.38 (22% of peak)
+     - Row resident across passes
    * - 1024
      - 64
-     - —
-     - —
+     - 0.80 (8% of peak)
+     - 1.29 (12% of peak)
+     - More rows → more scalar loop overhead
    * - 1024
      - 512
-     - —
-     - —
+     - 0.78 (7% of peak)
+     - 1.14 (11% of peak)
+     -
    * - 1024
      - 2048
-     - —
-     - —
+     - 0.68 (6% of peak)
+     - 0.89 (8% of peak)
+     - Large tensor, pressure on caches
 
-*(Run ``./build/apps/bench_norm`` on M4 and fill in the table above.
-Peak bandwidth from the STREAM probe goes in the Sprint 1 commit.)*
+Two patterns visible in the data:
 
-The scalar reference is bandwidth-bound but far from peak — each row requires
-multiple passes over the feature axis and scalar FP ops dominate.  These
-numbers are the baseline the SSVE and JIT kernels will be measured against.
+- **RMSNorm is consistently 1.3–1.6× faster than LayerNorm** at the same
+  shape — the single-pass structure eliminates the second loop over the feature
+  axis and the mean subtraction, halving the arithmetic work.
+- **Performance degrades as M grows** — the scalar loop overhead (branch,
+  pointer arithmetic, FP divide) accumulates per row.  The SSVE kernel will
+  amortise this by processing multiple elements per cycle.
+
+The numbers sit at 6–29 % of the single-threaded STREAM ceiling.  The gap is
+the target for Sprint 2's SSVE kernel.
 
 Sprint 1 status
 ~~~~~~~~~~~~~~~
