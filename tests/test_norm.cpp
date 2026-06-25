@@ -3,6 +3,7 @@
 #include <cmath>
 #include <vector>
 #include "norm/norm.hpp"
+#include "week3/utility.hpp"
 
 using namespace mini_jit::norm;
 using Catch::Approx;
@@ -211,4 +212,145 @@ TEST_CASE("RMSNorm ref: non-square with stride", "[norm][sprint1][rmsnorm]") {
     auto ref = scalar_rms_norm(a, gamma, M, N, ld_a, 1e-5f);
 
     check_close(b, ref, M, N, ld_b);
+}
+
+// ---------------------------------------------------------------------------
+// LayerNorm SSVE kernel tests (Sprint 2)
+//
+// Every test calls layer_norm_ssve and compares its output element-by-element
+// against layer_norm_ref (the verified C++ reference from Sprint 1).
+//
+// All tests are guarded with cpu_supports_sme(): on CI (M1/M2) they are
+// skipped gracefully; on M4 they run in full.
+// ---------------------------------------------------------------------------
+
+// Helper: run both kernels and compare.
+// Accepts separate ld_a / ld_b so we can test padding.
+static void check_ssve_vs_ref(int64_t m, int64_t n, int64_t ld_a, int64_t ld_b,
+                               float epsilon,
+                               std::vector<float>& a,
+                               std::vector<float>& gamma,
+                               std::vector<float>& beta,
+                               float tol = kTol) {
+    std::vector<float> b_ref(ld_b * n, 0.0f);
+    std::vector<float> b_ssve(ld_b * n, 0.0f);
+
+    layer_norm_ref (a.data(), b_ref.data(),  gamma.data(), beta.data(),
+                    m, n, ld_a, ld_b, epsilon);
+    layer_norm_ssve(a.data(), b_ssve.data(), gamma.data(), beta.data(),
+                    m, n, ld_a, ld_b, epsilon);
+
+    for (int64_t col = 0; col < n; ++col)
+        for (int64_t row = 0; row < m; ++row)
+            REQUIRE(b_ssve[row + col * ld_b] ==
+                    Approx(b_ref[row + col * ld_b]).epsilon(tol));
+}
+
+// Case 1: N < SVL (N=4, SVL=16 on M4)
+// The main loop body never fires — only the tail path executes.
+// This tests WHILELO + tail gather/scatter in isolation.
+TEST_CASE("LayerNorm SSVE: N smaller than SVL (tail-only path)", "[norm][sprint2][ssve][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 8, N = 4, ld = M;
+    std::vector<float> gamma(N), beta(N);
+    for (int64_t i = 0; i < N; ++i) { gamma[i] = 1.0f + 0.1f * i; beta[i] = 0.05f * i; }
+    auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+        return static_cast<float>((r * 7 + c * 3) % 11) - 5.0f;
+    });
+
+    check_ssve_vs_ref(M, N, ld, ld, 1e-5f, a, gamma, beta);
+}
+
+// Case 2: N = SVL (N=16 on M4)
+// Exactly one full vector, no tail.  Tests the clean single-iteration path.
+TEST_CASE("LayerNorm SSVE: N equals SVL (no tail)", "[norm][sprint2][ssve][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 8, N = 16, ld = M;
+    std::vector<float> gamma(N), beta(N);
+    for (int64_t i = 0; i < N; ++i) { gamma[i] = 0.5f + 0.05f * i; beta[i] = -0.1f * i; }
+    auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+        return static_cast<float>((r * 11 + c * 5) % 17) - 8.0f;
+    });
+
+    check_ssve_vs_ref(M, N, ld, ld, 1e-5f, a, gamma, beta);
+}
+
+// Case 3: N = SVL + 3 (N=19 on M4)
+// One full vector iteration + a tail of 3 elements.
+// Tests that both the full-vector and tail paths run in the same row.
+TEST_CASE("LayerNorm SSVE: N = SVL + 3 (full vector + small tail)", "[norm][sprint2][ssve][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 6, N = 19, ld = M;
+    std::vector<float> gamma(N), beta(N);
+    for (int64_t i = 0; i < N; ++i) { gamma[i] = 1.0f; beta[i] = 0.0f; }
+    auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+        return static_cast<float>((r * 13 + c * 7) % 19) - 9.0f;
+    });
+
+    check_ssve_vs_ref(M, N, ld, ld, 1e-5f, a, gamma, beta);
+}
+
+// Case 4: multiple rows, N = 2*SVL + 5 (N=37 on M4)
+// Tests the outer row loop (x20/x19 row-base advancement) and
+// multiple full-vector chunks + tail within each row.
+TEST_CASE("LayerNorm SSVE: multiple rows, N = 2*SVL + 5", "[norm][sprint2][ssve][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 8, N = 37, ld = M;
+    std::vector<float> gamma(N), beta(N);
+    for (int64_t i = 0; i < N; ++i) { gamma[i] = 0.8f + 0.02f * i; beta[i] = 0.1f * i; }
+    auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+        return static_cast<float>((r * 5 + c * 11) % 23) - 11.0f;
+    });
+
+    check_ssve_vs_ref(M, N, ld, ld, 1e-5f, a, gamma, beta);
+}
+
+// Case 5: padded matrix — ld_a > M and ld_b > M
+// Tests that the column stride (stride_col_a = ld_a*4) correctly skips the
+// padding elements when ld_a != M.
+TEST_CASE("LayerNorm SSVE: padded matrix (ld_a > M, ld_b > M)", "[norm][sprint2][ssve][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 5, N = 19, ld_a = 8, ld_b = 8;
+    std::vector<float> gamma(N), beta(N);
+    for (int64_t i = 0; i < N; ++i) { gamma[i] = 1.0f + 0.1f * i; beta[i] = -0.05f * i; }
+    auto a = make_matrix(M, N, ld_a, [](int64_t r, int64_t c) {
+        return static_cast<float>((r * 9 + c * 4) % 13) - 6.0f;
+    });
+
+    check_ssve_vs_ref(M, N, ld_a, ld_b, 1e-5f, a, gamma, beta);
+}
+
+// Case 6: large-magnitude stress input
+// Values clustered around 1e4 with small variation (±5 around the DC offset).
+// The reference accumulates in double; the SSVE kernel in FP32.
+// With SHIFT=1e4, mean ≈ 1e4 and (x - mean) ≈ ±5: ~4 significant digits survive
+// after cancellation.  The absolute error in the normalized output is bounded by
+// roughly eps_float * SHIFT * inv_std ≈ 1.2e-7 * 1e4 * 0.45 ≈ 5e-4.
+// We use an ABSOLUTE margin (not relative epsilon) because some normalized values
+// are near zero, making a relative tolerance too tight for those elements.
+TEST_CASE("LayerNorm SSVE: large-magnitude stress input (stability)", "[norm][sprint2][ssve][layernorm][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 4, N = 37, ld = M;
+    const float   SHIFT   = 1e4f;
+    const float   kMargin = 1e-3f;  // absolute tolerance; wider than default kTol
+    std::vector<float> gamma(N, 1.0f), beta(N, 0.0f);
+    auto a = make_matrix(M, N, ld, [&](int64_t r, int64_t c) {
+        return SHIFT + static_cast<float>((r * 3 + c * 5) % 11) - 5.0f;
+    });
+
+    std::vector<float> b_ref (ld * N, 0.0f);
+    std::vector<float> b_ssve(ld * N, 0.0f);
+    layer_norm_ref (a.data(), b_ref.data(),  gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+    layer_norm_ssve(a.data(), b_ssve.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+
+    for (int64_t col = 0; col < N; ++col)
+        for (int64_t row = 0; row < M; ++row)
+            REQUIRE(b_ssve[row + col * ld] ==
+                    Approx(b_ref[row + col * ld]).margin(kMargin));
 }
