@@ -1,8 +1,8 @@
-add_library(norm_lib reference.cpp layer_norm_ssve.S)
+add_library(norm_lib reference.cpp layer_norm_ssve.S layer_norm_ssve.cpp)
 target_compile_options(norm_lib PRIVATE -march=armv9-a+sme)
 
 add_executable(test_norm ../../tests/test_norm.cpp)
-target_link_libraries(test_norm PRIVATE norm_lib Catch2::Catch2WithMain)
+target_link_libraries(test_norm PRIVATE norm_lib week3_lib Catch2::Catch2WithMain)
 
 add_executable(main_norm ../../apps/main_norm.cpp)
 target_link_libraries(main_norm PRIVATE norm_lib)
