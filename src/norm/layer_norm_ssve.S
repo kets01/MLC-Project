@@ -3,13 +3,23 @@
 // Formula: y = gamma * (x - mean(x)) / sqrt(var(x) + eps) + beta
 // Layout:  column-major — element [row, col] lives at  base + row + col*ld
 //
-// Three passes over each row (all using gather-load because the row is strided):
-//   Pass 1 : sum every element → divide by N → mean
-//   Pass 2 : sum (x - mean)^2  → divide by N → variance
-//   Pass 3 : (x - mean) * inv_std * gamma + beta → scatter-store to output
+// KEY INSIGHT: in column-major layout, a COLUMN is contiguous in memory.
+// Scatter-gather (LD1W with vector offsets) is NOT in the SME1 mandatory
+// SSVE subset.  We therefore vectorise ACROSS ROWS, looping OVER COLUMNS:
 //
-// VLA: SVL is queried at runtime with CNTW; WHILELO builds the tail predicate
-// so the code runs correctly on any SVL (not just 512-bit / 16 floats on M4).
+//   Outer loop: row chunks of SVL rows at a time
+//   Inner loop: all N columns
+//   Each inner load: one contiguous LD1W = SVL consecutive rows of one column
+//
+// This gives three passes per row chunk (not per row):
+//   Pass 1 : for each col, load SVL rows → accumulate into per-row sum z8
+//            → divide by N → per-row mean in z8
+//   Pass 2 : for each col, load, subtract mean, square → per-row var in z9
+//            → divide by N, add eps, sqrt, reciprocal → per-row inv_std in z5
+//   Pass 3 : for each col, load, normalise, scale (gamma), shift (beta) → store
+//
+// VLA: SVL rows are processed per outer iteration.  WHILELO builds the
+// row predicate so the code runs correctly on any SVL.
 
 #ifdef __APPLE__
     #define SYM(s) _##s          // macOS prepends an underscore to C symbols
@@ -33,33 +43,32 @@
 //  s0  = epsilon (first FP argument register)
 //
 // ─── Register map ────────────────────────────────────────────────────────────
-//  x8        SVL in FP32 elements (constant, from CNTW)
-//  x9        walking base pointer through a for the current pass
-//  x10       walking base pointer through b (pass 3)
-//  x11       column index i (steps by SVL each iteration)
-//  x12       walking pointer into gamma (pass 3)
-//  x13       walking pointer into beta  (pass 3)
-//  x14       stride_a = SVL * ld_a * 4  (bytes per vector chunk in a)
-//  x15       stride_b = SVL * ld_b * 4
-//  x16       SVL * 4  (bytes per contiguous chunk in gamma / beta)
-//  x17       loop temp  (i + SVL, reused as stride temp in pass 3)
-//  x19       b_row_base (callee-saved; row r in b starts at b_ptr + r*4)
-//  x20       a_row_base (callee-saved; row r in a starts at a_ptr + r*4)
+//  x8         SVL in FP32 elements (constant, from CNTW)
+//  x9         r_base — outer loop: first row of the current chunk
+//  x10        walking column pointer in a (inner loops)
+//  x11        col index (inner loops)
+//  x12        walking pointer in b   (pass 3)
+//  x13        walking pointer in gamma (pass 3)
+//  x14        stride_col_a = ld_a * 4  (bytes to advance to next column in a)
+//  x15        stride_col_b = ld_b * 4
+//  x16        SVL * 4 (bytes per row chunk — how far r_base advances each iter)
+//  x17        walking pointer in beta  (pass 3)
+//  x19        a_chunk_base = a + r_base*4  (callee-saved; advances each outer iter)
+//  x20        b_chunk_base = b + r_base*4  (callee-saved)
 //
-//  z4        gather offsets for a: [0, ld_a, 2*ld_a, ..., (SVL-1)*ld_a]
-//  z5        scatter offsets for b: same pattern with ld_b
-//  z6        [mean, mean, ..., mean]  — broadcast, built in pass 1
-//  z7        [inv_std, inv_std, ...]  — broadcast, built in pass 2
-//  z0-z3     data registers (reused across passes)
-//  p0        all-true predicate  (full vectors)
-//  p1        tail predicate      (last partial vector)
+//  z0         data register (reused across passes / columns)
+//  z1         gamma broadcast for current column (pass 3)
+//  z2         beta  broadcast for current column (pass 3)
+//  z4         per-row mean   (result of pass 1)
+//  z5         per-row inv_std (result of pass 2)
+//  z6         [n, n, ..., n]   — divisor for mean and variance
+//  z7         [eps, eps, ...]  — epsilon
+//  z8         per-row sum accumulator (pass 1); reused as mean after div
+//  z9         per-row var accumulator (pass 2); reused as sqrt(var+eps)
 //
-//  s16       running sum    (pass 1)
-//  s17       mean           (pass 1 result)
-//  s18       running var    (pass 2)
-//  s20       inv_std        (pass 2 result), also horizontal-add scratch
-//  s21       (float)n       — divisor for mean and variance
-//  s22       epsilon        — loaded from stack after smstart
+//  p0         all-true predicate (not used directly — p1 covers full chunks too)
+//  p1         row predicate: p1[j] = 1 iff (r_base + j) < m
+//             WHILELO makes p1 all-true for full chunks and partial for the tail
 
 SYM(layer_norm_ssve):
 
@@ -67,263 +76,203 @@ SYM(layer_norm_ssve):
 // Stack frame (48 bytes, 16-byte aligned):
 //   [sp+ 0] x29 (frame pointer)
 //   [sp+ 8] x30 (link register)
-//   [sp+16] x19 (callee-saved: b_row_base)
-//   [sp+24] x20 (callee-saved: a_row_base)
+//   [sp+16] x19 (callee-saved: a_chunk_base)
+//   [sp+24] x20 (callee-saved: b_chunk_base)
 //   [sp+32] epsilon (float, saved here before smstart)
-    stp  x29, x30, [sp, #-48]!  // push frame + return address; stack grows down
-    mov  x29, sp                 // frame pointer = current stack top
-    stp  x19, x20, [sp, #16]    // save the two callee-saved regs we will use
+    stp  x29, x30, [sp, #-48]!
+    mov  x29, sp
+    stp  x19, x20, [sp, #16]
 
-// Save epsilon BEFORE smstart.
-// s0 is the first FP argument register; entering streaming mode can alter
-// the FP/SIMD state, so we spill to memory now and reload after smstart.
+// Save epsilon BEFORE smstart — entering streaming mode can alter FP state.
     str  s0, [sp, #32]
 
 // ── Enter Streaming SVE mode ──────────────────────────────────────────────────
-// SMSTART SM turns on PSTATE.SM.  From this point we can use SVE instructions
-// with the streaming vector length (SVL).  SMSTOP SM will undo this at the end.
+// SMSTART SM activates PSTATE.SM.  From here, SVE instructions operate at
+// the streaming vector length (SVL) instead of the normal VL.
     smstart sm
 
-// ── One-time setup (computed once, valid for all rows) ────────────────────────
+// ── One-time setup ────────────────────────────────────────────────────────────
+    cntw x8                     // x8 = SVL/4 = number of 32-bit lanes per vector
 
-// CNTW: "count words" — returns SVL / 4 = number of 32-bit lanes per vector.
-// On M4: SVL = 512 bits → CNTW = 16.  On a future chip with SVL=1024: 32.
-    cntw x8                      // x8 = SVL in FP32 elements
+// stride_col_a: bytes to step from column c to column c+1 in a.
+// Column c starts at a + c*ld_a*4; the next column is ld_a floats = ld_a*4 bytes later.
+    lsl  x14, x6, #2            // x14 = ld_a * 4  (stride_col_a)
+    lsl  x15, x7, #2            // x15 = ld_b * 4  (stride_col_b)
+    lsl  x16, x8, #2            // x16 = SVL * 4   (row-chunk stride in bytes)
 
-// PTRUE P0.S: set ALL lanes of p0 to TRUE.
-// We use p0 whenever we are processing a full vector (no tail).
-    ptrue p0.s                   // p0 = 111...1 (SVL bits)
+// Reload epsilon and broadcast to all lanes (z7 = [eps, eps, ..., eps]).
+// We use DUP Zd.S, Zn.S[0] which copies lane 0 of Zn to all lanes of Zd.
+// s22 aliases z22 lane 0, so loading s22 then duplicating works.
+    ldr  s22, [x29, #32]
+    dup  z7.s, z22.s[0]         // z7 = [eps, ..., eps]
 
-// Build z4 = [0, ld_a, 2*ld_a, ..., (SVL-1)*ld_a] — gather offsets for a.
-// ld1w with 'uxtw #2' multiplies these 32-bit offsets by 4 (sizeof float),
-// turning them into byte offsets.  So z4[i] * 4 = byte distance from column 0
-// to column i along row r in a column-major matrix with leading dimension ld_a.
-    index z4.s, #0, #1           // z4 = [0, 1, 2, ..., SVL-1]
-    dup   z16.s, w6              // z16 = [ld_a, ld_a, ..., ld_a]  (32-bit broadcast)
-    mul   z4.s, p0/m, z4.s, z16.s  // z4 = [0, ld_a, 2*ld_a, ...]
+// Broadcast n as FP32 for the vector divide (z6 = [n, n, ..., n]).
+    scvtf s21, x5               // s21 = (float)n
+    dup  z6.s, z21.s[0]         // z6 = [n, ..., n]
 
-// Build z5 = [0, ld_b, 2*ld_b, ...] — same idea for the output matrix b.
-    index z5.s, #0, #1
-    dup   z17.s, w7
-    mul   z5.s, p0/m, z5.s, z17.s  // z5 = [0, ld_b, 2*ld_b, ...]
+// Initialise outer loop: process rows in chunks of SVL.
+    mov  x9,  xzr              // x9  = r_base = 0
+    mov  x19, x0               // x19 = a_chunk_base (a + 0*4 = a initially)
+    mov  x20, x1               // x20 = b_chunk_base (b + 0*4 = b initially)
 
-// stride_a: how many bytes to add to the base pointer to reach the NEXT
-// vector chunk of the same row.  Moving SVL columns to the right = SVL*ld_a
-// floats = SVL*ld_a*4 bytes.
-    lsl  x14, x6, #2             // x14 = ld_a * 4
-    mul  x14, x8, x14            // x14 = SVL * ld_a * 4  (stride_a)
+// ── Outer loop: one iteration per SVL-row chunk ───────────────────────────────
+Louter:
+    cmp  x9, x4                 // exit when r_base >= m
+    b.ge Louter_done
 
-// stride_b: same for the output.
-    lsl  x15, x7, #2
-    mul  x15, x8, x15            // x15 = SVL * ld_b * 4  (stride_b)
-
-// stride for gamma / beta: these are plain 1-D contiguous arrays.
-// Moving SVL elements right = SVL * 4 bytes.
-    lsl  x16, x8, #2             // x16 = SVL * 4  (gamma/beta stride)
-
-// Convert n to FP32 so we can divide by it (FDIV on scalar registers).
-    scvtf s21, x5                // s21 = (float)n
-
-// Reload epsilon now that we are safely in streaming mode.
-    ldr  s22, [x29, #32]        // s22 = epsilon
-
-// Set up row-base pointers.  In column-major layout, row r starts at:
-//   matrix_base + r * sizeof(float)   (i.e. offset r*4 bytes from the base).
-    mov  x20, x0                 // x20 = a_row_base  (row 0 → a_ptr + 0)
-    mov  x19, x1                 // x19 = b_row_base  (row 0 → b_ptr + 0)
-
-// ── Outer row loop ────────────────────────────────────────────────────────────
-// x4 starts at m and counts down to 0.  Each iteration handles one full row.
-Lrow_loop:
-    cbz  x4, Lrow_done           // if m == 0, nothing to do → exit
+// Build row predicate p1.
+// WHILELO p1.s, Xn, Xm sets p1[j] = 1  iff  (Xn + j) < Xm.
+// With Xn=r_base, Xm=m:
+//   full chunk (r_base + SVL <= m): p1 becomes all-ones
+//   tail chunk (r_base + SVL >  m): p1 has 1s only for rows that exist
+// Using p1 everywhere means no branch on "full vs tail" is needed.
+    whilelo p1.s, x9, x4       // p1 = row predicate for this chunk
 
 // ════════════════════════════════════════════════════════════════════════════
-// PASS 1 — compute mean(x) for this row
-// Strategy: gather-load SVL floats at a time, reduce with FADDV (horizontal
-// add), accumulate partial sums in s16.  Then divide by n.
-// ════════════════════════════════════════════════════════════════════════════
-
-    fmov  s16, wzr               // s16 = 0.0  (sum accumulator; wzr = integer 0)
-    mov   x9,  x20              // x9  = walking ptr into a, starts at row base
-    mov   x11, xzr              // x11 = column index i = 0
-
-Lp1_loop:
-// Check: are there still SVL or more columns left?  If i + SVL > n, go to tail.
-    add   x10, x11, x8          // x10 = i + SVL
-    cmp   x10, x5               // compare with n
-    b.hi  Lp1_tail              // if i+SVL > n: fewer than SVL elements remain
-
-// Gather-load: read a[row, i], a[row, i+1], ..., a[row, i+SVL-1]
-// x9 is already pointing at a_ptr + row*4 + i*ld_a*4  (the first element).
-// z4 holds [0, ld_a, 2*ld_a, ...]; 'uxtw #2' multiplies them by 4 → byte offsets.
-// So element j loads from: x9 + z4[j]*4 = a_ptr + row*4 + (i+j)*ld_a*4  ✓
-    ld1w  {z0.s}, p0/z, [x9, z4.s, uxtw #2]
-
-// FADDV: reduce all SVL active lanes of z0 to a single scalar in s20.
-    faddv s20, p0, z0.s         // s20 = z0[0] + z0[1] + ... + z0[SVL-1]
-    fadd  s16, s16, s20         // sum += s20
-
-// Advance: move base pointer right by one vector chunk (SVL columns).
-    add   x9,  x9,  x14        // x9 += stride_a
-    add   x11, x11, x8         // i  += SVL
-    b     Lp1_loop
-
-Lp1_tail:
-// Fewer than SVL elements remain (columns x11..n-1).
-// WHILELO creates a predicate where lane j is TRUE if (i + j) < n.
-// That's exactly the lanes we still need to process.
-    cmp   x11, x5               // are there any tail elements at all?
-    b.ge  Lp1_done              // if i >= n: no tail → skip
-
-    whilelo p1.s, x11, x5      // p1[j] = 1  iff  (i + j) < n
-    ld1w  {z0.s}, p1/z, [x9, z4.s, uxtw #2]  // /z: inactive lanes = 0
-    faddv s20, p1, z0.s        // sum only the active lanes
-    fadd  s16, s16, s20
-
-Lp1_done:
-// mean = sum / n
-    fdiv  s17, s16, s21         // s17 = mean
-
-// Broadcast mean to all vector lanes.
-// s17 is the low 32 bits of z17 (lane 0).  DUP copies lane 0 to every lane.
-    dup   z6.s, z17.s[0]       // z6 = [mean, mean, ..., mean]
-
-
-// ════════════════════════════════════════════════════════════════════════════
-// PASS 2 — compute variance: mean((x - mean)^2)
-// Same loop structure as pass 1, but we subtract mean first, then square.
-// ════════════════════════════════════════════════════════════════════════════
-
-    fmov  s18, wzr               // s18 = 0.0  (var_sum accumulator)
-    mov   x9,  x20              // reset walking ptr to row base
-    mov   x11, xzr              // i = 0
-
-Lp2_loop:
-    add   x10, x11, x8
-    cmp   x10, x5
-    b.hi  Lp2_tail
-
-    ld1w  {z0.s}, p0/z, [x9, z4.s, uxtw #2]
-
-// z0 = x - mean   (/m = merging; all lanes active with p0 so same as /z here)
-    fsub  z0.s, p0/m, z0.s, z6.s
-
-// z0 = (x - mean)^2   (in-place square)
-    fmul  z0.s, p0/m, z0.s, z0.s
-
-    faddv s20, p0, z0.s
-    fadd  s18, s18, s20
-
-    add   x9,  x9,  x14
-    add   x11, x11, x8
-    b     Lp2_loop
-
-Lp2_tail:
-    cmp   x11, x5
-    b.ge  Lp2_done
-
-    whilelo p1.s, x11, x5
-    ld1w  {z0.s}, p1/z, [x9, z4.s, uxtw #2]
-// /m keeps inactive lanes at their current value (0 from the /z load above).
-// That's fine: inactive lanes do not contribute to faddv.
-    fsub  z0.s, p1/m, z0.s, z6.s
-    fmul  z0.s, p1/m, z0.s, z0.s
-    faddv s20, p1, z0.s
-    fadd  s18, s18, s20
-
-Lp2_done:
-// var = var_sum / n
-    fdiv  s18, s18, s21         // s18 = variance
-
-// var + eps   (eps prevents division by zero when all inputs are identical)
-    fadd  s18, s18, s22         // s18 = var + epsilon
-
-// inv_std = 1 / sqrt(var + eps)
-    fsqrt s18, s18              // s18 = sqrt(var + epsilon)
-    fmov  s20, #1.0             // s20 = 1.0  (FP immediate)
-    fdiv  s20, s20, s18         // s20 = inv_std
-
-// Broadcast inv_std to all lanes.
-    dup   z7.s, z20.s[0]       // z7 = [inv_std, inv_std, ..., inv_std]
-
-
-// ════════════════════════════════════════════════════════════════════════════
-// PASS 3 — normalize, scale, shift, and write output
+// PASS 1 — accumulate column sums into per-row vector z8
 //
-// y[row, col] = (x[row, col] - mean) * inv_std * gamma[col] + beta[col]
-//
-// gamma and beta are contiguous 1-D arrays → plain LD1W (no gather).
-// Output b is column-major → scatter-store ST1W with z5 offsets.
+// For each column c: load SVL consecutive rows of column c (contiguous in
+// memory), add element-wise to z8.  After N columns z8[r] = sum_c a[r_base+r, c].
+// Then divide by N to get per-row mean.
 // ════════════════════════════════════════════════════════════════════════════
 
-    mov   x9,  x20              // x9  = a walking ptr  (starts at a row base)
-    mov   x10, x19              // x10 = b walking ptr  (starts at b row base)
-    mov   x12, x2               // x12 = gamma walking ptr  (gamma[0])
-    mov   x13, x3               // x13 = beta  walking ptr  (beta[0])
-    mov   x11, xzr              // i = 0
-// x16 still holds SVL*4 (gamma/beta advance per chunk) from the one-time setup.
+// FMOV Zd.S, #imm broadcasts the FP immediate to ALL lanes (unpredicated).
+    fmov z8.s, #0.0             // z8 = per-row sum accumulator = 0
 
-Lp3_loop:
-    add   x17, x11, x8          // x17 = i + SVL  (temp)
-    cmp   x17, x5
-    b.hi  Lp3_tail
+    mov  x10, x19               // x10 = walking col ptr = a_chunk_base (col 0)
+    mov  x11, xzr               // x11 = col index = 0
 
-// Load input chunk from a (column-major gather)
-    ld1w  {z0.s}, p0/z, [x9, z4.s, uxtw #2]
+Lp1col:
+    cmp  x11, x5
+    b.ge Lp1col_done
 
-// Normalize: (x - mean) * inv_std
-    fsub  z0.s, p0/m, z0.s, z6.s    // z0 = x - mean
-    fmul  z0.s, p0/m, z0.s, z7.s    // z0 = (x - mean) * inv_std  =  x_hat
+// LD1W {Zt.S}, Pg/Z, [Xn] — load SVL consecutive floats from [x10].
+// /Z means: inactive lanes (p1[j]=0) get 0, so they do not corrupt the sum.
+// x10 points at a[r_base, col]; consecutive addresses hold a[r_base+1, col], etc.
+// That is exactly the contiguous column slice we want.
+    ld1w {z0.s}, p1/z, [x10]
+    fadd z8.s, p1/m, z8.s, z0.s // z8[r] += a[r_base+r, col]
 
-// Scale: x_hat * gamma  (gamma is contiguous → simple sequential LD1W)
-    ld1w  {z1.s}, p0/z, [x12]       // z1 = gamma[i..i+SVL-1]
-    fmul  z0.s, p0/m, z0.s, z1.s    // z0 = x_hat * gamma
+    add  x10, x10, x14          // advance to next column: x10 += stride_col_a
+    add  x11, x11, #1
+    b    Lp1col
 
-// Shift: + beta
-    ld1w  {z2.s}, p0/z, [x13]       // z2 = beta[i..i+SVL-1]
-    fadd  z0.s, p0/m, z0.s, z2.s    // z0 = x_hat * gamma + beta
+Lp1col_done:
+// z8 = per-row sums.  Divide by n to get per-row mean.
+// FDIV Zdn.S, Pg/M, Zdn.S, Zm.S — destination = first source (in-place).
+// Inactive lanes (p1[j]=0) retain their current value (0 from init + /z loads).
+    fdiv z8.s, p1/m, z8.s, z6.s // z8 = sum / n = per-row mean
 
-// Scatter-store result to b (column-major)
-    st1w  {z0.s}, p0, [x10, z5.s, uxtw #2]
+// ════════════════════════════════════════════════════════════════════════════
+// PASS 2 — compute per-row variance and derive inv_std
+//
+// z9[r] = sum_c (a[r_base+r, c] - mean[r])^2  /  N
+// inv_std[r] = 1 / sqrt(z9[r] + eps)
+// ════════════════════════════════════════════════════════════════════════════
 
-// Advance all walking pointers to the next chunk.
-    add   x9,  x9,  x14        // a:     += stride_a      (SVL*ld_a*4 bytes)
-    add   x10, x10, x15        // b:     += stride_b
-    add   x12, x12, x16        // gamma: += SVL*4 bytes   (contiguous)
-    add   x13, x13, x16        // beta:  += SVL*4 bytes
-    add   x11, x11, x8         // i     += SVL
-    b     Lp3_loop
+    fmov z9.s, #0.0             // z9 = per-row variance accumulator = 0
 
-Lp3_tail:
-    cmp   x11, x5
-    b.ge  Lp3_done
+    mov  x10, x19               // reset walking col ptr
+    mov  x11, xzr
 
-    whilelo p1.s, x11, x5
+Lp2col:
+    cmp  x11, x5
+    b.ge Lp2col_done
 
-    ld1w  {z0.s}, p1/z, [x9, z4.s, uxtw #2]
-    fsub  z0.s, p1/m, z0.s, z6.s
-    fmul  z0.s, p1/m, z0.s, z7.s
-    ld1w  {z1.s}, p1/z, [x12]
-    fmul  z0.s, p1/m, z0.s, z1.s
-    ld1w  {z2.s}, p1/z, [x13]
-    fadd  z0.s, p1/m, z0.s, z2.s
-// ST1W with p1: only active lanes are stored → writes exactly n-i elements.
-    st1w  {z0.s}, p1, [x10, z5.s, uxtw #2]
+    ld1w {z0.s}, p1/z, [x10]
 
-Lp3_done:
+// Subtract per-row mean (z8) from loaded values.
+// p1/m: only active rows are updated; inactive lanes stay as loaded (0 from /z).
+    fsub z0.s, p1/m, z0.s, z8.s // z0 = x - mean
 
-// ── Advance row pointers for next iteration ───────────────────────────────────
-// Column-major: row r+1 is adjacent to row r in memory (offset +4 bytes).
-    add  x20, x20, #4           // a_row_base moves to the next row
-    add  x19, x19, #4           // b_row_base moves to the next row
-    sub  x4, x4, #1             // row counter--
-    b    Lrow_loop
+// Square in place: (x - mean)^2
+    fmul z0.s, p1/m, z0.s, z0.s
 
-Lrow_done:
+// Accumulate into variance sum.
+    fadd z9.s, p1/m, z9.s, z0.s
+
+    add  x10, x10, x14
+    add  x11, x11, #1
+    b    Lp2col
+
+Lp2col_done:
+// z9 = sum of squared deviations.  Divide by n → variance.
+    fdiv z9.s, p1/m, z9.s, z6.s // z9 = variance
+
+// Add epsilon (numerical stability for constant rows).
+    fadd z9.s, p1/m, z9.s, z7.s // z9 = var + eps
+
+// FSQRT Zd.S, Pg/M, Zn.S — vector square root.
+    fsqrt z9.s, p1/m, z9.s      // z9 = sqrt(var + eps)
+
+// Compute per-row inv_std = 1 / z9.
+// Load 1.0 into z5 (all lanes); then divide by z9.
+    fmov z5.s, #1.0             // z5 = [1.0, ..., 1.0]  (unpredicated)
+    fdiv z5.s, p1/m, z5.s, z9.s // z5 = 1 / sqrt(var + eps) = inv_std
+
+// ════════════════════════════════════════════════════════════════════════════
+// PASS 3 — normalise, scale (gamma), shift (beta), and write output
+//
+// For each column:
+//   z0 = a[r_chunk, col]
+//   z0 = (z0 - mean) * inv_std * gamma[col] + beta[col]
+//   store z0 → b[r_chunk, col]
+//
+// gamma and beta are 1-D contiguous arrays: one scalar per column.
+// We broadcast each scalar to the whole vector with LD1RW.
+// ════════════════════════════════════════════════════════════════════════════
+
+    mov  x10, x19               // x10 = walking col ptr in a
+    mov  x12, x20               // x12 = walking col ptr in b
+    mov  x13, x2                // x13 = gamma walking ptr
+    mov  x17, x3                // x17 = beta  walking ptr
+    mov  x11, xzr
+
+Lp3col:
+    cmp  x11, x5
+    b.ge Lp3col_done
+
+    ld1w {z0.s}, p1/z, [x10]   // z0 = a[r_chunk, col]
+
+// Normalise: (x - mean) * inv_std
+    fsub z0.s, p1/m, z0.s, z8.s // z0 = x - mean
+    fmul z0.s, p1/m, z0.s, z5.s // z0 = (x - mean) * inv_std = x_hat
+
+// Scale by gamma[col].
+// LD1RW {Zt.S}, Pg/Z, [Xn] loads one float from [Xn] and copies it to
+// all active lanes — a single-instruction broadcast from memory.
+    ld1rw {z1.s}, p1/z, [x13]  // z1 = [gamma[col], ..., gamma[col]]
+    fmul z0.s, p1/m, z0.s, z1.s // z0 = x_hat * gamma
+
+// Shift by beta[col].
+    ld1rw {z2.s}, p1/z, [x17]  // z2 = [beta[col], ..., beta[col]]
+    fadd z0.s, p1/m, z0.s, z2.s // z0 = x_hat * gamma + beta
+
+// Store to b[r_chunk, col] — contiguous, predicated so only active rows are written.
+    st1w {z0.s}, p1, [x12]
+
+// Advance all walking pointers to the next column.
+    add  x10, x10, x14          // a: += stride_col_a
+    add  x12, x12, x15          // b: += stride_col_b
+    add  x13, x13, #4           // gamma: += 4 bytes (one float)
+    add  x17, x17, #4           // beta:  += 4 bytes
+    add  x11, x11, #1
+    b    Lp3col
+
+Lp3col_done:
+
+// ── Advance outer loop ────────────────────────────────────────────────────────
+// Move both chunk-base pointers forward by SVL rows = SVL*4 bytes.
+    add  x19, x19, x16          // a_chunk_base += SVL*4
+    add  x20, x20, x16          // b_chunk_base += SVL*4
+    add  x9,  x9,  x8           // r_base += SVL
+    b    Louter
+
+Louter_done:
 
 // ── Epilogue ──────────────────────────────────────────────────────────────────
-    smstop sm                    // exit streaming SVE mode
+    smstop sm
 
-    ldp  x19, x20, [sp, #16]   // restore callee-saved registers
-    ldp  x29, x30, [sp], #48   // restore frame pointer + link register; unwind stack
-    ret                          // return to caller
+    ldp  x19, x20, [sp, #16]
+    ldp  x29, x30, [sp], #48
+    ret
