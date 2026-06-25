@@ -107,11 +107,11 @@ A **correct, VLA SSVE kernel** for both norms — verified against the C++ refer
 
 **Goal:** an obviously-correct reference for both norms, the verification harness, and the GiB/s measurement — everything later is judged against these.
 
-- [ ] Scalar **C++ reference**, kept deliberately simple (decision B): LayerNorm `y = γ(x−μ)/√(σ²+ε)+β` (two-pass), RMSNorm `y = γ·x/√(mean(x²)+ε)` (single-pass). γ/β are inputs.
-- [ ] **Numerical verification harness** (Catch2): compare a kernel's output to the reference within an FP32 tolerance, over several shapes — **including stability-stress inputs** (large magnitude / shifted values) that would expose single-pass cancellation (context.md §8).
-- [ ] **Bandwidth harness**: measure effective GiB/s = useful bytes (1 read + 1 write) / time, warmed up, repeated; establish the machine's **peak bandwidth** (a STREAM-style probe) as the roofline target (decision E).
-- [ ] Define the **canonical kernel signature** now that the reference exists (decision A) in `include/norm/`.
-- [ ] Tests + a first GiB/s table for the reference itself; update the Sphinx report.
+- [x] Scalar **C++ reference**, kept deliberately simple (decision B): LayerNorm `y = γ(x−μ)/√(σ²+ε)+β` (two-pass), RMSNorm `y = γ·x/√(mean(x²)+ε)` (single-pass). γ/β are inputs.
+- [x] **Numerical verification harness** (Catch2): compare a kernel's output to the reference within an FP32 tolerance, over several shapes — **including stability-stress inputs** (large magnitude / shifted values) that would expose single-pass cancellation (context.md §8).
+- [x] **Bandwidth harness**: measure effective GiB/s = useful bytes (1 read + 1 write) / time, warmed up, repeated; establish the machine's **peak bandwidth** (a STREAM-style probe) as the roofline target (decision E).
+- [x] Define the **canonical kernel signature** now that the reference exists (decision A) in `include/norm/`.
+- [x] Tests + a first GiB/s table for the reference itself; update the Sphinx report.
 
 **Done when:** both references are verified-correct and a reproducible GiB/s number exists for them, with the roofline target recorded.
 **Tooling:** none.
