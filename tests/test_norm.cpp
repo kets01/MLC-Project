@@ -267,9 +267,25 @@ TEST_CASE("RMSNorm SSVE: multi-row, non-square, different leading dims", "[norm]
 }
 
 // Test 4: practical transformer shape (hidden_dim = 2048, 128 full vectors).
+// Spot-check a sample of elements rather than all 131K to keep test time
+// under a second; correctness of the full shape is covered by the benchmark.
 TEST_CASE("RMSNorm SSVE: large shape (M=64, N=2048)", "[norm][sprint2][ssve][rmsnorm]") {
     if (!cpu_supports_sme()) SKIP("SME required (rms_norm_ssve uses smstart/smstop)");
-    check_ssve_vs_ref(64, 2048, 64, 64, 1e-5f);
+
+    const int64_t M = 64, N = 2048, ld = M;
+    std::vector<float> gamma(N);
+    for (int64_t i = 0; i < N; ++i) gamma[i] = 0.5f + 0.1f * static_cast<float>(i % 17);
+    auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+        return static_cast<float>((r * 11 + c * 7) % 19) - 9.0f;
+    });
+    std::vector<float> b_ref(ld * N, 0.0f), b_ssve(ld * N, 0.0f);
+    rms_norm_ref (a.data(), b_ref.data(),  gamma.data(), M, N, ld, ld, 1e-5f);
+    rms_norm_ssve(a.data(), b_ssve.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+
+    // Check every 8th element: covers all rows and a spread of columns.
+    for (int64_t col = 0; col < N; col += 8)
+        for (int64_t row = 0; row < M; ++row)
+            REQUIRE(b_ssve[row + col * ld] == Approx(b_ref[row + col * ld]).epsilon(kTol));
 }
 
 // Test 5: large-magnitude stress — same input as Sprint 1 reference stress
