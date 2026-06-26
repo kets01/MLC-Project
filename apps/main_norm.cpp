@@ -19,7 +19,9 @@ using Clock = std::chrono::high_resolution_clock;
 // Best-of-N filters OS jitter while showing the kernel's ceiling.
 template<typename Fn>
 static double bench(Fn fn, int reps = 50) {
-    double best = 1e18;
+    // volatile: prevents compiler from keeping `best` in a caller-saved register
+    // that gets clobbered when fn() enters/exits SME streaming mode.
+    volatile double best = 1e18;
     for (int r = 0; r < reps; ++r) {
         auto t0 = Clock::now();
         fn();
@@ -92,6 +94,26 @@ static void print_row(const char* label, int64_t m, int64_t n,
 }
 
 // ---------------------------------------------------------------------------
+// SSVE benchmark helper — must be noinline so the ABI properly saves/restores
+// all caller-saved FP registers (V0–V7, i.e. the lower bits of Z0–Z7) before
+// and after the SMSTART SM / SMSTOP SM instructions inside rms_norm_ssve.
+// When bench() is inlined into main(), the compiler can allocate local
+// variables such as `bytes` into caller-saved FP registers (d0–d7) that the
+// SMSTART/SMSTOP transition leaves undefined, silently corrupting them.
+// A non-inlined call boundary forces a proper register save/restore.
+// ---------------------------------------------------------------------------
+
+__attribute__((noinline))
+static double bench_ssve(const float* a, float* b, const float* gamma,
+                          int64_t m, int64_t n, int64_t ld, float eps) {
+    using namespace mini_jit::norm;
+    rms_norm_ssve(a, b, gamma, m, n, ld, ld, eps); // warmup
+    return bench([&]() {
+        rms_norm_ssve(a, b, gamma, m, n, ld, ld, eps);
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -146,15 +168,16 @@ int main() {
         print_row("rms_norm_ref  ", s.m, s.n, to_gibs(bytes, rms_sec), peak);
 
         if (have_sme) {
-            // Warm up: one call outside the timing loop so the SME streaming
-            // region is not cold on the first timed iteration.
-            rms_norm_ssve(a.data(), b.data(), gamma.data(),
-                          s.m, s.n, ld, ld, 1e-5f);
-            double ssve_sec = bench([&]() {
-                rms_norm_ssve(a.data(), b.data(), gamma.data(),
-                              s.m, s.n, ld, ld, 1e-5f);
-            });
-            print_row("rms_norm_ssve ", s.m, s.n, to_gibs(bytes, ssve_sec), peak);
+            double ssve_sec = bench_ssve(a.data(), b.data(), gamma.data(),
+                                          s.m, s.n, ld, 1e-5f);
+            // Reload m/n/bytes from shapes[] after bench_ssve: SMSTART/SMSTOP
+            // inside leaves caller-saved FP registers (d0-d7) undefined, and
+            // the compiler at -O2 may have kept these locals in such registers.
+            // volatile forces stack-based loads, bypassing register allocation.
+            volatile int64_t vm = s.m, vn = s.n;
+            volatile double vbytes = norm_bytes(vm, vn);
+            volatile double vgibs  = to_gibs(vbytes, ssve_sec);
+            print_row("rms_norm_ssve ", (int64_t)vm, (int64_t)vn, (double)vgibs, peak);
         }
 
         std::cout << "\n";
