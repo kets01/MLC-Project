@@ -33,4 +33,16 @@ void rms_norm_ref(const float* a,
                   int64_t      ld_b,
                   float        epsilon);
 
+// RMSNorm — hand-written Streaming SVE kernel (Sprint 2).
+// Same interface as rms_norm_ref; requires cpu_supports_sme() == true.
+// Returns immediately (no-op) when SME is absent so the caller can skip.
+void rms_norm_ssve(const float* a,
+                   float*       b,
+                   const float* gamma,
+                   int64_t      m,
+                   int64_t      n,
+                   int64_t      ld_a,
+                   int64_t      ld_b,
+                   float        epsilon);
+
 } // namespace mini_jit::norm

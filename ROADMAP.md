@@ -123,11 +123,17 @@ A **correct, VLA SSVE kernel** for both norms — verified against the C++ refer
 
 **Goal:** a correct, vectorized, **VLA** norm kernel for both norms — the MVP.
 
-- [ ] Hand-written **SSVE** kernel: predicated horizontal reduction over the feature axis (`FADDV`/`FMLA`-style, reusing week6 `InstGen` predicate registers), then elementwise normalize-scale-shift. Reduction is SSVE, **not** forced through ZA (context.md §5).
-- [ ] **VLA (decision D):** query SVL at runtime; predicated tail for feature sizes not a multiple of the vector width — arbitrary normalized-axis length.
-- [ ] Implement both norms as **separate code paths** (decision C): LayerNorm two-pass (keep the row resident between passes — decision E), RMSNorm single-pass.
-- [ ] Guard SME/streaming code paths with `cpu_supports_sme()`; the test **skips gracefully** when SME is absent (so CI stays green on M1/M2 runners) and runs fully on M4.
-- [ ] Verify both vs the reference (incl. stress inputs); first **GiB/s** numbers vs the roofline; update the report.
+**RMSNorm (Ketsia):**
+- [x] Hand-written SSVE kernel (`rms_norm_ssve.S`): column-major loop order (outer VL-row blocks, inner N columns) using `LD1W`/`LD1RW`/`ST1W` — avoids gather loads restricted in SSVE without SMEFA64.
+- [x] VLA (decision D): `WHILELO`/`INCW`/`ADDVL` outer loop; predicated tail handles any M.
+- [x] Guard with `cpu_supports_sme()`; 5 Catch2 test cases skip on CI, all pass on M4 (20 356 assertions, incl. stress inputs and mismatched leading dims).
+- [x] Verified vs reference; 18–25 GiB/s on M4 (23–32 % of scalar peak); report updated.
+
+**LayerNorm (Mariza):**
+- [ ] Hand-written SSVE kernel: two-pass (mean + variance in pass 1, normalize-scale-shift in pass 2), reduction is SSVE not ZA.
+- [ ] VLA (decision D): predicated tail for any N.
+- [ ] Guard with `cpu_supports_sme()`; Catch2 tests skip on CI, run on M4.
+- [ ] Verified vs reference (incl. stress inputs); GiB/s measured; report updated.
 
 **Done when:** both norms are correct and vectorized, measured in GiB/s on M4, with a clear gap-to-roofline noted.
 **Tooling:** none (week6 `InstGen`/`Unary` as reference).
