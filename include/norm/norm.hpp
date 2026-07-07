@@ -33,7 +33,7 @@ void rms_norm_ref(const float* a,
                   int64_t      ld_b,
                   float        epsilon);
 
-// RMSNorm — hand-written Streaming SVE kernel (Sprint 2).
+// RMSNorm — hand-written Streaming SVE kernel (Sprint 2, V0 baseline).
 // Same interface as rms_norm_ref; requires cpu_supports_sme() == true.
 // Returns immediately (no-op) when SME is absent so the caller can skip.
 void rms_norm_ssve(const float* a,
@@ -44,5 +44,35 @@ void rms_norm_ssve(const float* a,
                    int64_t      ld_a,
                    int64_t      ld_b,
                    float        epsilon);
+
+// V1: replace FSQRT+FDIV with FRSQRTE+FRSQRTS (reciprocal sqrt estimate + NR).
+void rms_norm_ssve_v1(const float* a,
+                      float*       b,
+                      const float* gamma,
+                      int64_t      m,
+                      int64_t      n,
+                      int64_t      ld_a,
+                      int64_t      ld_b,
+                      float        epsilon);
+
+// V2: V1 + pre-compute 1/N once before the outer loop (eliminates inner FDIV).
+void rms_norm_ssve_v2(const float* a,
+                      float*       b,
+                      const float* gamma,
+                      int64_t      m,
+                      int64_t      n,
+                      int64_t      ld_a,
+                      int64_t      ld_b,
+                      float        epsilon);
+
+// V3: V2 + 2x column-loop unroll in both passes.
+void rms_norm_ssve_v3(const float* a,
+                      float*       b,
+                      const float* gamma,
+                      int64_t      m,
+                      int64_t      n,
+                      int64_t      ld_a,
+                      int64_t      ld_b,
+                      float        epsilon);
 
 } // namespace mini_jit::norm
