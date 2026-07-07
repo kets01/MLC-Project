@@ -215,7 +215,7 @@ TEST_CASE("RMSNorm ref: non-square with stride", "[norm][sprint1][rmsnorm]") {
 }
 
 // ===========================================================================
-// Sprint 2 — RMSNorm SSVE kernel tests
+// Sprint 2 — RMSNorm SSVE kernel tests (V0 baseline + V1/V2/V3 ablation)
 //
 // Every test skips gracefully on M1/M2 CI runners (no SME).
 // On M4 they run fully and verify rms_norm_ssve against rms_norm_ref.
@@ -310,4 +310,110 @@ TEST_CASE("RMSNorm SSVE: large-magnitude stress input (stability)", "[norm][spri
     for (int64_t col = 0; col < N; ++col)
         for (int64_t row = 0; row < M; ++row)
             REQUIRE(b_ssve[row + col * ld] == Approx(b_ref[row + col * ld]).epsilon(kStressTol));
+}
+
+// ===========================================================================
+// Sprint 2 ablation — V1, V2, V3 correctness tests
+//
+// All three variants share the same interface as V0 and must pass the same
+// correctness and stress gates.  A generic helper drives each variant.
+// ===========================================================================
+
+using KernelFn = void(*)(const float*, float*, const float*,
+                          int64_t, int64_t, int64_t, int64_t, float);
+
+// Run kernel against rms_norm_ref on a given shape and compare within kTol.
+static void check_variant(KernelFn kernel,
+                           int64_t M, int64_t N, int64_t ld_a, int64_t ld_b,
+                           float eps) {
+    std::vector<float> gamma(N);
+    for (int64_t i = 0; i < N; ++i) gamma[i] = 0.5f + 0.1f * static_cast<float>(i % 17);
+    auto a = make_matrix(M, N, ld_a, [](int64_t r, int64_t c) {
+        return static_cast<float>((r * 11 + c * 7) % 19) - 9.0f;
+    });
+    std::vector<float> b_ref(ld_b * N, 0.0f), b_ker(ld_b * N, 0.0f);
+    rms_norm_ref(a.data(), b_ref.data(), gamma.data(), M, N, ld_a, ld_b, eps);
+    kernel(a.data(), b_ker.data(), gamma.data(), M, N, ld_a, ld_b, eps);
+    check_close(b_ker, b_ref, M, N, ld_b);
+}
+
+// Large-magnitude stress check — same input as the V0 stress test.
+// All variants use FP32 arithmetic so the tolerance stays at 5e-4.
+static void check_variant_stress(KernelFn kernel) {
+    const int64_t M = 8, N = 64, ld = M;
+    const float   SHIFT = 1e4f;
+    std::vector<float> gamma(N, 1.0f);
+    auto a = make_matrix(M, N, ld, [&](int64_t r, int64_t c) {
+        return SHIFT + static_cast<float>((r * 3 + c * 5) % 11) - 5.0f;
+    });
+    std::vector<float> b_ref(ld * N, 0.0f), b_ker(ld * N, 0.0f);
+    rms_norm_ref(a.data(), b_ref.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+    kernel(a.data(), b_ker.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+    constexpr float kStressTol = 5e-4f;
+    for (int64_t col = 0; col < N; ++col)
+        for (int64_t row = 0; row < M; ++row)
+            REQUIRE(b_ker[row + col * ld] == Approx(b_ref[row + col * ld]).epsilon(kStressTol));
+}
+
+// ---------------------------------------------------------------------------
+// V1 — FRSQRTE + FRSQRTS (no FSQRT/FDIV for inv_rms)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RMSNorm SSVE V1: small square, N multiple of VL", "[norm][sprint2][ablation][v1]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v1, 16, 32, 16, 16, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V1: N not a multiple of vector width (tail)", "[norm][sprint2][ablation][v1]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v1, 8, 50, 8, 8, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V1: large-magnitude stress input", "[norm][sprint2][ablation][v1][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant_stress(rms_norm_ssve_v1);
+}
+
+// ---------------------------------------------------------------------------
+// V2 — V1 + pre-computed 1/N (no inner vector FDIV)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RMSNorm SSVE V2: small square, N multiple of VL", "[norm][sprint2][ablation][v2]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v2, 16, 32, 16, 16, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V2: N not a multiple of vector width (tail)", "[norm][sprint2][ablation][v2]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v2, 8, 50, 8, 8, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V2: large-magnitude stress input", "[norm][sprint2][ablation][v2][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant_stress(rms_norm_ssve_v2);
+}
+
+// ---------------------------------------------------------------------------
+// V3 — V2 + 2x column-loop unroll in both passes
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RMSNorm SSVE V3: small square, N multiple of VL", "[norm][sprint2][ablation][v3]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v3, 16, 32, 16, 16, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V3: N not a multiple of vector width (tail)", "[norm][sprint2][ablation][v3]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v3, 8, 50, 8, 8, 1e-5f);
+}
+
+// Tail peel path: N=1 (single column, no pairs in the main loop).
+TEST_CASE("RMSNorm SSVE V3: N=1 (peel-only, no pairs)", "[norm][sprint2][ablation][v3]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v3, 16, 1, 16, 16, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V3: large-magnitude stress input", "[norm][sprint2][ablation][v3][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant_stress(rms_norm_ssve_v3);
 }

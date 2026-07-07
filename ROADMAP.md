@@ -128,12 +128,19 @@ A **correct, VLA SSVE kernel** for both norms — verified against the C++ refer
 - [x] VLA (decision D): `WHILELO`/`INCW`/`ADDVL` outer loop; predicated tail handles any M.
 - [x] Guard with `cpu_supports_sme()`; 5 Catch2 test cases skip on CI, all pass on M4 (20 356 assertions, incl. stress inputs and mismatched leading dims).
 - [x] Verified vs reference; 18–25 GiB/s on M4 (23–32 % of scalar peak); report updated.
+- [x] **Ablation study (V0–V3):** three kernel variants measured against the V0 baseline to isolate the performance ceiling:
+  - [x] **V1** (`rms_norm_ssve_v1.S`): replaces FSQRT + FDIV (inv_rms) with FRSQRTE + one Newton-Raphson step; halves inv_rms latency from ~24 to ~12 cycles. **Result: +6.5 % at M=128, N=2048** — the only variant with a measurable gain.
+  - [x] **V2** (`rms_norm_ssve_v2.S`): pre-computes `1/N` once (scalar FDIV before the outer loop) and replaces the per-block vector FDIV with a vector FMUL. **Result: ≈0 % — the FDIV fires once per outer block, not per element; not the bottleneck.**
+  - [x] **V3** (`rms_norm_ssve_v3.S`): adds ×2 column-loop unroll to V2 (peel-one for odd N, then pairs). **Result: ≈0 % — the M4's hardware prefetcher and OOO execution already overlap sequential column loads; branch overhead is not limiting.**
+  - [x] 10 ablation Catch2 tests (tagged `[sprint2][ablation]`); all pass on M4; ablation benchmark table added to `apps/main_norm.cpp`.
+  - **Conclusion:** kernel is bandwidth-bound at **~31–34 % of the 79.58 GiB/s vectorised peak** (best: 26.74 GiB/s, V1). The two-pass sequential structure is the structural ceiling; closing the gap further requires ZA tiling or pass-fusion (Sprint 3).
 
 **LayerNorm (Mariza):**
 - [ ] Hand-written SSVE kernel: two-pass (mean + variance in pass 1, normalize-scale-shift in pass 2), reduction is SSVE not ZA.
 - [ ] VLA (decision D): predicated tail for any N.
 - [ ] Guard with `cpu_supports_sme()`; Catch2 tests skip on CI, run on M4.
 - [ ] Verified vs reference (incl. stress inputs); GiB/s measured; report updated.
+- [ ] **Ablation study:** once V0 kernel exists, evaluate the same V1–V3 variants (FRSQRTE+NR, pre-computed 1/N, ×2 column-loop unroll); LayerNorm's two-pass structure changes the hotspot profile relative to RMSNorm — characterize separately.
 
 **Done when:** both norms are correct and vectorized, measured in GiB/s on M4, with a clear gap-to-roofline noted.
 **Tooling:** none (week6 `InstGen`/`Unary` as reference).

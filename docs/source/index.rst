@@ -28,6 +28,7 @@ This documentation tracks our progress through the Machine Learning Compiler Lab
    weeks/week6
    weeks/week7
    weeks/project_norm
+   weeks/sprint2_debug_log
 
 
 Team Members

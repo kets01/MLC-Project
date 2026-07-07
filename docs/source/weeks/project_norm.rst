@@ -374,8 +374,220 @@ Sprint 2 status
 - **Benchmark:** numbers in table above, measured on M4.
 - **LayerNorm SSVE:** pending (to be contributed by colleague).
 
+Sprint 2b — RMSNorm SSVE optimization ablation
+-----------------------------------------------
+
+**Goal:** identify the performance ceiling of the hand-written SSVE kernel and
+attribute each potential gain to one isolated change.  Three variants (V1–V3)
+are evaluated against the V0 baseline using a controlled ablation — one change
+per variant — so every delta is attributable.
+
+Process
+~~~~~~~
+
+All four kernels share the same two-pass column-major structure.  Each variant
+introduces exactly one modification relative to the previous:
+
+.. list-table:: Ablation variant definitions
+   :header-rows: 1
+   :widths: 12 30 40
+
+   * - Variant
+     - Change
+     - Motivation
+   * - **V0** (baseline)
+     - ``FSQRT Z2.S`` + ``FMOV Z4.S, #1.0`` + ``FDIV Z4.S, P1/M, Z4.S, Z2.S``
+     - Reference hand-written kernel; inv_rms costs ~24 cycles (sqrt + reciprocal).
+   * - **V1**
+     - Replace inv_rms with ``FRSQRTE`` + one Newton-Raphson step (``FRSQRTS``)
+     - ``FRSQRTE`` estimates ``1/√x`` in one cycle; one NR refinement reaches
+       full FP32 accuracy in ~12 cycles total — half the V0 latency.
+   * - **V2**
+     - Pre-compute ``1/N`` as a scalar ``FDIV`` once before the outer loop;
+       broadcast to Z5; replace the per-block vector ``FDIV`` with ``FMUL Z2.S, P1/M, Z2.S, Z5.S``
+     - The vector FDIV in V0/V1 runs once per block of VL rows, not once per
+       element.  Moving it outside amortises a ~12-cycle divide over all M/VL
+       iterations.
+   * - **V3**
+     - ×2 unroll of both column loops (peel one column when N is odd; main loop
+       processes pairs with two back-to-back ``LD1W``/``FMLA`` or ``FMUL``/``ST1W``)
+     - Halves the branch count; lets the out-of-order core overlap two
+       independent memory streams per iteration.
+
+The Newton-Raphson sequence for ``1/√a`` (V1 onward):
+
+.. code-block:: asm
+
+    frsqrte z4.s, z2.s          // estimate: e ≈ 1/√a  (one cycle)
+    fmul    z3.s, z4.s, z2.s   // t = e·a
+    frsqrts z3.s, z4.s, z3.s   // correction: c = (3 − e·t) / 2
+    fmul    z4.s, p1/m, z4.s, z3.s  // refined: inv_rms = e·c
+
+``FRSQRTE`` and ``FRSQRTS`` are unpredicated; the ``SEL`` before them fills
+inactive lanes with ``eps`` so no ``+inf`` or NaN propagates to active output
+lanes.
+
+Expectations
+~~~~~~~~~~~~
+
+Before measuring, the predicted gains were:
+
+- **V1:** 15–25 % — inv_rms sits on the critical path between pass 1 and pass 2;
+  halving its latency should be visible for small M where few outer iterations
+  amortise the latency.
+- **V2:** 5–10 % — FDIV fires once per block, not per element; moving it out of
+  the loop saves a small but real cost, especially at large M.
+- **V3:** 5–10 % — branch overhead is measurable for small N; unrolling should
+  help the prefetcher overlap two column streams.
+
+Findings
+~~~~~~~~
+
+**Roofline: 79.58 GiB/s** (STREAM-style probe, re-measured for this run).
+
+.. list-table:: Sprint 2b — RMSNorm SSVE ablation (Apple M4, SVL = 512 bits)
+   :header-rows: 1
+   :widths: 22 10 10 14 12 14
+
+   * - Variant
+     - M
+     - N
+     - GiB/s
+     - % of peak
+     - vs V0
+   * - V0 (FSQRT+FDIV)
+     - 128
+     - 64
+     - 17.77
+     - 22.3 %
+     - baseline
+   * - V1 (FRSQRTE+NR)
+     - 128
+     - 64
+     - 17.95
+     - 22.6 %
+     - +1.0 %
+   * - V2 (V1 + inv_N)
+     - 128
+     - 64
+     - 17.70
+     - 22.2 %
+     - −0.4 %
+   * - V3 (V2 + unroll-2)
+     - 128
+     - 64
+     - 17.78
+     - 22.3 %
+     - +0.1 %
+   * - V0 (FSQRT+FDIV)
+     - 128
+     - 2048
+     - 25.11
+     - 31.6 %
+     - baseline
+   * - V1 (FRSQRTE+NR)
+     - 128
+     - 2048
+     - 26.74
+     - 33.6 %
+     - **+6.5 %**
+   * - V2 (V1 + inv_N)
+     - 128
+     - 2048
+     - 25.12
+     - 31.6 %
+     - +0.1 %
+   * - V3 (V2 + unroll-2)
+     - 128
+     - 2048
+     - 24.96
+     - 31.4 %
+     - −0.6 %
+   * - V0 (FSQRT+FDIV)
+     - 1024
+     - 2048
+     - 24.75
+     - 31.1 %
+     - baseline
+   * - V1 (FRSQRTE+NR)
+     - 1024
+     - 2048
+     - 24.98
+     - 31.4 %
+     - +0.9 %
+   * - V2 (V1 + inv_N)
+     - 1024
+     - 2048
+     - 25.01
+     - 31.4 %
+     - +1.0 %
+   * - V3 (V2 + unroll-2)
+     - 1024
+     - 2048
+     - 25.10
+     - 31.6 %
+     - +1.4 %
+
+**Interpretation:**
+
+- **V1 wins only at M=128, N=2048 (+6.5 %).** The inv_rms computation is on the
+  critical path between pass 1 and pass 2.  At M=128 there are only 8 outer
+  iterations (128 / VL=16), so the ~12-cycle latency saving is a meaningful
+  fraction of total time.  At M=1024 (64 outer iterations) the same saving
+  amortises to noise.
+
+- **V1 shows no gain for small N (N=64).** With only 64 columns the column loops
+  are very short; the kernel spends a larger fraction of time in setup and
+  ``SMSTART``/``SMSTOP`` overhead.  inv_rms latency is a smaller share of total
+  time.
+
+- **V2 shows near-zero gain everywhere.** The vector FDIV in V0/V1 fires once per
+  outer block (once per VL rows), not once per element.  For M=128, N=2048 it
+  fires 8 times across 2048 column iterations — already well amortised.  Moving
+  it out of the loop saves almost nothing; the added setup (SMSTART, eps reload,
+  1/N computation) partially cancels the saving.
+
+- **V3 shows no gain.** The M4's hardware prefetcher and out-of-order execution
+  already overlap sequential column loads in the non-unrolled loops.  The extra
+  branch logic for the odd-N peel and the more complex loop body add marginal
+  overhead.
+
+- **Structural ceiling:** all variants plateau at **~31–34 % of the 79.58 GiB/s
+  vectorised peak**.  The bottleneck is not inv_rms computation, nor branch
+  overhead — it is the **two-pass column-major loop pattern** itself.  Both
+  passes traverse all N columns sequentially; the memory system cannot hide the
+  second read of the A matrix.  Closing the gap requires pass fusion (keeping the
+  row resident in registers or the ZA accumulator between the two passes), which
+  is the target of Sprint 3's JIT/ZA-tiled kernel.
+
+**Key implementation lesson — SMSTART zeroes all Z registers:**
+``SMSTART SM`` on the Apple M4 zeroes Z0–Z31 (and therefore D0–D15) on entry to
+streaming mode.  Any value held in a Z/D register before ``SMSTART`` is lost.
+This had two consequences during development (see the debug log):
+
+1. ``eps`` was saved in S8 (a scalar alias of Z8) before ``SMSTART``; after
+   ``SMSTART`` it read as 0.0 → the inv_rms denominator became 0 → ``FRSQRTE(0) = +∞``
+   → NaN output.  Fix: reload ``eps`` from its D8 stack slot immediately after
+   ``SMSTART`` and re-broadcast into Z8.
+2. The ``1/N`` pre-computation in V2/V3 was done before ``SMSTART`` into S0 (Z0.S[0]);
+   after ``SMSTART``, the ``DUP Z5.S, Z0.S[0]`` broadcast 0.  Fix: move the scalar
+   ``FDIV`` and ``DUP`` to after ``SMSTART``.
+
+Sprint 2b status
+~~~~~~~~~~~~~~~~
+
+- **Kernels:** ``src/norm/rms_norm_ssve_v1.S``, ``v2.S``, ``v3.S`` — all
+  correct, verified, and committed.
+- **Tests:** 10 ablation Catch2 cases (tagged ``[sprint2][ablation]``), all green
+  on M4; skip on CI.
+- **Benchmark:** ablation table printed by ``./build/apps/main_norm``; all four
+  variants run in sequence under a single streaming region per shape.
+- **Best result:** 26.74 GiB/s (V1, M=128, N=2048) = 33.6 % of vectorised peak.
+- **LayerNorm SSVE ablation:** to be done after the LayerNorm V0 kernel is written.
+
 Next
 ~~~~
 
-Sprint 2: hand-written SSVE kernel for both norms — VLA, predicated tails,
-verified against this reference, and measured vs the roofline.
+Sprint 2 (LayerNorm): hand-written SSVE kernel for LayerNorm — two-pass,
+VLA, predicated tails, verified against the reference, measured vs the
+roofline; followed by the same V1–V3 ablation.

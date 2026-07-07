@@ -94,39 +94,72 @@ static void print_row(const char* label, int64_t m, int64_t n,
 }
 
 // ---------------------------------------------------------------------------
-// SSVE benchmark helper — must be noinline so the ABI properly saves/restores
-// all caller-saved FP registers (V0–V7, i.e. the lower bits of Z0–Z7) before
-// and after the SMSTART SM / SMSTOP SM instructions inside rms_norm_ssve.
-// When bench() is inlined into main(), the compiler can allocate local
-// variables such as `bytes` into caller-saved FP registers (d0–d7) that the
-// SMSTART/SMSTOP transition leaves undefined, silently corrupting them.
-// A non-inlined call boundary forces a proper register save/restore.
+// SSVE benchmark helpers — all noinline for the same reason as bench_ssve:
+// SMSTART/SMSTOP leaves caller-saved FP registers (d0-d7) undefined, so a
+// proper call boundary is required to force save/restore.
 // ---------------------------------------------------------------------------
 
 __attribute__((noinline))
 static double bench_ssve(const float* a, float* b, const float* gamma,
                           int64_t m, int64_t n, int64_t ld, float eps) {
     using namespace mini_jit::norm;
-    rms_norm_ssve(a, b, gamma, m, n, ld, ld, eps); // warmup
-    return bench([&]() {
-        rms_norm_ssve(a, b, gamma, m, n, ld, ld, eps);
-    });
+    rms_norm_ssve(a, b, gamma, m, n, ld, ld, eps);
+    return bench([&]() { rms_norm_ssve(a, b, gamma, m, n, ld, ld, eps); });
+}
+
+__attribute__((noinline))
+static double bench_ssve_v1(const float* a, float* b, const float* gamma,
+                             int64_t m, int64_t n, int64_t ld, float eps) {
+    using namespace mini_jit::norm;
+    rms_norm_ssve_v1(a, b, gamma, m, n, ld, ld, eps);
+    return bench([&]() { rms_norm_ssve_v1(a, b, gamma, m, n, ld, ld, eps); });
+}
+
+__attribute__((noinline))
+static double bench_ssve_v2(const float* a, float* b, const float* gamma,
+                             int64_t m, int64_t n, int64_t ld, float eps) {
+    using namespace mini_jit::norm;
+    rms_norm_ssve_v2(a, b, gamma, m, n, ld, ld, eps);
+    return bench([&]() { rms_norm_ssve_v2(a, b, gamma, m, n, ld, ld, eps); });
+}
+
+__attribute__((noinline))
+static double bench_ssve_v3(const float* a, float* b, const float* gamma,
+                             int64_t m, int64_t n, int64_t ld, float eps) {
+    using namespace mini_jit::norm;
+    rms_norm_ssve_v3(a, b, gamma, m, n, ld, ld, eps);
+    return bench([&]() { rms_norm_ssve_v3(a, b, gamma, m, n, ld, ld, eps); });
 }
 
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
+// Ablation row: prints GiB/s and % delta vs V0 baseline.
+static void print_ablation_row(const char* label, int64_t m, int64_t n,
+                                double gibs, double peak, double v0_gibs) {
+    double delta_pct = (v0_gibs > 0.0) ? (gibs / v0_gibs - 1.0) * 100.0 : 0.0;
+    std::cout << std::left  << std::setw(24) << label
+              << "  M=" << std::setw(5) << m
+              << "  N=" << std::setw(5) << n
+              << "  " << std::fixed << std::setprecision(2) << std::setw(7) << gibs
+              << " GiB/s"
+              << "  (" << std::setprecision(1) << (100.0 * gibs / peak) << "% peak)";
+    if (v0_gibs > 0.0) {
+        std::cout << "  " << (delta_pct >= 0 ? "+" : "") << std::setprecision(1)
+                  << delta_pct << "% vs V0";
+    }
+    std::cout << "\n";
+}
+
 int main() {
     std::cout << "=== MLC-Norm Sprint 2: reference vs SSVE bandwidth ===\n\n";
 
-    // Roofline target
     std::cout << "Measuring peak memory bandwidth (STREAM copy)...\n";
     double peak = measure_peak_bandwidth();
     std::cout << std::fixed << std::setprecision(2)
               << "  Peak bandwidth: " << peak << " GiB/s\n\n";
 
-    // Shapes to benchmark: (M rows, N feature-dim)
     struct Shape { int64_t m, n; };
     const Shape shapes[] = {
         {  128,   64},
@@ -139,20 +172,22 @@ int main() {
 
     const bool have_sme = cpu_supports_sme();
     if (!have_sme)
-        std::cout << "Note: SME not detected — rms_norm_ssve rows will be skipped.\n\n";
+        std::cout << "Note: SME not detected — SSVE rows will be skipped.\n\n";
 
+    // -----------------------------------------------------------------------
+    // Section 1: reference vs V0 baseline (existing table)
+    // -----------------------------------------------------------------------
+    std::cout << "--- Reference vs V0 baseline ---\n";
     std::cout << std::left << std::setw(22) << "kernel"
               << "  rows   feat    GiB/s  (% peak)\n";
-    std::cout << std::string(60, '-') << "\n";
+    std::cout << std::string(62, '-') << "\n";
 
     for (const auto& s : shapes) {
-        const int64_t ld = s.m; // packed column-major, no padding
+        const int64_t ld = s.m;
         std::vector<float> a(ld * s.n), b(ld * s.n, 0.0f);
         std::vector<float> gamma(s.n, 1.0f), beta(s.n, 0.0f);
-
         for (int64_t i = 0; i < ld * s.n; ++i)
             a[i] = static_cast<float>((i % 17) - 8) * 0.1f;
-
         double bytes = norm_bytes(s.m, s.n);
 
         double ln_sec = bench([&]() {
@@ -162,24 +197,69 @@ int main() {
         print_row("layer_norm_ref", s.m, s.n, to_gibs(bytes, ln_sec), peak);
 
         double rms_sec = bench([&]() {
-            rms_norm_ref(a.data(), b.data(), gamma.data(),
-                         s.m, s.n, ld, ld, 1e-5f);
+            rms_norm_ref(a.data(), b.data(), gamma.data(), s.m, s.n, ld, ld, 1e-5f);
         });
         print_row("rms_norm_ref  ", s.m, s.n, to_gibs(bytes, rms_sec), peak);
 
         if (have_sme) {
             double ssve_sec = bench_ssve(a.data(), b.data(), gamma.data(),
                                           s.m, s.n, ld, 1e-5f);
-            // Reload m/n/bytes from shapes[] after bench_ssve: SMSTART/SMSTOP
-            // inside leaves caller-saved FP registers (d0-d7) undefined, and
-            // the compiler at -O2 may have kept these locals in such registers.
-            // volatile forces stack-based loads, bypassing register allocation.
             volatile int64_t vm = s.m, vn = s.n;
             volatile double vbytes = norm_bytes(vm, vn);
             volatile double vgibs  = to_gibs(vbytes, ssve_sec);
             print_row("rms_norm_ssve ", (int64_t)vm, (int64_t)vn, (double)vgibs, peak);
         }
+        std::cout << "\n";
+    }
 
+    if (!have_sme) return 0;
+
+    // -----------------------------------------------------------------------
+    // Section 2: V0–V3 ablation table
+    // Three representative shapes: small / medium / large N.
+    // -----------------------------------------------------------------------
+    std::cout << "\n--- RMSNorm SSVE ablation: V0 → V3 ---\n";
+    std::cout << std::left << std::setw(24) << "variant"
+              << "  rows   feat    GiB/s  (% peak)  vs V0\n";
+    std::cout << std::string(72, '-') << "\n";
+
+    const Shape ablation_shapes[] = {
+        { 128,   64},
+        { 128, 2048},
+        {1024, 2048},
+    };
+
+    for (const auto& s : ablation_shapes) {
+        const int64_t ld = s.m;
+        std::vector<float> a(ld * s.n), b(ld * s.n, 0.0f);
+        std::vector<float> gamma(s.n, 1.0f);
+        for (int64_t i = 0; i < ld * s.n; ++i)
+            a[i] = static_cast<float>((i % 17) - 8) * 0.1f;
+
+        // Declare all timing results volatile so the compiler spills them to
+        // the stack immediately.  The kernel saves/restores only D8; SMSTART
+        // zeroes D9-D15, so any non-volatile double the compiler keeps in
+        // those callee-saved registers across successive bench calls would be
+        // silently zeroed (producing inf GiB/s).  volatile forces stack
+        // storage, which SMSTART does not touch.
+        volatile double vsec_v0 = bench_ssve   (a.data(), b.data(), gamma.data(), s.m, s.n, ld, 1e-5f);
+        volatile double vsec_v1 = bench_ssve_v1(a.data(), b.data(), gamma.data(), s.m, s.n, ld, 1e-5f);
+        volatile double vsec_v2 = bench_ssve_v2(a.data(), b.data(), gamma.data(), s.m, s.n, ld, 1e-5f);
+        volatile double vsec_v3 = bench_ssve_v3(a.data(), b.data(), gamma.data(), s.m, s.n, ld, 1e-5f);
+
+        volatile int64_t vm = s.m, vn = s.n;
+        volatile double vbytes = norm_bytes(vm, vn);
+        volatile double vpeak  = peak;   // protect peak across bench calls
+
+        double g0 = to_gibs((double)vbytes, (double)vsec_v0);
+        double g1 = to_gibs((double)vbytes, (double)vsec_v1);
+        double g2 = to_gibs((double)vbytes, (double)vsec_v2);
+        double g3 = to_gibs((double)vbytes, (double)vsec_v3);
+
+        print_ablation_row("V0 (FSQRT+FDIV)",    vm, vn, g0, (double)vpeak, 0.0);
+        print_ablation_row("V1 (FRSQRTE+NR)",    vm, vn, g1, (double)vpeak, g0);
+        print_ablation_row("V2 (V1 + inv_N)",     vm, vn, g2, (double)vpeak, g0);
+        print_ablation_row("V3 (V2 + unroll-2)",  vm, vn, g3, (double)vpeak, g0);
         std::cout << "\n";
     }
 
