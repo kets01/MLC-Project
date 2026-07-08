@@ -46,6 +46,18 @@ void layer_norm_ssve(const float* a,
                      int64_t      ld_b,
                      float        epsilon);
 
+// V1: replace FSQRT+FDIV for inv_std with FRSQRTE + one Newton-Raphson step
+// (SEL+FRSQRTE+FRSQRTS+FMUL); passes 1 and 3 are unchanged from V0.
+void layer_norm_ssve_v1(const float* a,
+                        float*       b,
+                        const float* gamma,
+                        const float* beta,
+                        int64_t      m,
+                        int64_t      n,
+                        int64_t      ld_a,
+                        int64_t      ld_b,
+                        float        epsilon);
+
 // RMSNorm — hand-written Streaming SVE kernel (Sprint 2, V0 baseline).
 // Same interface as rms_norm_ref; requires cpu_supports_sme() == true.
 // Returns immediately (no-op) when SME is absent so the caller can skip.
