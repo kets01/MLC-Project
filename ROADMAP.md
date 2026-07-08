@@ -71,7 +71,7 @@ Kernels are **emitted at runtime** by extending `mini_jit` with a `Norm` generat
 
 Full rationale in `CLAUDE.md §8`. This is a low-level C++/AArch64-assembly project, so the document/UI skills don't apply; the real references are the hardware/architecture docs and the existing lab code:
 
-- **The existing week5–7 code is the primary template** — `mini_jit::Unary`/`InstGen` (Sprint 3 JIT), the week7 TEIR runtime (Sprint 4). Read them before extending.
+- **The existing week5–7 code is the primary template** — the week3 SME kernels + week6 `Gemm` (Sprint 3 ZA), `mini_jit::Unary`/`InstGen` (Sprint 4 JIT), the week7 TEIR runtime (Sprint 5). Read them before extending.
 - **Arm Architecture Reference Manual (SME/SSVE)** + the lab's `tnzr.org/compile` material — the authority on instruction encodings and ZA/streaming semantics. Verify against the M4's SME level (SME1).
 - **skill-creator** (optional, early): write a small MLC-Norm conventions skill as a learning step — no rush.
 > Learning note: a generator can emit correct instructions you don't yet understand. Always have the agent explain the encoding/why — comprehension over an opaque build.
@@ -119,77 +119,183 @@ A **correct, VLA SSVE kernel** for both norms — verified against the C++ refer
 
 ---
 
-## Sprint 2 — Hand-written SSVE kernel (the MVP norm)
+## Sprint 2 — Hand-written SSVE kernel (the MVP norm) + roofline validation & bandwidth optimization
 
-**Goal:** a correct, vectorized, **VLA** norm kernel for both norms — the MVP.
+**Goal:** a correct, vectorized, **VLA** norm kernel for both norms, measured against a **validated** roofline, with the hand-written optimization space explored to its verdict — the MVP, plus the evidence for what the JIT should emit.
 
-- [ ] Hand-written **SSVE** kernel: predicated horizontal reduction over the feature axis (`FADDV`/`FMLA`-style, reusing week6 `InstGen` predicate registers), then elementwise normalize-scale-shift. Reduction is SSVE, **not** forced through ZA (context.md §5).
-- [ ] **VLA (decision D):** query SVL at runtime; predicated tail for feature sizes not a multiple of the vector width — arbitrary normalized-axis length.
-- [ ] Implement both norms as **separate code paths** (decision C): LayerNorm two-pass (keep the row resident between passes — decision E), RMSNorm single-pass.
-- [ ] Guard SME/streaming code paths with `cpu_supports_sme()`; the test **skips gracefully** when SME is absent (so CI stays green on M1/M2 runners) and runs fully on M4.
-- [ ] Verify both vs the reference (incl. stress inputs); first **GiB/s** numbers vs the roofline; update the report.
+### 2a. Roofline validation (shared — DO THIS BEFORE any further optimization)
 
-**Done when:** both norms are correct and vectorized, measured in GiB/s on M4, with a clear gap-to-roofline noted.
-**Tooling:** none (week6 `InstGen`/`Unary` as reference).
-**Learning focus:** SSVE reductions, predication/tails, VLA, keeping data resident.
+The V0–V3 conclusions hinge on "% of peak", so the peak itself must be validated first — otherwise every subsequent optimization decision is calibrated against the wrong ceiling.
 
-> 🎉 End of Sprint 2 = a working, correct, measured MVP norm kernel. Good point to commit, refresh the report, and breathe. Everything below is enrichment toward the full `context.md` vision.
+- [x] **Check what "peak" measures.** VERDICT: disassembly shows the C++ probe autovectorized to **NEON** (`ldp q`/`fadd.4s`/`stp q`) and ran **single-threaded** — so 79.58 GiB/s was a *single-core NEON* figure. Single-core, yes; but the wrong *execution mode*: the kernels run streaming-mode `LD1W`/`ST1W`, which turned out to have a materially lower per-core ceiling.
+- [x] **Measure the single-core roofline:** `bw_probe_ssve.S` (streaming-mode `LD1W`/`ST1W` scale-add, one streaming region, VLA tail, verified bit-exact; `QOS_CLASS_USER_INTERACTIVE` as the P-core hint — macOS has no pinning API). MEASURED (M4, ±0.3 % across runs): **single-core NEON 79.5 · single-core SSVE-streaming 59.5 (= the kernel roofline) · chip-wide 89.8 GiB/s** (10 threads). Streaming mode has ~25 % less single-core bandwidth than NEON; one core already sustains ~66 % of the chip aggregate, so Sprint-5 threading buys ≤1.5x. All three recorded in the report and printed by `main_norm`.
+- [x] **Recompute every % -of-peak against the single-core ceiling.** Done in `main_norm` (all tables now state "% of 1-core SSVE peak"): large-N shapes are **42–46 %** of the validated roofline (was misstated as 31–34 % vs the NEON figure); best ~27 GiB/s.
+- [x] **Validate the byte-counting convention.** DECIDED and printed in the benchmark header: GiB/s counts **useful bytes (1R+1W)** for kernels AND probes; the two-pass kernels physically move 2R+1W → moved-bytes figure = 1.5x printed (≈40 GiB/s ≈ 67 % of ceiling for the best variant). The useful-vs-moved gap is exactly what V6 attacks.
+- [x] **Characterize the small-N regime separately:** N-sweep + linear fit `t(N) = t0 + b·N` in `main_norm`. M=128: fixed cost t0 ≈ 1 µs/call, overhead = streaming work at N ≈ 30–40 — the N=64 dip is fully explained. M=1024: fit invalid (negative t0) because the sweep crosses the **cache-capacity boundary** — at N=4096 (32 MiB working set) throughput falls 25 → 18.6 GiB/s as the normalize pass re-reads x from DRAM: the first direct measurement of the 2R+1W structural cost (evidence for V6). (Full streaming-overhead study stays in Sprint 7.)
+- [x] **Decision gate: V4–V6 PROCEED.** V1 is at ~46 % useful-bytes / ~67 % moved-bytes of the single-core streaming roofline — nowhere near the 80–85 % stop threshold. Headroom is attributable to (a) memory-level parallelism in the strided two-pass loop (V4/V5) and (b) the 2R+1W → 1R+1W traffic reduction (V6), whose payoff the M=1024/N=4096 falloff bounds directly.
+
+### 2b. RMSNorm (Ketsia)
+
+- [x] Hand-written SSVE kernel (`rms_norm_ssve.S`): column-major loop order (outer VL-row blocks, inner N columns) using `LD1W`/`LD1RW`/`ST1W` — avoids gather loads restricted in SSVE without SMEFA64.
+- [x] VLA (decision D): `WHILELO`/`INCW`/`ADDVL` outer loop; predicated tail handles any M.
+- [x] Guard with `cpu_supports_sme()`; 5 Catch2 test cases skip on CI, all pass on M4 (20 356 assertions, incl. stress inputs and mismatched leading dims).
+- [x] Verified vs reference; 18–25 GiB/s on M4 (23–32 % of scalar peak); report updated.
+- [x] **Ablation study (V0–V3):** three kernel variants measured against the V0 baseline to isolate the performance ceiling:
+  - [x] **V1** (`rms_norm_ssve_v1.S`): replaces FSQRT + FDIV (inv_rms) with FRSQRTE + one Newton-Raphson step; halves inv_rms latency from ~24 to ~12 cycles. **Result: +6.5 % at M=128, N=2048** — the only variant with a measurable gain.
+  - [x] **V2** (`rms_norm_ssve_v2.S`): pre-computes `1/N` once (scalar FDIV before the outer loop) and replaces the per-block vector FDIV with a vector FMUL. **Result: ≈0 % — the FDIV fires once per outer block, not per element; not the bottleneck.**
+  - [x] **V3** (`rms_norm_ssve_v3.S`): adds ×2 column-loop unroll to V2 (peel-one for odd N, then pairs). **Result: ≈0 % — the M4's hardware prefetcher and OOO execution already overlap sequential column loads; branch overhead is not limiting.**
+  - [x] 10 ablation Catch2 tests (tagged `[sprint2][ablation]`); all pass on M4; ablation benchmark table added to `apps/main_norm.cpp`.
+  - **Interim conclusion:** kernel is bandwidth-bound at **~31–34 % of the 79.58 GiB/s vectorised peak** (best: 26.74 GiB/s, V1) — *pending re-statement against the single-core ceiling (2a)*. The two-pass sequential structure is the structural ceiling; closing the gap further requires residency/pipelining (V4–V6 below) or ZA tiling / pass-fusion at the tile level (Sprint 3).
+
+**Bandwidth/ILP ablation, round two (V4–V6) — gated by the 2a decision gate.** What V0–V3 proved: arithmetic tweaks (V1) buy little, scalar hoisting (V2) and loop unrolling (V3) buy nothing — the prefetcher and OOO core already cover them. What remains untested are the levers that change *memory behaviour*, not arithmetic. Each variant: verified vs reference (same suite, same stress inputs), benchmarked on the standard M×N grid, and kept **only if it beats the incumbent against the single-core roofline**; every result — positive or negative — gets an ablation-table row with its explanation (a explained negative is a result, not a failure).
+
+- [x] **V4 — multi-accumulator reduction ILP:** 4 independent `FMLA` accumulator chains (`rms_norm_ssve_v4.S`). **RESULT: +27–32 % vs V0 at N ≥ 2048 (54–56 % of roofline)** — the single-accumulator chain WAS the bottleneck, which also explains V3's zero (unrolling without breaking the chain). Numerics: tree-order combine deviates up to 1.1e-5 from the reference's sequential sum; V4/V5 verified at documented `kTolReassoc = 2e-5` (not a silent gate-widening).
+- [x] **V5 — load software-pipelining:** rotating A/B load groups issued one group ahead (`rms_norm_ssve_v5.S`). **RESULT: ≈0 vs V4 — as pre-registered:** OOO rename already hoists the loads once the chains are broken. Closes the "more outstanding loads" family; `PRFW` gets a reasoned skip (same lever, one step earlier).
+- [x] **V6 — redefined by measurement: contiguity, not residency.** Diagnostic first (footprint sweep): pass-2 residency is ALREADY satisfied (reuse distance 64·N ≈ 128–256 KB = L2-resident by construction); throughput actually collapses when the total footprint crosses the 16 MB L2 at fixed N (36.5 → 18.3 → 11.2 GiB/s), and at equal 32 MB footprint the access density (64 B per 4·M-byte stride) decides (31 vs 18 GiB/s). The 2a N=4096 falloff = true-DRAM regime, not pass-2 re-reads — 2a's provisional interpretation corrected in the report. **V6 = 4-row-block contiguity grouping** (`rms_norm_ssve_v6.S`): 256 B-contiguous column touches, one accumulator per block (keeps V4's ILP, restores strict-kTol sequential summation), shared gamma broadcasts. **RESULT: +131 % vs V0 in the DRAM regime (11.1 → 25.6 GiB/s), 63 % of roofline (~95 % moved-bytes) at M=1024/N=2048, never worse than V4 → final incumbent.**
+- [x] **Vectorized `inv_rms` across row blocks (V6b):** folded into V6 — the four blocks' `FRSQRTE`+NR sequences are batched per group (already elementwise-vectorized per block; nothing left on the critical path after V4/V6).
+- [x] Update the ablation table + report; **final Sprint-2 RMSNorm conclusion** (report §Sprint 2b): best = V6 at 63 % useful-bytes / ~95 % moved-bytes of the single-core streaming roofline (43 % in the 64 MB true-DRAM regime); exhausted: arithmetic (V1/V2), branches (V3), load scheduling (V5), accumulator ILP (V4), per-block residency (measured as already present); deferred: deeper/parameterized group depth as a shape-specialized JIT emission decision (Sprint 4), ZA staging with a hard target of beating V6 (Sprint 3), threading toward the 89.8 GiB/s chip ceiling (Sprint 5).
+
+### 2c. LayerNorm (Mariza)
+
+- [ ] Hand-written SSVE kernel **V0**: two-pass (mean + variance in pass 1, normalize-scale-shift in pass 2), reduction is SSVE not ZA. Use the **stable two-pass variance** (centered second pass), never `E[x²]−E[x]²` (decision B / context.md §8).
+- [ ] VLA (decision D): predicated tail for any N.
+- [ ] Guard with `cpu_supports_sme()`; Catch2 tests skip on CI, run on M4.
+- [ ] Verified vs reference (incl. stress inputs: large-magnitude / shifted values — the cancellation cases); GiB/s measured against **both ceilings from 2a**; report updated.
+- [ ] **Ablation study (mirroring RMSNorm, plus the LayerNorm-specific axis):**
+  - [ ] Replay the applicable arithmetic variants first (V1 FRSQRTE+NR for `inv_std`; V2 pre-computed 1/N) — LayerNorm's two-pass structure shifts the hotspot profile vs RMSNorm; characterize separately rather than assuming the RMSNorm verdicts transfer.
+  - [ ] Apply the winning memory-behaviour levers from 2b (V4 multi-accumulator, V5 load pipelining) — pass 1 accumulates TWO statistics (Σx and Σ(x−µ)² ingredients), so the accumulator-ILP payoff may differ.
+  - [ ] **Residency between the two passes (the LayerNorm V6):** keep the row block resident in registers/cache from pass 1 into pass 2 — LayerNorm reads x up to 3× naively (mean, variance, normalize), so residency blocking has MORE headroom here than in RMSNorm; count bytes under both conventions to show it.
+  - [ ] **Welford single-pass variant vs two-pass-resident (the algorithmic ablation, decision C):** implement a vectorized Welford (per-lane partial `(mean, M2, count)`, merged with the parallel-combine formula), verify on the stress inputs, and measure accuracy AND GiB/s against the two-pass kernel. Hypothesis to test: on SIMD the two-pass wins because Welford's per-element recurrence serializes — but either outcome is a headline ablation row, and this is the comparison production libraries actually face.
+- [ ] **LayerNorm vs RMSNorm on the same harness, same shapes** (decision C): quantify the single-pass-vs-two-pass gap — the proposal's "10–40 % faster" claim, now with our own numbers.
+
+### 2d. Sprint close-out (docs + commits — same discipline as Sprints 0/1)
+
+- [ ] **Sphinx report updated:** refresh `docs/source/project_norm.rst` with the Sprint-2 story — kernel design (both norms), the full V0–V6 ablation table stated against **both validated ceilings**, the byte-counting convention, the Welford-vs-two-pass verdict, and the small-N/large-N regime split. Rebuild locally; `docs.yml` deploy stays green.
+- [ ] **Commit discipline maintained throughout, not at the end:** each variant/test lands as a small atomic commit with a conventional message (`feat(norm): …`, `perf(norm): add V4 multi-accumulator ILP`, `test(norm): …`) on a feature branch; PR into `main` with CI green before merge. The V-by-V history *is* the ablation narrative in git form.
+
+**Done when:** both norms are correct and vectorized; every % -of-peak is stated against the **validated single-core roofline** (with the chip ceiling recorded for Sprint 5); the V4–V6 (and Welford) verdicts are in the ablation table with explanations; the Sprint-2 conclusion says explicitly which levers are exhausted and which are deliberately deferred to the ZA kernel (Sprint 3), the JIT (Sprint 4), and threading (Sprint 5); and the report section is merged with the sprint PR green.
+**Tooling:** none (week6 `InstGen`/`Unary` as reference; `objdump` for spot-checking assembly).
+**Learning focus:** SSVE reductions, predication/tails, VLA, roofline validation (peak of *what*), byte-counting honesty, memory-level parallelism vs arithmetic tuning, Welford-vs-two-pass on SIMD.
+
+> 🎉 End of Sprint 2 = a working, correct, measured MVP norm kernel with a validated roofline and an exhausted hand-written **SSVE** optimization space. Good point to commit, refresh the report, and breathe. Everything below is enrichment toward the full `context.md` vision — the ZA kernel (Sprint 3) now has a settled SSVE baseline to beat, and the JIT (Sprint 4) will have trusted hand-written counterparts for both architectures.
 
 ---
 
-## Sprint 3 — JIT generation (extend mini_jit with a Norm generator)
+## Sprint 3 — Hand-written SME/ZA kernel + measurement (the second kernel architecture)
 
-**Goal:** generate the norm kernel at runtime instead of hand-writing it — the `mini_jit::Norm` generator.
+**Goal:** the ZA-tile variant of the norm, hand-written and measured with the same discipline as Sprint 2 — so the JIT (Sprint 4) has a trusted hand-written counterpart for BOTH kernel architectures, and the ablation can attribute exactly what ZA buys on top of the exhausted SSVE space.
 
-- [ ] Add `mini_jit::Norm` following the week6 `Unary` pattern: `generate(...)` emits instruction words via `InstGen`; `get_kernel()` returns a function pointer (decision F). Parameterize on shape and norm type.
-- [ ] Reproduce the Sprint-2 SSVE kernel through the generator; verify the JIT-emitted kernel matches the reference (within tolerance).
-- [ ] **SME ZA-tile usage where it earns its place** (decision D/§5): the 2D tiled load/store/transpose path (e.g. column-major input), tile granularity derived from SVL — *not* the 1D reduction.
+> Why hand-written first (not "born in the generator"): the Sprint-4 JIT is verified by the
+> **encoding-diff check** — assembling the winning `.S` and diffing its instruction words
+> against the generator's buffer. That methodology requires a hand-written kernel to diff
+> against. Prototyping ZA in `.S` also keeps the fast iteration loop (edit → rebuild →
+> measure) for the most invasive structural change, and mirrors the lab's own order
+> (week3 hand-written SME before week5/6 codegen). One new thing at a time: this sprint's
+> new thing is ZA; Sprint 4's new thing is emission.
+
+**Honest expectation-setting (write this down BEFORE measuring):** ZA does **not** increase
+DRAM bandwidth. If Sprint 2a's verdict was "near single-core roofline", ZA cannot beat the
+SSVE winner on streaming throughput — its levers are different: the ZA array as **extra
+on-core storage** for two-pass residency (a 16×16-FP32-tile staging buffer beyond the 32
+Z-registers), tile-level **pass fusion**, batched multi-row handling of the `inv_rms`/`inv_std`
+step, and 2D load/store movement for the column-major layout. State the hypothesis per lever,
+then measure. "ZA adds nothing here, and here is why" is a fully valid — and defensible —
+ablation outcome; a timeboxed prototype with an explained verdict beats an open-ended chase.
+
+**RMSNorm ZA variant (Ketsia):**
+- [ ] Hand-written ZA kernel (`rms_norm_za.S`): 16×16 FP32 tile loads/stores (granularity
+      derived from SVL, decision D), reduction **stays SSVE** (context.md §5 — no horizontal
+      reduction through the matrix accumulator); ZA used for tile staging/residency and the
+      2D movement.
+- [ ] `SMSTART`/`SMSTOP` manage **PSTATE.ZA as well as PSTATE.SM**; whole norm in one
+      streaming region; ZA state handled correctly across calls (lazy-save / caller
+      conventions checked against the AAPCS64 SME rules).
+- [ ] Tile-level **pass fusion / residency**: reduce a tile, keep it in ZA, normalize it from
+      ZA — the deferred Sprint-2 lever, now with the storage to express it.
+- [ ] Verified vs reference (same Catch2 suite, same stress inputs, mismatched leading dims);
+      skip-on-CI guard as usual.
+- [ ] Benchmarked on the standard M×N grid against **both ceilings from 2a**; ablation rows
+      vs the SSVE winner, each lever's contribution attributed (or its absence explained).
+
+**LayerNorm ZA variant (Mariza) — gated:**
+- [ ] Only if the RMSNorm ZA verdict is positive (or the residency lever shows promise —
+      LayerNorm's up-to-3-reads structure has more residency headroom): apply the winning ZA
+      structure to LayerNorm; otherwise record the reasoned skip as an ablation note.
+
+**Sprint close-out (docs + commits):**
+- [ ] **Sphinx report updated:** Sprint-3 section — the per-lever hypotheses *as written before measuring*, the ZA kernel design (ZA staging, SSVE reduction, PSTATE.ZA handling), and the measured verdict vs the SSVE winner (win/loss/tie, each explained). Rebuild locally; `docs.yml` green.
+- [ ] **Commit discipline throughout:** atomic conventional commits per working step (`feat(norm): add ZA-staged rms_norm kernel`, `test(norm): …`) on a feature branch; PR into `main`, CI green before merge.
+
+**Done when:** a verified ZA kernel exists with a measured verdict vs the SSVE winner (win,
+loss, or tie — each with its explanation), the best kernel **per architecture** is frozen
+for the JIT, and the report section is merged with the sprint PR green.
+**Tooling:** week3 hand-written SME kernels + week6 `Gemm` (ZA/`fmopa` usage) as templates;
+Arm ARM for ZA load/store & tile-slice addressing (SME1 on the M4 — no SME2-only instructions);
+GDB for tile-state inspection.
+**Learning focus:** ZA addressing and tile slices, PSTATE.ZA management, when a matrix
+accumulator does and doesn't help a bandwidth-bound vector op.
+
+---
+
+## Sprint 4 — JIT generation (extend mini_jit with a Norm generator, emitting BOTH winners)
+
+**Goal:** generate the norm kernels at runtime instead of hand-writing them — the `mini_jit::Norm` generator, covering the SSVE winner (Sprint 2) and, if it earned its row, the ZA winner (Sprint 3).
+
+- [ ] Add `mini_jit::Norm` following the week6 `Unary` pattern: `generate(...)` emits instruction words via `InstGen`; `get_kernel()` returns a function pointer (decision F). Parameterize on shape, norm type, and **kernel path (SSVE / ZA)**.
+- [ ] **Emit the winners, not the baselines — one path at a time, encoding-diff first per path:** assemble the winning `.S` with the toolchain, `objdump` its instruction words, and diff word-by-word against the generator's buffer for one fixed shape — a green diff proves the generator byte-identical to a kernel already trusted, and turns debugging into "word K differs". SSVE path first (fewer new encoders), then the ZA path by the same method.
+- [ ] Missing `InstGen` encoders (`FRSQRTE`, `FRSQRTS`, `LD1RW`, `FADDV`, ZA tile load/store…) added with per-encoder unit tests against the Arm ARM.
+- [ ] Verify each JIT-emitted path against the reference (same Catch2 suite, same tolerances, same stress inputs); benchmark parity vs its hand-written counterpart (within noise).
+- [ ] **Shape-dependent emission choices** become the JIT-native optimization: pick SSVE vs ZA path per shape from the measured Sprint-2/3 verdicts (e.g. ZA-residency only when the working set warrants it; small-N specialization) — decisions a hand-written kernel can't express.
 - [ ] Keep the whole norm inside one streaming region (`SMSTART`/`SMSTOP` once — context.md §8).
-- [ ] Tests: JIT-emitted kernel vs reference; benchmark JIT vs hand-written; report emission (one-time) vs execution cost.
+- [ ] Tests: JIT-emitted kernels vs reference; benchmark JIT vs hand-written per path; report emission (one-time) vs execution cost.
 
-**Done when:** the norm kernel is JIT-generated, verified, and at least matches the hand-written kernel's GiB/s.
-**Tooling:** week5 JIT engine + week6 `InstGen`/`Unary` as the template.
-**Learning focus:** dynamic instruction emission, ZA-tile addressing, streaming-region management.
+**Sprint close-out (docs + commits):**
+- [ ] **Sphinx report updated:** Sprint-4 section — the generator design (`mini_jit::Norm`, new `InstGen` encoders), the encoding-diff methodology as the verification story, the parity tables (per path), and emission-vs-execution cost. Rebuild locally; `docs.yml` green.
+- [ ] **Commit discipline throughout:** atomic conventional commits (`feat(jit): add FRSQRTE encoder`, `feat(jit): emit SSVE norm path`, `test(jit): encoding diff vs rms_norm_ssve_v1`) on a feature branch; PR into `main`, CI green (the generator and its encoder unit tests build and run host-portable in CI; emitted-kernel execution tests skip without SME as usual).
+
+**Done when:** both norm kernels are JIT-generated on the path(s) that earned it, verified, at least matching their hand-written counterparts' GiB/s, and the report section is merged with the sprint PR green.
+**Tooling:** week5 JIT engine + week6 `InstGen`/`Unary` as the template; `objdump`/`llvm-mc` for the encoding diff; Arm ARM for the new encoders.
+**Learning focus:** dynamic instruction emission, encoding verification, streaming-region management, emission-time specialization.
 
 ---
 
-## Sprint 4 — TEIR integration (norm as a compiler primitive)
+## Sprint 5 — TEIR integration (norm as a compiler primitive)
 
 **Goal:** let the week7 TEIR runtime place the norm in a loop nest and invoke the JIT kernel — the `context.md` flow, end to end.
 
 - [ ] Register the norm as a TEIR **primitive** (an `Invocation` the runtime resolves to the generated kernel), reconciling the canonical signature with TEIR's `CompiledKernel = void(float*,float*,float*)` convention (map input/γβ/output onto a/b/c).
 - [ ] Drive a small multi-row tensor through TEIR `Iteration` nodes → per-tile `Invocation` → generated kernel; honor strides and leading dimensions (decision F).
 - [ ] Verify the **TEIR-invoked** result against the C++ reference for the same shapes (catches layout/stride/tile-boundary bugs, not just the bare kernel).
-- [ ] Optional: use `is_parallel` on the outer (row) axis for OpenMP across tiles; the kernel stays single-tile.
+- [ ] Use `is_parallel` on the outer (row) axis for OpenMP across tiles; the kernel stays single-tile. **This is where the chip-wide roofline from Sprint 2a becomes the target:** measure multi-threaded GiB/s scaling toward the SoC ceiling and report both (single-core kernel quality vs threaded aggregate).
 - [ ] Update the report with the integrated path and its GiB/s.
 
-**Done when:** a model-style call reaches the norm kernel *through TEIR* and is verified correct.
+**Done when:** a model-style call reaches the norm kernel *through TEIR* and is verified correct, with threaded scaling measured against the chip ceiling.
 **Tooling:** week7 TEIR runtime as the template.
-**Learning focus:** primitive registration, loop-nest composition, stride/layout correctness.
+**Learning focus:** primitive registration, loop-nest composition, stride/layout correctness, bandwidth scaling across cores.
 
 ---
 
-## Sprint 5 — Optimization, roofline & the ablation study
+## Sprint 6 — Optimization, roofline & the ablation study
 
 **Goal:** the proposal's evaluation deliverable — close on the roofline and attribute every gain.
 
 - [ ] Measure-driven optimization (decision E/F): identify the real bottleneck from the harness, then tune (resident rows, load/store scheduling, ZA tiling, fewer streaming transitions).
-- [ ] **Ablation study**: GiB/s for scalar reference → naive SSVE → VLA SSVE → JIT → ZA-tiled, and **LayerNorm two-pass vs RMSNorm single-pass** on the same harness (decision C). Each row attributable.
-- [ ] Report GiB/s **vs measured peak bandwidth** across shapes (small→large feature dims, varying row counts); state bytes counted.
+- [ ] **Ablation study**: GiB/s for scalar reference → naive SSVE → VLA SSVE → V4–V6 memory levers → ZA-tiled (hand-written) → JIT (per path) → TEIR+OpenMP, and **LayerNorm two-pass vs Welford vs RMSNorm single-pass** on the same harness (decision C). Each row attributable, negatives explained.
+- [ ] Report GiB/s **vs both validated ceilings** (single-core and chip-wide) across shapes (small→large feature dims, varying row counts); state bytes counted and the convention used.
 - [ ] Verify every optimized configuration still matches the reference (decision B).
 
-**Done when:** an ablation table shows each optimization's contribution and how close to peak the best kernel gets.
+**Done when:** an ablation table shows each optimization's contribution and how close to peak the best kernel gets — at both the single-core and the threaded level.
 **Tooling:** none new.
 **Learning focus:** roofline analysis, ablation methodology, attributing speed-ups.
 
 ---
 
-## Sprint 6 — Numerical-stability & streaming-overhead depth (honest engineering)
+## Sprint 7 — Numerical-stability & streaming-overhead depth (honest engineering)
 
 **Goal:** the interview/report talking point — surface and explain the real tradeoffs (context.md §8).
 
-- [ ] Characterize **numerical stability**: show where naive single-pass variance breaks (catastrophic cancellation) and why LayerNorm's two-pass and RMSNorm's mean-free reduction are stable; quantify error vs the reference on stress inputs.
-- [ ] Characterize **streaming-mode overhead**: measure the small-tensor regime where `SMSTART`/`SMSTOP` dominates vs the large-tensor regime where it amortizes; report *when* the SME kernel wins.
+- [ ] Characterize **numerical stability**: show where naive single-pass variance breaks (catastrophic cancellation) and why LayerNorm's two-pass and RMSNorm's mean-free reduction are stable; quantify error vs the reference on stress inputs — including the Welford variant's accuracy from Sprint 2c.
+- [ ] Characterize **streaming-mode overhead**: measure the small-tensor regime where `SMSTART`/`SMSTOP` and fixed per-call costs dominate (the N=64 regime already visible in the Sprint-2 table) vs the large-tensor regime where they amortize; report *when* the SME kernel wins.
 - [ ] Document both as deliberate tradeoffs (not accidents) in the report — this is a strength.
 
 **Done when:** the report explains the accuracy/throughput and small/large-tensor tradeoffs with data.
@@ -198,7 +304,7 @@ A **correct, VLA SSVE kernel** for both norms — verified against the C++ refer
 
 ---
 
-## Sprint 7 — Report & ship
+## Sprint 8 — Report & ship
 
 - [ ] Final Sphinx report section: motivation (norm in every block, bandwidth-bound), the two norms, the SSVE/JIT/SME/TEIR path, correctness, the GiB/s ablation, the stability/overhead analysis.
 - [ ] Final benchmark tables refreshed on M4; figures (roofline, ablation bars).
