@@ -53,13 +53,17 @@ SYM(layer_norm_ssve_v4):
     lsl   x25, x6, #2
     lsl   x26, x7, #2
     fmov  s8, s0
+    str   s0, [sp, #72]            // dedicated eps stash, stored BEFORE smstart
+                                    // (streaming-mode entry clobbers D8 too, not
+                                    // just D9-D15 — memory survives smstart, no
+                                    // register does; verified empirically)
 
     cbz   x23, .Ldone_v4
 
     smstart sm
     ptrue p0.s, all
 
-    ldr   s0, [sp, #64]
+    ldr   s0, [sp, #72]            // eps reloaded from the dedicated stack slot
     dup   z7.s, z0.s[0]
 
     fmov  s0, #1.0
