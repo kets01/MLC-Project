@@ -217,6 +217,14 @@ static double bench_ssve_v3(const float* a, float* b, const float* gamma,
     return bench([&]() { rms_norm_ssve_v3(a, b, gamma, m, n, ld, ld, eps); });
 }
 
+__attribute__((noinline))
+static double bench_ssve_v4(const float* a, float* b, const float* gamma,
+                             int64_t m, int64_t n, int64_t ld, float eps) {
+    using namespace mini_jit::norm;
+    rms_norm_ssve_v4(a, b, gamma, m, n, ld, ld, eps);
+    return bench([&]() { rms_norm_ssve_v4(a, b, gamma, m, n, ld, ld, eps); });
+}
+
 // ---------------------------------------------------------------------------
 // Ablation row: prints GiB/s and % delta vs V0 baseline.
 // ---------------------------------------------------------------------------
@@ -432,6 +440,7 @@ int main() {
         volatile double vsec_v1 = bench_ssve_v1(a.data(), b.data(), gamma.data(), s.m, s.n, ld, 1e-5f);
         volatile double vsec_v2 = bench_ssve_v2(a.data(), b.data(), gamma.data(), s.m, s.n, ld, 1e-5f);
         volatile double vsec_v3 = bench_ssve_v3(a.data(), b.data(), gamma.data(), s.m, s.n, ld, 1e-5f);
+        volatile double vsec_v4 = bench_ssve_v4(a.data(), b.data(), gamma.data(), s.m, s.n, ld, 1e-5f);
 
         volatile int64_t vm = s.m, vn = s.n;
         volatile double vbytes = norm_bytes(vm, vn);
@@ -440,11 +449,13 @@ int main() {
         double g1 = to_gibs((double)vbytes, (double)vsec_v1);
         double g2 = to_gibs((double)vbytes, (double)vsec_v2);
         double g3 = to_gibs((double)vbytes, (double)vsec_v3);
+        double g4 = to_gibs((double)vbytes, (double)vsec_v4);
 
         print_ablation_row("V0 (FSQRT+FDIV)",    vm, vn, g0, (double)vpeak, 0.0);
         print_ablation_row("V1 (FRSQRTE+NR)",    vm, vn, g1, (double)vpeak, g0);
         print_ablation_row("V2 (V1 + inv_N)",     vm, vn, g2, (double)vpeak, g0);
         print_ablation_row("V3 (V2 + unroll-2)",  vm, vn, g3, (double)vpeak, g0);
+        print_ablation_row("V4 (4-acc ILP)",      vm, vn, g4, (double)vpeak, g0);
         std::cout << "\n";
     }
 
