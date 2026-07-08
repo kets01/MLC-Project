@@ -1,7 +1,8 @@
 add_library(norm_lib
     reference.cpp
     norm_ssve.cpp           # C++ SME guard + extern-C bridge
-    layer_norm_ssve.S       # Sprint 2c: LayerNorm SSVE kernel (Mariza)
+    layer_norm_ssve.S       # Sprint 2c: LayerNorm SSVE kernel V0 (Mariza)
+    layer_norm_ssve_v1.S    # V1: FRSQRTE+NR replaces FSQRT+FDIV
     rms_norm_ssve.S         # V0: baseline SSVE kernel
     rms_norm_ssve_v1.S      # V1: FRSQRTE+FRSQRTS (no FSQRT/FDIV)
     rms_norm_ssve_v2.S      # V2: V1 + pre-computed 1/N
@@ -22,6 +23,7 @@ add_library(norm_lib
 set_source_files_properties(
     norm_ssve.cpp
     layer_norm_ssve.S
+    layer_norm_ssve_v1.S
     rms_norm_ssve.S
     rms_norm_ssve_v1.S
     rms_norm_ssve_v2.S
