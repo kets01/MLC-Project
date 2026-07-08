@@ -157,10 +157,10 @@ The V0–V3 conclusions hinge on "% of peak", so the peak itself must be validat
 
 ### 2c. LayerNorm (Mariza)
 
-- [ ] Hand-written SSVE kernel **V0**: two-pass (mean + variance in pass 1, normalize-scale-shift in pass 2), reduction is SSVE not ZA. Use the **stable two-pass variance** (centered second pass), never `E[x²]−E[x]²` (decision B / context.md §8).
-- [ ] VLA (decision D): predicated tail for any N.
-- [ ] Guard with `cpu_supports_sme()`; Catch2 tests skip on CI, run on M4.
-- [ ] Verified vs reference (incl. stress inputs: large-magnitude / shifted values — the cancellation cases); GiB/s measured against **both ceilings from 2a**; report updated.
+- [x] Hand-written SSVE kernel **V0**: two-pass (mean + variance in pass 1, normalize-scale-shift in pass 2), reduction is SSVE not ZA. Use the **stable two-pass variance** (centered second pass), never `E[x²]−E[x]²` (decision B / context.md §8).
+- [x] VLA (decision D): predicated tail for any N.
+- [x] Guard with `cpu_supports_sme()`; Catch2 tests skip on CI, run on M4.
+- [x] Verified vs reference (incl. stress inputs: large-magnitude / shifted values — the cancellation cases); GiB/s measured against **both ceilings from 2a**; report updated. **RESULT: 12–13 GiB/s (20–22 % of 59.5 GiB/s SSVE roofline); 2.4–13.4× over reference. Plateau explained by 3R+1W structural cost vs RMSNorm's 2R+1W.**
 - [ ] **Ablation study (mirroring RMSNorm, plus the LayerNorm-specific axis):**
   - [ ] Replay the applicable arithmetic variants first (V1 FRSQRTE+NR for `inv_std`; V2 pre-computed 1/N) — LayerNorm's two-pass structure shifts the hotspot profile vs RMSNorm; characterize separately rather than assuming the RMSNorm verdicts transfer.
   - [ ] Apply the winning memory-behaviour levers from 2b (V4 multi-accumulator, V5 load pipelining) — pass 1 accumulates TWO statistics (Σx and Σ(x−µ)² ingredients), so the accumulator-ILP payoff may differ.
