@@ -58,6 +58,70 @@ void layer_norm_ssve_v1(const float* a,
                         int64_t      ld_b,
                         float        epsilon);
 
+// V2: V1 + pre-compute 1/N once (eliminates per-block FDIV in both reduction
+// passes; adopts RMSNorm-style ADDVL/INCW outer loop).
+void layer_norm_ssve_v2(const float* a,
+                        float*       b,
+                        const float* gamma,
+                        const float* beta,
+                        int64_t      m,
+                        int64_t      n,
+                        int64_t      ld_a,
+                        int64_t      ld_b,
+                        float        epsilon);
+
+// V4: V2 + four independent accumulator chains in BOTH reduction passes
+// (mean and variance) to expose instruction-level parallelism.
+void layer_norm_ssve_v4(const float* a,
+                        float*       b,
+                        const float* gamma,
+                        const float* beta,
+                        int64_t      m,
+                        int64_t      n,
+                        int64_t      ld_a,
+                        int64_t      ld_b,
+                        float        epsilon);
+
+// V5: V4 + software-pipelined loads in both reduction passes (B-group loads
+// issued ahead of A-group FP compute; expected ~0% gain on M4 OOO core).
+void layer_norm_ssve_v5(const float* a,
+                        float*       b,
+                        const float* gamma,
+                        const float* beta,
+                        int64_t      m,
+                        int64_t      n,
+                        int64_t      ld_a,
+                        int64_t      ld_b,
+                        float        epsilon);
+
+// V6: 4-row-block contiguity grouping — all three passes run on each group of
+// four consecutive VL-row blocks before advancing, making each column touch a
+// 256-byte contiguous burst; four independent accumulators maintain ILP.
+void layer_norm_ssve_v6(const float* a,
+                        float*       b,
+                        const float* gamma,
+                        const float* beta,
+                        int64_t      m,
+                        int64_t      n,
+                        int64_t      ld_a,
+                        int64_t      ld_b,
+                        float        epsilon);
+
+// Welford: Welford online algorithm replaces the two reduction passes with a
+// single column sweep computing per-lane (mean, M2) simultaneously.  Reduces
+// traffic from 3R+1W to 2R+1W but requires a scalar FDIV per column to
+// compute 1/(j+1), which serialises the column loop and is expected to be
+// SLOWER than V2 for all practical N.
+void layer_norm_ssve_welford(const float* a,
+                             float*       b,
+                             const float* gamma,
+                             const float* beta,
+                             int64_t      m,
+                             int64_t      n,
+                             int64_t      ld_a,
+                             int64_t      ld_b,
+                             float        epsilon);
+
 // RMSNorm — hand-written Streaming SVE kernel (Sprint 2, V0 baseline).
 // Same interface as rms_norm_ref; requires cpu_supports_sme() == true.
 // Returns immediately (no-op) when SME is absent so the caller can skip.
