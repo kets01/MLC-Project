@@ -969,13 +969,80 @@ differences of ±5, catastrophic cancellation limits FP32 accuracy to roughly
 ``ε_float × SHIFT × inv_std ≈ 5×10⁻⁴``; a relative tolerance would be
 unfairly strict for elements whose normalised value is near zero.
 
+GiB/s results — V0 baseline (Apple M4, SVL = 512 bits)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Roofline:** 59.45 GiB/s single-core streaming (LD1W/ST1W probe).
+
+.. list-table:: Sprint 2c — layer_norm_ssve V0 vs reference (Apple M4)
+   :header-rows: 1
+   :widths: 10 10 20 20 16 12
+
+   * - M (rows)
+     - N (features)
+     - ``layer_norm_ref`` GiB/s
+     - ``layer_norm_ssve`` GiB/s
+     - % of SSVE peak
+     - Speedup
+   * - 128
+     - 64
+     - 4.09
+     - 9.64
+     - 16.2 %
+     - 2.4×
+   * - 128
+     - 512
+     - 2.41
+     - 12.37
+     - 20.8 %
+     - 5.1×
+   * - 128
+     - 2048
+     - 2.24
+     - 12.39
+     - 20.8 %
+     - 5.5×
+   * - 1024
+     - 64
+     - 1.23
+     - 12.03
+     - 20.2 %
+     - 9.8×
+   * - 1024
+     - 512
+     - 1.22
+     - 12.38
+     - 20.8 %
+     - 10.1×
+   * - 1024
+     - 2048
+     - 0.95
+     - 12.76
+     - **21.5 %**
+     - **13.4×**
+
+The kernel plateaus at **~20–21 % of the 59.5 GiB/s SSVE roofline** (useful
+bytes, 1R+1W convention).  Compare to RMSNorm V0's ~42 %.  The factor of ~2
+is fully explained by the three-pass memory access pattern: LayerNorm reads x
+three times (mean, variance, normalize), so its moved-bytes traffic is
+**3R+1W** vs RMSNorm's **2R+1W**.  Restated in moved-bytes terms:
+
+- LayerNorm V0: 12–13 GiB/s useful → ×2 = **~25 GiB/s moved** ≈ **42 % of roofline**
+- RMSNorm V0:   25 GiB/s useful → ×1.5 = **~37 GiB/s moved** ≈ **63 % of roofline**
+
+The kernel quality is similar; the structural cost is the extra read pass.
+This is exactly what the residency lever (the LayerNorm-specific V6) targets:
+fusing passes 1 and 2 drops the traffic from 3R+1W to 2R+1W — a potential
+**+50 % in useful-bytes throughput** before any other optimisation.
+
 Sprint 2c status
 ~~~~~~~~~~~~~~~~
 
 - **Build:** clean; ``layer_norm_ssve.S`` assembles under ``-march=armv9-a+sme``
-- **Test:** 6 Sprint-2c cases pass on M4; CI skips them gracefully
+- **Test:** 6 Sprint-2c cases pass on M4 (46 total with RMSNorm suite); CI skips gracefully
 - **Kernel:** ``src/norm/layer_norm_ssve.S`` — VLA, SME1 mandatory subset only,
   three passes (mean / variance / normalise), column-major contiguous loads
-- **Next:** GiB/s measurement vs both validated ceilings from Sprint 2a;
-  ablation replaying V4/V6 ILP and contiguity levers; Welford single-pass
-  comparison (decision C)
+- **Benchmark:** V0 baseline measured; 12–13 GiB/s (20–22 % of SSVE roofline)
+- **Next:** ablation — V1 (FRSQRTE+NR for ``inv_std``), V2 (pre-computed 1/N),
+  V4 (multi-accumulator), residency-blocking V6 (fuse mean+variance pass to
+  cut 3R+1W → 2R+1W); Welford single-pass comparison
