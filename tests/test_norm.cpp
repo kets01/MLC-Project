@@ -1106,6 +1106,64 @@ TEST_CASE("RMSNorm ZA: large-magnitude stress input (stability)", "[norm][sprint
 
 
 // ===========================================================================
+// Sprint 3 — LayerNorm ZA-tile residency kernel (layer_norm_za), gated
+//
+// Unlike rms_norm_za (2R+1W -> 1R+1W), this prototype stages x in ZA once
+// during the mean pass and reuses it from ZA for BOTH the variance pass and
+// the normalize pass: a full 3R+1W -> 1R+1W fusion. Same tile-boundary
+// walk as the RMSNorm ZA suite (single tile, multi-tile, the 4*SVL
+// residency boundary, row tails, mismatched leading dims, and the N > 4*SVL
+// fallback), reusing the Sprint-2c check_ln_variant / check_ln_variant_stress
+// helpers since layer_norm_za shares the canonical LayerNorm signature.
+//
+// Mean and variance each use a single accumulator in strict column order
+// (reference order) across all four tile sections, so no reassociation
+// tolerance is needed beyond the FRSQRTE+NR margin already used by V1/V6
+// (kAbsMarginNR). All cases skip on CI (no SME) and run fully on the M4.
+// ===========================================================================
+
+// ZA path, one tile: N < SVL (column tail inside tile 0) and N == SVL.
+TEST_CASE("LayerNorm ZA: single tile, N < SVL and N == SVL", "[norm][sprint3][za][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required (layer_norm_za uses smstart/smstop + ZA)");
+    check_ln_variant(layer_norm_za, 16, 8,  16, 16, 1e-5f);   // N < SVL: tile 0 partial
+    check_ln_variant(layer_norm_za, 16, 16, 16, 16, 1e-5f);   // N == SVL: tile 0 full
+}
+
+// ZA path, multiple tiles: N spanning 2-3 tiles with a partial last tile,
+// and N == 4*SVL exactly (all four tiles full — the residency boundary).
+TEST_CASE("LayerNorm ZA: multi-tile, partial last tile and 4*SVL boundary", "[norm][sprint3][za][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required (layer_norm_za uses smstart/smstop + ZA)");
+    check_ln_variant(layer_norm_za, 16, 24, 16, 16, 1e-5f);   // tiles 0 full + 1 partial
+    check_ln_variant(layer_norm_za, 16, 40, 16, 16, 1e-5f);   // tiles 0,1 full + 2 partial
+    check_ln_variant(layer_norm_za, 16, 64, 16, 16, 1e-5f);   // all four tiles full (=4*SVL)
+}
+
+// ZA path with a row tail: M not a multiple of SVL exercises the WHILELO
+// row predicate through the mova into/out of ZA, across several row blocks
+// and mismatched leading dims.
+TEST_CASE("LayerNorm ZA: row tail + multiple row blocks + mismatched ld", "[norm][sprint3][za][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required (layer_norm_za uses smstart/smstop + ZA)");
+    check_ln_variant(layer_norm_za, 7,  40, 8,   8,  1e-5f);   // single partial block
+    check_ln_variant(layer_norm_za, 100, 48, 128, 112, 1e-5f); // full blocks + row tail, ld>M
+}
+
+// Fallback path: N just past the ZA capacity (4*SVL + 1) and a realistic
+// large transformer width — both take the streaming three-pass, so
+// correctness there must hold too even though ZA is not used.
+TEST_CASE("LayerNorm ZA: fallback path (N > 4*SVL)", "[norm][sprint3][za][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required (layer_norm_za uses smstart/smstop + ZA)");
+    check_ln_variant(layer_norm_za, 16, 65,   16, 16, 1e-5f);  // one past capacity
+    check_ln_variant(layer_norm_za, 64, 2048, 64, 64, 1e-5f);  // large width, fallback
+}
+
+// Stress: large-magnitude shifted input (N=37 -> ZA path on the M4).
+TEST_CASE("LayerNorm ZA: large-magnitude stress input (stability)", "[norm][sprint3][za][layernorm][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required (layer_norm_za uses smstart/smstop + ZA)");
+    check_ln_variant_stress(layer_norm_za);
+}
+
+
+// ===========================================================================
 // Sprint 2a — roofline-probe correctness (bw_probe_ssve)
 //
 // The probe is a STREAM scale-add (d[i] = s[i] + 1.0f), not a norm kernel,
