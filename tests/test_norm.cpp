@@ -417,3 +417,42 @@ TEST_CASE("RMSNorm SSVE V3: large-magnitude stress input", "[norm][sprint2][abla
     if (!cpu_supports_sme()) SKIP("SME required");
     check_variant_stress(rms_norm_ssve_v3);
 }
+
+// ===========================================================================
+// Sprint 2a — roofline-probe correctness (bw_probe_ssve)
+//
+// The probe is a STREAM scale-add (d[i] = s[i] + 1.0f), not a norm kernel,
+// but it feeds every % -of-peak figure, so it gets the same treatment: verify
+// the streaming-mode LD1W/ST1W path against the scalar loop before trusting
+// any bandwidth number derived from it.  Scale-add is a single exact FP32
+// operation, so vector and scalar results must match bit-for-bit (== 0 diff).
+// ===========================================================================
+
+static void check_probe(int64_t n) {
+    std::vector<float> s(n), d(n, 0.0f), expect(n, 0.0f);
+    for (int64_t i = 0; i < n; ++i) s[i] = static_cast<float>((i % 251) - 125) * 0.25f;
+    for (int64_t i = 0; i < n; ++i) expect[i] = s[i] + 1.0f;
+
+    bw_probe_ssve(d.data(), s.data(), n);
+
+    for (int64_t i = 0; i < n; ++i) {
+        INFO("i=" << i);
+        REQUIRE(d[i] == expect[i]);
+    }
+}
+
+// Covers the 4-vector main loop, the per-VL tail loop, and a partial final
+// predicate — n values chosen to hit all three regardless of SVL.
+TEST_CASE("BW probe SSVE: main loop + tail + partial predicate", "[norm][sprint2][roofline]") {
+    if (!cpu_supports_sme()) SKIP("SME required (bw_probe_ssve uses smstart/smstop)");
+    check_probe(1024);   // multiple of 4*VL for any SVL up to 2048 bits
+    check_probe(259);    // odd: main loop + tail + partial last predicate
+    check_probe(3);      // below one vector: tail-only path
+}
+
+TEST_CASE("BW probe SSVE: n = 0 is a safe no-op", "[norm][sprint2][roofline]") {
+    if (!cpu_supports_sme()) SKIP("SME required (bw_probe_ssve uses smstart/smstop)");
+    std::vector<float> s(4, 1.0f), d(4, -7.0f);
+    bw_probe_ssve(d.data(), s.data(), 0);
+    for (int i = 0; i < 4; ++i) REQUIRE(d[i] == -7.0f);  // untouched
+}
