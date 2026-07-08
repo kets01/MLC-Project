@@ -186,6 +186,62 @@ static void print_row(const char* label, int64_t m, int64_t n,
 // ---------------------------------------------------------------------------
 
 __attribute__((noinline))
+static double bench_ln_ssve(const float* a, float* b, const float* gamma,
+                              const float* beta, int64_t m, int64_t n, int64_t ld, float eps) {
+    using namespace mini_jit::norm;
+    layer_norm_ssve(a, b, gamma, beta, m, n, ld, ld, eps);
+    return bench([&]() { layer_norm_ssve(a, b, gamma, beta, m, n, ld, ld, eps); });
+}
+
+__attribute__((noinline))
+static double bench_ln_ssve_v1(const float* a, float* b, const float* gamma,
+                                const float* beta, int64_t m, int64_t n, int64_t ld, float eps) {
+    using namespace mini_jit::norm;
+    layer_norm_ssve_v1(a, b, gamma, beta, m, n, ld, ld, eps);
+    return bench([&]() { layer_norm_ssve_v1(a, b, gamma, beta, m, n, ld, ld, eps); });
+}
+
+__attribute__((noinline))
+static double bench_ln_ssve_v2(const float* a, float* b, const float* gamma,
+                                const float* beta, int64_t m, int64_t n, int64_t ld, float eps) {
+    using namespace mini_jit::norm;
+    layer_norm_ssve_v2(a, b, gamma, beta, m, n, ld, ld, eps);
+    return bench([&]() { layer_norm_ssve_v2(a, b, gamma, beta, m, n, ld, ld, eps); });
+}
+
+__attribute__((noinline))
+static double bench_ln_ssve_v4(const float* a, float* b, const float* gamma,
+                                const float* beta, int64_t m, int64_t n, int64_t ld, float eps) {
+    using namespace mini_jit::norm;
+    layer_norm_ssve_v4(a, b, gamma, beta, m, n, ld, ld, eps);
+    return bench([&]() { layer_norm_ssve_v4(a, b, gamma, beta, m, n, ld, ld, eps); });
+}
+
+__attribute__((noinline))
+static double bench_ln_ssve_v5(const float* a, float* b, const float* gamma,
+                                const float* beta, int64_t m, int64_t n, int64_t ld, float eps) {
+    using namespace mini_jit::norm;
+    layer_norm_ssve_v5(a, b, gamma, beta, m, n, ld, ld, eps);
+    return bench([&]() { layer_norm_ssve_v5(a, b, gamma, beta, m, n, ld, ld, eps); });
+}
+
+__attribute__((noinline))
+static double bench_ln_ssve_v6(const float* a, float* b, const float* gamma,
+                                const float* beta, int64_t m, int64_t n, int64_t ld, float eps) {
+    using namespace mini_jit::norm;
+    layer_norm_ssve_v6(a, b, gamma, beta, m, n, ld, ld, eps);
+    return bench([&]() { layer_norm_ssve_v6(a, b, gamma, beta, m, n, ld, ld, eps); });
+}
+
+__attribute__((noinline))
+static double bench_ln_ssve_welford(const float* a, float* b, const float* gamma,
+                                     const float* beta, int64_t m, int64_t n, int64_t ld, float eps) {
+    using namespace mini_jit::norm;
+    layer_norm_ssve_welford(a, b, gamma, beta, m, n, ld, ld, eps);
+    return bench([&]() { layer_norm_ssve_welford(a, b, gamma, beta, m, n, ld, ld, eps); });
+}
+
+__attribute__((noinline))
 static double bench_ssve(const float* a, float* b, const float* gamma,
                           int64_t m, int64_t n, int64_t ld, float eps) {
     using namespace mini_jit::norm;
@@ -314,10 +370,11 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
     double n_half  = (b_slope > 0.0) ? t0 / b_slope : 0.0;
 
     // The linear model assumes constant per-element throughput.  A negative
-    // intercept means throughput FELL as N grew — i.e. the sweep crossed a
-    // cache-capacity boundary (the normalize pass stops re-reading x from
-    // cache and hits DRAM: the 2R+1W structural cost becoming visible), and
-    // the fit is not a valid overhead estimate.
+    // intercept means throughput FELL as N grew — the sweep crossed into the
+    // true-DRAM regime (total footprint > L2, so reps no longer stay
+    // cache-assisted; the Sprint-2b diagnostic showed access density, not
+    // pass-2 residency, binds there), and the fit is not a valid overhead
+    // estimate.
     if (t0 >= 0.0) {
         std::cout << "  fit t(N) = t0 + b*N:  t0 = " << std::setprecision(3) << t0 * 1e6
                   << " us/call fixed overhead,  asymptotic " << std::setprecision(2) << asym
@@ -326,9 +383,9 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
                   << std::setprecision(0) << n_half << "\n\n";
     } else {
         std::cout << "  fit t(N) = t0 + b*N: INVALID (t0 < 0) — throughput is not\n"
-                  << "  constant in N: the sweep crosses the cache-capacity boundary\n"
-                  << "  (2R+1W: at large M*N the normalize pass re-reads x from DRAM,\n"
-                  << "  not cache).  Overhead statement only valid for the M=128 sweep.\n\n";
+                  << "  constant in N: the sweep enters the true-DRAM regime (total\n"
+                  << "  footprint exceeds L2; see the Sprint-2b density diagnostic).\n"
+                  << "  Overhead statement only valid for the M=128 sweep.\n\n";
     }
 }
 
@@ -405,6 +462,26 @@ int main() {
                            s.m, s.n, ld, ld, 1e-5f);
         });
         print_row("layer_norm_ref", s.m, s.n, to_gibs(bytes, ln_sec), vpeak);
+
+        if (have_sme) {
+            double lnssve_sec = bench_ln_ssve(a.data(), b.data(), gamma.data(), beta.data(),
+                                               s.m, s.n, ld, 1e-5f);
+            {
+                volatile int64_t vm = s.m, vn = s.n;
+                volatile double vbytes = norm_bytes(vm, vn);
+                volatile double vgibs  = to_gibs(vbytes, lnssve_sec);
+                print_row("layer_norm_ssve", (int64_t)vm, (int64_t)vn, (double)vgibs, vpeak);
+            }
+
+            double lnv1_sec = bench_ln_ssve_v1(a.data(), b.data(), gamma.data(), beta.data(),
+                                                s.m, s.n, ld, 1e-5f);
+            {
+                volatile int64_t vm = s.m, vn = s.n;
+                volatile double vbytes = norm_bytes(vm, vn);
+                volatile double vgibs  = to_gibs(vbytes, lnv1_sec);
+                print_row("layer_norm_ssve_v1", (int64_t)vm, (int64_t)vn, (double)vgibs, vpeak);
+            }
+        }
 
         double rms_sec = bench([&]() {
             rms_norm_ref(a.data(), b.data(), gamma.data(), s.m, s.n, ld, ld, 1e-5f);
@@ -486,7 +563,104 @@ int main() {
     }
 
     // -----------------------------------------------------------------------
-    // Section 3 (Sprint 2a): small-N regime — fixed per-call overhead.
+    // Section 3: LayerNorm SSVE ablation (Sprint 2c)
+    // V1 (FRSQRTE+NR baseline) → V2 (inv_N) → V4 (4-acc ILP) →
+    // V5 (load-pipe) → V6 (4-block contig) → Welford (2R+1W online)
+    // -----------------------------------------------------------------------
+    std::cout << "\n--- LayerNorm SSVE ablation: V0 → V6 + Welford ---\n";
+    std::cout << std::left << std::setw(24) << "variant"
+              << "  rows   feat    GiB/s  (% of 1-core SSVE peak)  vs V0\n";
+    std::cout << std::string(78, '-') << "\n";
+
+    for (const auto& s : ablation_shapes) {
+        const int64_t ld = s.m;
+        std::vector<float> a(ld * s.n), b(ld * s.n, 0.0f);
+        std::vector<float> gamma(s.n, 1.0f), beta(s.n, 0.0f);
+        for (int64_t i = 0; i < ld * s.n; ++i)
+            a[i] = static_cast<float>((i % 17) - 8) * 0.1f;
+
+        volatile double ln_v0  = bench_ln_ssve        (a.data(), b.data(), gamma.data(), beta.data(), s.m, s.n, ld, 1e-5f);
+        volatile double ln_v1  = bench_ln_ssve_v1     (a.data(), b.data(), gamma.data(), beta.data(), s.m, s.n, ld, 1e-5f);
+        volatile double ln_v2  = bench_ln_ssve_v2     (a.data(), b.data(), gamma.data(), beta.data(), s.m, s.n, ld, 1e-5f);
+        volatile double ln_v4  = bench_ln_ssve_v4     (a.data(), b.data(), gamma.data(), beta.data(), s.m, s.n, ld, 1e-5f);
+        volatile double ln_v5  = bench_ln_ssve_v5     (a.data(), b.data(), gamma.data(), beta.data(), s.m, s.n, ld, 1e-5f);
+        volatile double ln_v6  = bench_ln_ssve_v6     (a.data(), b.data(), gamma.data(), beta.data(), s.m, s.n, ld, 1e-5f);
+        volatile double ln_wf  = bench_ln_ssve_welford(a.data(), b.data(), gamma.data(), beta.data(), s.m, s.n, ld, 1e-5f);
+
+        volatile int64_t vm = s.m, vn = s.n;
+        volatile double vbytes = norm_bytes(vm, vn);
+
+        double lg0 = to_gibs((double)vbytes, (double)ln_v0);
+        double lg1 = to_gibs((double)vbytes, (double)ln_v1);
+        double lg2 = to_gibs((double)vbytes, (double)ln_v2);
+        double lg4 = to_gibs((double)vbytes, (double)ln_v4);
+        double lg5 = to_gibs((double)vbytes, (double)ln_v5);
+        double lg6 = to_gibs((double)vbytes, (double)ln_v6);
+        double lgw = to_gibs((double)vbytes, (double)ln_wf);
+
+        print_ablation_row("LN V0 (FSQRT+FDIV)",  vm, vn, lg0, (double)vpeak, 0.0);
+        print_ablation_row("LN V1 (FRSQRTE+NR)",  vm, vn, lg1, (double)vpeak, lg0);
+        print_ablation_row("LN V2 (inv_N)",        vm, vn, lg2, (double)vpeak, lg0);
+        print_ablation_row("LN V4 (4-acc ILP)",    vm, vn, lg4, (double)vpeak, lg0);
+        print_ablation_row("LN V5 (load-pipe)",    vm, vn, lg5, (double)vpeak, lg0);
+        print_ablation_row("LN V6 (4-blk contig)", vm, vn, lg6, (double)vpeak, lg0);
+        print_ablation_row("LN Welford (2R+1W)",   vm, vn, lgw, (double)vpeak, lg0);
+        std::cout << "\n";
+    }
+
+    // -----------------------------------------------------------------------
+    // Section 4: LayerNorm vs RMSNorm comparison (Sprint 2c decision C)
+    // Best-variant side-by-side on identical shapes.
+    // LayerNorm structural cost: 3R+1W vs RMSNorm 2R+1W.
+    // Expected: LN/RMS GiB/s ratio ≈ 2/3 at the DRAM wall.
+    // -----------------------------------------------------------------------
+    std::cout << "\n--- LayerNorm vs RMSNorm (best variants, same shapes) ---\n";
+    std::cout << std::left << std::setw(24) << "variant"
+              << "  rows   feat    GiB/s  (% peak)  LN/RMS ratio\n";
+    std::cout << std::string(70, '-') << "\n";
+
+    for (const auto& s : ablation_shapes) {
+        const int64_t ld = s.m;
+        std::vector<float> a(ld * s.n), b(ld * s.n, 0.0f);
+        std::vector<float> gamma(s.n, 1.0f), beta(s.n, 0.0f);
+        for (int64_t i = 0; i < ld * s.n; ++i)
+            a[i] = static_cast<float>((i % 17) - 8) * 0.1f;
+
+        volatile double ln_sec  = bench_ln_ssve_v6(a.data(), b.data(), gamma.data(), beta.data(),
+                                                    s.m, s.n, ld, 1e-5f);
+        volatile double rms_sec = bench_ssve_v6(a.data(), b.data(), gamma.data(),
+                                                 s.m, s.n, ld, 1e-5f);
+
+        // Inner scope forces all intermediate values through volatile stack slots —
+        // same discipline as Section 1/2 to survive SMSTART-induced D-register zeroing.
+        {
+            volatile int64_t vm = s.m, vn = s.n;
+            volatile double vbytes = norm_bytes(vm, vn);
+            volatile double vlg = to_gibs((double)vbytes, (double)ln_sec);
+            volatile double vrg = to_gibs((double)vbytes, (double)rms_sec);
+            double ratio = ((double)vrg > 0.0) ? (double)vlg / (double)vrg : 0.0;
+
+            std::cout << std::left  << std::setw(24) << "LN V6 (best)"
+                      << "  M=" << std::setw(5) << (int64_t)vm
+                      << "  N=" << std::setw(5) << (int64_t)vn
+                      << "  " << std::fixed << std::setprecision(2) << std::setw(7)
+                      << (double)vlg << " GiB/s"
+                      << "  (" << std::setprecision(1)
+                      << (100.0 * (double)vlg / (double)vpeak) << "% peak)\n";
+
+            std::cout << std::left  << std::setw(24) << "RMS V6 (best)"
+                      << "  M=" << std::setw(5) << (int64_t)vm
+                      << "  N=" << std::setw(5) << (int64_t)vn
+                      << "  " << std::fixed << std::setprecision(2) << std::setw(7)
+                      << (double)vrg << " GiB/s"
+                      << "  (" << std::setprecision(1)
+                      << (100.0 * (double)vrg / (double)vpeak) << "% peak)"
+                      << "  LN/RMS = " << std::setprecision(2) << ratio << "\n\n";
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Section 5 (Sprint 2a): small-N regime — fixed per-call overhead.
     // -----------------------------------------------------------------------
     std::cout << "\n--- Small-N regime: fixed overhead vs streaming work (V1 kernel) ---\n";
     small_n_sweep( 128, vpeak);

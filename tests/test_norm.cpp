@@ -81,6 +81,17 @@ static constexpr float kTol = 1e-5f;
 // documented here rather than silently widening the gate for V0-V3.
 static constexpr float kTolReassoc = 2e-5f;
 
+// FRSQRTE+NR vs IEEE FSQRT+FDIV: one NR step (FRSQRTS) gives ~5e-6 relative
+// accuracy in inv_std (half the squared initial FRSQRTE error of ~2^-8.25).
+// LayerNorm adds a beta term that can partially cancel gamma*x_hat.  When
+// output y is near zero, a relative epsilon is inappropriate because the
+// absolute error in y from the inv_std approximation stays bounded even as y
+// approaches zero.  Bound: |delta_y| ≤ gamma * |x_hat| * 5e-6.  For our test
+// shapes (gamma ≤ 1.5, |x_hat| ≤ 3) this is ≤ ~2.25e-5; worst observed in
+// practice is ~5e-6.  We use an absolute margin of 5e-5 — documented here so
+// it is clear this is the actual accuracy of FRSQRTE+NR, not a silenced gate.
+static constexpr float kAbsMarginNR = 5e-5f;
+
 static void check_close(const std::vector<float>& got,
                         const std::vector<float>& ref,
                         int64_t m, int64_t n, int64_t ld,
@@ -223,6 +234,497 @@ TEST_CASE("RMSNorm ref: non-square with stride", "[norm][sprint1][rmsnorm]") {
 
     check_close(b, ref, M, N, ld_b);
 }
+
+// ===========================================================================
+// Sprint 2c — LayerNorm SSVE kernel tests
+//
+// Every test calls layer_norm_ssve and compares its output element-by-element
+// against layer_norm_ref (the verified C++ reference from Sprint 1).
+//
+// All tests are guarded with cpu_supports_sme(): on CI (M1/M2) they are
+// skipped gracefully; on M4 they run in full.
+// ===========================================================================
+
+// Helper: run both kernels and compare.
+// Accepts separate ld_a / ld_b so we can test padding.
+static void check_lnssve_vs_ref(int64_t m, int64_t n, int64_t ld_a, int64_t ld_b,
+                                 float epsilon,
+                                 std::vector<float>& a,
+                                 std::vector<float>& gamma,
+                                 std::vector<float>& beta,
+                                 float tol = kTol) {
+    std::vector<float> b_ref(ld_b * n, 0.0f);
+    std::vector<float> b_ssve(ld_b * n, 0.0f);
+
+    layer_norm_ref (a.data(), b_ref.data(),  gamma.data(), beta.data(),
+                    m, n, ld_a, ld_b, epsilon);
+    layer_norm_ssve(a.data(), b_ssve.data(), gamma.data(), beta.data(),
+                    m, n, ld_a, ld_b, epsilon);
+
+    for (int64_t col = 0; col < n; ++col)
+        for (int64_t row = 0; row < m; ++row)
+            REQUIRE(b_ssve[row + col * ld_b] ==
+                    Approx(b_ref[row + col * ld_b]).epsilon(tol));
+}
+
+// Case 1: N < SVL (N=4, SVL=16 on M4)
+// The main loop body never fires — only the tail path executes.
+// This tests WHILELO + tail path in isolation.
+TEST_CASE("LayerNorm SSVE: N smaller than SVL (tail-only path)", "[norm][sprint2c][ssve][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 8, N = 4, ld = M;
+    std::vector<float> gamma(N), beta(N);
+    for (int64_t i = 0; i < N; ++i) { gamma[i] = 1.0f + 0.1f * i; beta[i] = 0.05f * i; }
+    auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+        return static_cast<float>((r * 7 + c * 3) % 11) - 5.0f;
+    });
+
+    check_lnssve_vs_ref(M, N, ld, ld, 1e-5f, a, gamma, beta);
+}
+
+// Case 2: N = SVL (N=16 on M4)
+// Exactly one full vector, no tail.  Tests the clean single-iteration path.
+TEST_CASE("LayerNorm SSVE: N equals SVL (no tail)", "[norm][sprint2c][ssve][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 8, N = 16, ld = M;
+    std::vector<float> gamma(N), beta(N);
+    for (int64_t i = 0; i < N; ++i) { gamma[i] = 0.5f + 0.05f * i; beta[i] = -0.1f * i; }
+    auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+        return static_cast<float>((r * 11 + c * 5) % 17) - 8.0f;
+    });
+
+    check_lnssve_vs_ref(M, N, ld, ld, 1e-5f, a, gamma, beta);
+}
+
+// Case 3: N = SVL + 3 (N=19 on M4)
+// One full vector iteration + a tail of 3 elements.
+// Tests that both the full-vector and tail paths run in the same row.
+TEST_CASE("LayerNorm SSVE: N = SVL + 3 (full vector + small tail)", "[norm][sprint2c][ssve][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 6, N = 19, ld = M;
+    std::vector<float> gamma(N), beta(N);
+    for (int64_t i = 0; i < N; ++i) { gamma[i] = 1.0f; beta[i] = 0.0f; }
+    auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+        return static_cast<float>((r * 13 + c * 7) % 19) - 9.0f;
+    });
+
+    check_lnssve_vs_ref(M, N, ld, ld, 1e-5f, a, gamma, beta);
+}
+
+// Case 4: multiple rows, N = 2*SVL + 5 (N=37 on M4)
+// Tests the outer row loop (x20/x19 row-base advancement) and
+// multiple full-vector chunks + tail within each row.
+TEST_CASE("LayerNorm SSVE: multiple rows, N = 2*SVL + 5", "[norm][sprint2c][ssve][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 8, N = 37, ld = M;
+    std::vector<float> gamma(N), beta(N);
+    for (int64_t i = 0; i < N; ++i) { gamma[i] = 0.8f + 0.02f * i; beta[i] = 0.1f * i; }
+    auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+        return static_cast<float>((r * 5 + c * 11) % 23) - 11.0f;
+    });
+
+    check_lnssve_vs_ref(M, N, ld, ld, 1e-5f, a, gamma, beta);
+}
+
+// Case 5: padded matrix — ld_a > M and ld_b > M
+// Tests that the column stride (stride_col_a = ld_a*4) correctly skips the
+// padding elements when ld_a != M.
+TEST_CASE("LayerNorm SSVE: padded matrix (ld_a > M, ld_b > M)", "[norm][sprint2c][ssve][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 5, N = 19, ld_a = 8, ld_b = 8;
+    std::vector<float> gamma(N), beta(N);
+    for (int64_t i = 0; i < N; ++i) { gamma[i] = 1.0f + 0.1f * i; beta[i] = -0.05f * i; }
+    auto a = make_matrix(M, N, ld_a, [](int64_t r, int64_t c) {
+        return static_cast<float>((r * 9 + c * 4) % 13) - 6.0f;
+    });
+
+    check_lnssve_vs_ref(M, N, ld_a, ld_b, 1e-5f, a, gamma, beta);
+}
+
+// Case 6: large-magnitude stress input
+// Values clustered around 1e4 with small variation (±5 around the DC offset).
+// The reference accumulates in double; the SSVE kernel in FP32.
+// With SHIFT=1e4, mean ≈ 1e4 and (x - mean) ≈ ±5: ~4 significant digits survive
+// after cancellation.  The absolute error in the normalized output is bounded by
+// roughly eps_float * SHIFT * inv_std ≈ 1.2e-7 * 1e4 * 0.45 ≈ 5e-4.
+// We use an ABSOLUTE margin (not relative epsilon) because some normalized values
+// are near zero, making a relative tolerance too tight for those elements.
+TEST_CASE("LayerNorm SSVE: large-magnitude stress input (stability)", "[norm][sprint2c][ssve][layernorm][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 4, N = 37, ld = M;
+    const float   SHIFT   = 1e4f;
+    const float   kMargin = 1e-3f;  // absolute tolerance; wider than default kTol
+    std::vector<float> gamma(N, 1.0f), beta(N, 0.0f);
+    auto a = make_matrix(M, N, ld, [&](int64_t r, int64_t c) {
+        return SHIFT + static_cast<float>((r * 3 + c * 5) % 11) - 5.0f;
+    });
+
+    std::vector<float> b_ref (ld * N, 0.0f);
+    std::vector<float> b_ssve(ld * N, 0.0f);
+    layer_norm_ref (a.data(), b_ref.data(),  gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+    layer_norm_ssve(a.data(), b_ssve.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+
+    for (int64_t col = 0; col < N; ++col)
+        for (int64_t row = 0; row < M; ++row)
+            REQUIRE(b_ssve[row + col * ld] ==
+                    Approx(b_ref[row + col * ld]).margin(kMargin));
+}
+
+// ===========================================================================
+// Sprint 2c ablation — LayerNorm SSVE V1 tests
+//
+// V1 replaces FSQRT+FDIV with FRSQRTE+NR in pass 2.  All other passes are
+// identical to V0.  The same six correctness cases are used so a regression
+// in any pass is caught even when V1 is only expected to change pass 2.
+// ===========================================================================
+
+using LNKernelFn = void(*)(const float*, float*, const float*, const float*,
+                            int64_t, int64_t, int64_t, int64_t, float);
+
+static void check_ln_variant(LNKernelFn kernel,
+                              int64_t m, int64_t n, int64_t ld_a, int64_t ld_b,
+                              float epsilon) {
+    std::vector<float> gamma(n), beta(n);
+    for (int64_t i = 0; i < n; ++i) { gamma[i] = 0.5f + 0.05f * static_cast<float>(i % 17);
+                                       beta[i]  = 0.1f  * static_cast<float>(i % 13) - 0.3f; }
+    auto a = make_matrix(m, n, ld_a, [](int64_t r, int64_t c) {
+        return static_cast<float>((r * 11 + c * 7) % 19) - 9.0f;
+    });
+    std::vector<float> b_ref(ld_b * n, 0.0f), b_ker(ld_b * n, 0.0f);
+    layer_norm_ref(a.data(), b_ref.data(), gamma.data(), beta.data(), m, n, ld_a, ld_b, epsilon);
+    kernel(a.data(), b_ker.data(), gamma.data(), beta.data(), m, n, ld_a, ld_b, epsilon);
+    // Absolute margin: see kAbsMarginNR comment above.
+    for (int64_t col = 0; col < n; ++col)
+        for (int64_t row = 0; row < m; ++row)
+            REQUIRE(b_ker[row + col * ld_b] ==
+                    Approx(b_ref[row + col * ld_b]).margin(kAbsMarginNR));
+}
+
+TEST_CASE("LayerNorm SSVE V1: N smaller than SVL (tail-only path)", "[norm][sprint2c][ssve][layernorm][v1]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v1, 8, 4, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V1: N equals SVL (no tail)", "[norm][sprint2c][ssve][layernorm][v1]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v1, 8, 16, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V1: N = SVL + 3 (full vector + small tail)", "[norm][sprint2c][ssve][layernorm][v1]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v1, 6, 19, 6, 6, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V1: multiple rows, N = 2*SVL + 5", "[norm][sprint2c][ssve][layernorm][v1]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v1, 8, 37, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V1: padded matrix (ld_a > M, ld_b > M)", "[norm][sprint2c][ssve][layernorm][v1]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v1, 5, 19, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V1: large-magnitude stress input (stability)", "[norm][sprint2c][ssve][layernorm][v1][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 4, N = 37, ld = M;
+    const float   SHIFT   = 1e4f;
+    const float   kMargin = 1e-3f;
+    std::vector<float> gamma(N, 1.0f), beta(N, 0.0f);
+    auto a = make_matrix(M, N, ld, [&](int64_t r, int64_t c) {
+        return SHIFT + static_cast<float>((r * 3 + c * 5) % 11) - 5.0f;
+    });
+    std::vector<float> b_ref (ld * N, 0.0f);
+    std::vector<float> b_v1  (ld * N, 0.0f);
+    layer_norm_ref      (a.data(), b_ref.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+    layer_norm_ssve_v1  (a.data(), b_v1.data(),  gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+
+    for (int64_t col = 0; col < N; ++col)
+        for (int64_t row = 0; row < M; ++row)
+            REQUIRE(b_v1[row + col * ld] ==
+                    Approx(b_ref[row + col * ld]).margin(kMargin));
+}
+
+// ===========================================================================
+// Sprint 2c ablation — LayerNorm SSVE V2, V4, V5, V6, Welford tests
+//
+// All variants are verified against layer_norm_ref using check_ln_variant
+// (absolute margin kAbsMarginNR = 5e-5).  V4/V5 add boundary-case tests for
+// the 4-column loop (N < 4, N%4 remainder classes).  V6 adds tests for the
+// group path (M = 4*VL = 64 on M4) and the tail-only path (M < 64).
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// V2 — pre-computed 1/N; RMSNorm-style ADDVL/INCW outer loop
+// ---------------------------------------------------------------------------
+
+TEST_CASE("LayerNorm SSVE V2: N smaller than SVL", "[norm][sprint2c][ssve][layernorm][v2]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v2, 8, 4, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V2: N equals SVL (no tail)", "[norm][sprint2c][ssve][layernorm][v2]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v2, 8, 16, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V2: N = SVL + 3", "[norm][sprint2c][ssve][layernorm][v2]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v2, 6, 19, 6, 6, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V2: multiple rows, N = 2*SVL + 5", "[norm][sprint2c][ssve][layernorm][v2]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v2, 8, 37, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V2: padded matrix (ld > M)", "[norm][sprint2c][ssve][layernorm][v2]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v2, 5, 19, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V2: large-magnitude stress input", "[norm][sprint2c][ssve][layernorm][v2][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    const int64_t M = 4, N = 37, ld = M;
+    const float SHIFT = 1e4f;
+    std::vector<float> gamma(N, 1.0f), beta(N, 0.0f);
+    auto a = make_matrix(M, N, ld, [&](int64_t r, int64_t c) {
+        return SHIFT + static_cast<float>((r * 3 + c * 5) % 11) - 5.0f;
+    });
+    std::vector<float> b_ref(ld * N, 0.0f), b_ker(ld * N, 0.0f);
+    layer_norm_ref(a.data(), b_ref.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+    layer_norm_ssve_v2(a.data(), b_ker.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+    for (int64_t col = 0; col < N; ++col)
+        for (int64_t row = 0; row < M; ++row)
+            REQUIRE(b_ker[row + col * ld] == Approx(b_ref[row + col * ld]).margin(1e-3f));
+}
+
+// ---------------------------------------------------------------------------
+// V4 — four independent accumulator chains in both reduction passes
+// ---------------------------------------------------------------------------
+
+TEST_CASE("LayerNorm SSVE V4: N smaller than SVL", "[norm][sprint2c][ssve][layernorm][v4]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v4, 8, 4, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V4: N equals SVL", "[norm][sprint2c][ssve][layernorm][v4]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v4, 8, 16, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V4: N = 2*SVL + 5", "[norm][sprint2c][ssve][layernorm][v4]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v4, 8, 37, 8, 8, 1e-5f);
+}
+
+// N%4 remainder classes — each exercises a different remainder-loop iteration count.
+TEST_CASE("LayerNorm SSVE V4: N%4 remainder classes (1, 2, 3)", "[norm][sprint2c][ssve][layernorm][v4]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v4, 8, 33, 8, 8, 1e-5f);   // N%4 == 1
+    check_ln_variant(layer_norm_ssve_v4, 8, 34, 8, 8, 1e-5f);   // N%4 == 2
+    check_ln_variant(layer_norm_ssve_v4, 8, 35, 8, 8, 1e-5f);   // N%4 == 3
+}
+
+// N < 4: the 4-column main loop is skipped entirely (remainder loop only).
+TEST_CASE("LayerNorm SSVE V4: N < 4 (remainder-only, main loop skipped)", "[norm][sprint2c][ssve][layernorm][v4]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v4, 8, 1, 8, 8, 1e-5f);
+    check_ln_variant(layer_norm_ssve_v4, 8, 3, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V4: padded matrix (ld > M)", "[norm][sprint2c][ssve][layernorm][v4]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v4, 5, 37, 8, 8, 1e-5f);
+}
+
+// ---------------------------------------------------------------------------
+// V5 — software-pipelined loads in both reduction passes
+// ---------------------------------------------------------------------------
+
+TEST_CASE("LayerNorm SSVE V5: N smaller than SVL", "[norm][sprint2c][ssve][layernorm][v5]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v5, 8, 4, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V5: N = 2*SVL + 5", "[norm][sprint2c][ssve][layernorm][v5]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v5, 8, 37, 8, 8, 1e-5f);
+}
+
+// Pipeline boundary: preload-only path (4 <= N < 8) and N < 4.
+TEST_CASE("LayerNorm SSVE V5: pipeline boundary (4 <= N < 8) and N < 4", "[norm][sprint2c][ssve][layernorm][v5]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v5, 8, 4, 8, 8, 1e-5f);
+    check_ln_variant(layer_norm_ssve_v5, 8, 5, 8, 8, 1e-5f);
+    check_ln_variant(layer_norm_ssve_v5, 8, 7, 8, 8, 1e-5f);
+    check_ln_variant(layer_norm_ssve_v5, 8, 3, 8, 8, 1e-5f);
+    check_ln_variant(layer_norm_ssve_v5, 8, 1, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V5: N%4 remainder classes", "[norm][sprint2c][ssve][layernorm][v5]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v5, 8, 33, 8, 8, 1e-5f);
+    check_ln_variant(layer_norm_ssve_v5, 8, 34, 8, 8, 1e-5f);
+    check_ln_variant(layer_norm_ssve_v5, 8, 35, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE V5: padded matrix (ld > M)", "[norm][sprint2c][ssve][layernorm][v5]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v5, 5, 37, 8, 8, 1e-5f);
+}
+
+// ---------------------------------------------------------------------------
+// V6 — 4-row-block contiguity grouping
+//
+// On M4 (VL=16): 4*VL = 64.  Tests below hit the group path (M >= 64),
+// the group+tail path (M=100), and the tail-only path (M < 64).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("LayerNorm SSVE V6: tail-only path (M < 4*VL)", "[norm][sprint2c][ssve][layernorm][v6]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v6, 8, 4, 8, 8, 1e-5f);
+    check_ln_variant(layer_norm_ssve_v6, 8, 37, 8, 8, 1e-5f);
+    check_ln_variant(layer_norm_ssve_v6, 5, 19, 8, 8, 1e-5f);
+}
+
+// Exactly one full group: M = 4*VL = 64 on M4.  Exercises the unpredicated
+// group path (p0) with no tail blocks.
+TEST_CASE("LayerNorm SSVE V6: exactly one full group (M = 4*VL)", "[norm][sprint2c][ssve][layernorm][v6]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    {
+        const int64_t M = 64, N = 32, ld = M;
+        std::vector<float> gamma(N), beta(N);
+        for (int64_t i = 0; i < N; ++i) {
+            gamma[i] = 0.5f + 0.05f * static_cast<float>(i % 17);
+            beta[i]  = 0.1f  * static_cast<float>(i % 13) - 0.3f;
+        }
+        auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+            return static_cast<float>((r * 11 + c * 7) % 19) - 9.0f;
+        });
+        std::vector<float> b_ref(ld * N, 0.0f), b_ker(ld * N, 0.0f);
+        layer_norm_ref(a.data(), b_ref.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+        layer_norm_ssve_v6(a.data(), b_ker.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+        for (int64_t col = 0; col < N; ++col)
+            for (int64_t row = 0; row < M; ++row)
+                REQUIRE(b_ker[row + col * ld] ==
+                        Approx(b_ref[row + col * ld]).margin(kAbsMarginNR));
+    }
+}
+
+// Group + tail: M=100 means one full group (64 rows) + 36-row tail on M4.
+TEST_CASE("LayerNorm SSVE V6: group + tail blocks (M=100)", "[norm][sprint2c][ssve][layernorm][v6]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    {
+        const int64_t M = 100, N = 50, ld = M;
+        std::vector<float> gamma(N), beta(N);
+        for (int64_t i = 0; i < N; ++i) {
+            gamma[i] = 0.5f + 0.05f * static_cast<float>(i % 17);
+            beta[i]  = 0.1f  * static_cast<float>(i % 13) - 0.3f;
+        }
+        auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+            return static_cast<float>((r * 11 + c * 7) % 19) - 9.0f;
+        });
+        std::vector<float> b_ref(ld * N, 0.0f), b_ker(ld * N, 0.0f);
+        layer_norm_ref(a.data(), b_ref.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+        layer_norm_ssve_v6(a.data(), b_ker.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+        for (int64_t col = 0; col < N; ++col)
+            for (int64_t row = 0; row < M; ++row)
+                REQUIRE(b_ker[row + col * ld] ==
+                        Approx(b_ref[row + col * ld]).margin(kAbsMarginNR));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Welford — online single-pass mean+variance
+//
+// The Welford algorithm is numerically stable but uses FP32 throughout.
+// For our test shapes the error is within kAbsMarginNR.  The Welford kernel
+// reduces traffic from 3R+1W to 2R+1W while incurring N scalar FDIVs
+// per block; tests verify correctness, not performance.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("LayerNorm SSVE Welford: N smaller than SVL", "[norm][sprint2c][ssve][layernorm][welford]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_welford, 8, 4, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE Welford: N equals SVL", "[norm][sprint2c][ssve][layernorm][welford]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_welford, 8, 16, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE Welford: N = 2*SVL + 5", "[norm][sprint2c][ssve][layernorm][welford]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_welford, 8, 37, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE Welford: padded matrix (ld > M)", "[norm][sprint2c][ssve][layernorm][welford]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_welford, 5, 19, 8, 8, 1e-5f);
+}
+
+TEST_CASE("LayerNorm SSVE Welford: N=1 (single column, no loop body)", "[norm][sprint2c][ssve][layernorm][welford]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_welford, 8, 1, 8, 8, 1e-5f);
+}
+
+// ---------------------------------------------------------------------------
+// Stress coverage for the remaining LayerNorm variants (Sprint 2c gap-fill).
+//
+// V0/V1/V2 already have large-magnitude stress cases; V4/V5/V6 change the
+// reduction structure (multi-accumulator, pipelining, 4-block grouping) and
+// Welford changes the ALGORITHM — exactly the cases where cancellation
+// behaviour could differ, so each gets the same SHIFT=1e4 input.  Welford's
+// claim to numerical stability (vs the catastrophic naive E[x2]-mean2) is
+// verified here, not assumed: the ablation verdict "slower than two-pass"
+// is only meaningful if its accuracy actually holds.
+// ---------------------------------------------------------------------------
+
+static void check_ln_variant_stress(LNKernelFn kernel) {
+    const int64_t M = 4, N = 37, ld = M;
+    const float   SHIFT   = 1e4f;
+    const float   kMargin = 1e-3f;  // same bound as the V0 stress case
+    std::vector<float> gamma(N, 1.0f), beta(N, 0.0f);
+    auto a = make_matrix(M, N, ld, [&](int64_t r, int64_t c) {
+        return SHIFT + static_cast<float>((r * 3 + c * 5) % 11) - 5.0f;
+    });
+    std::vector<float> b_ref(ld * N, 0.0f), b_ker(ld * N, 0.0f);
+    layer_norm_ref(a.data(), b_ref.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+    kernel(a.data(), b_ker.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+    for (int64_t col = 0; col < N; ++col)
+        for (int64_t row = 0; row < M; ++row)
+            REQUIRE(b_ker[row + col * ld] ==
+                    Approx(b_ref[row + col * ld]).margin(kMargin));
+}
+
+TEST_CASE("LayerNorm SSVE V4: large-magnitude stress input", "[norm][sprint2c][ssve][layernorm][v4][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant_stress(layer_norm_ssve_v4);
+}
+
+TEST_CASE("LayerNorm SSVE V5: large-magnitude stress input", "[norm][sprint2c][ssve][layernorm][v5][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant_stress(layer_norm_ssve_v5);
+}
+
+TEST_CASE("LayerNorm SSVE V6: large-magnitude stress input", "[norm][sprint2c][ssve][layernorm][v6][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant_stress(layer_norm_ssve_v6);
+}
+
+TEST_CASE("LayerNorm SSVE Welford: large-magnitude stress input (the stability claim)", "[norm][sprint2c][ssve][layernorm][welford][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant_stress(layer_norm_ssve_welford);
+}
+
 
 // ===========================================================================
 // Sprint 2 — RMSNorm SSVE kernel tests (V0 baseline + V1/V2/V3 ablation)
