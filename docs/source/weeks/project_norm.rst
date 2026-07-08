@@ -196,6 +196,92 @@ Sprint 1 status
 - **Benchmark:** GiB/s harness + STREAM peak-bandwidth probe in place;
   numbers recorded from M4 (see table above).
 
+Sprint 2 — Summary and reading guide
+-------------------------------------
+
+Sprint 2 delivers the MVP: a correct, VLA Streaming-SVE kernel for **both**
+norms, verified against the C++ reference and measured against a **validated**
+roofline, with the hand-written optimization space explored to its verdict.
+Both norms converge on the same winning structure (**V6**, 4-row-block
+contiguity grouping); the sprint's headline result is *why*, and what each
+lever did or did not buy.
+
+Headline results (Apple M4, useful-bytes GiB/s, M=1024 × N=2048 = 16 MB)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+
+   * - stage
+     - RMSNorm
+     - LayerNorm
+   * - scalar C++ reference
+     - 1.0 GiB/s
+     - 1.0 GiB/s
+   * - V0 (naive VLA SSVE)
+     - 22–25
+     - 12–13
+   * - **V6 (incumbent)**
+     - **37.8 (64 % of roofline)**
+     - **16.3 (27 % of roofline)**
+   * - V6 in moved-bytes terms
+     - ~57 (95 % of roofline)
+     - ~33 (55 % of roofline)
+
+**The three validated ceilings** (Sprint 2a): single-core NEON **79.4**,
+single-core SSVE-streaming **59.4** (← the kernel roofline, same execution
+mode as the kernels), chip-wide 10-thread **89.9** GiB/s (← the Sprint-5
+threading target). All "% of roofline" above is against the 59.4 figure.
+
+**RMSNorm is 1.8–2.3× faster than LayerNorm** on identical shapes (LN/RMS =
+0.43–0.56) — beyond the proposal's "10–40 %". The gap is structural: a 1.33×
+traffic floor (LayerNorm's three passes move 3R+1W vs RMSNorm's 2R+1W) plus
+LayerNorm's extra per-byte work (mean-subtract, β, two serialization points
+per block).
+
+What each lever bought (both norms, detail in the sub-sections below)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- **V1** (FRSQRTE+NR inv_rms/inv_std): ≈0 on both — reciprocal-sqrt latency is
+  off the critical path.
+- **V2** (pre-computed 1/N): ≈0 on RMSNorm, **+9–12 % on LayerNorm** — the one
+  verdict that does *not* transfer, because LayerNorm has two per-block FDIVs
+  at serialization points.
+- **V3** (×2 unroll): ≈0 — the OOO core already overlaps the loads.
+- **V4** (4-accumulator ILP): **+27–33 % on both** — the single-accumulator
+  dependency chain was the real bottleneck (this is why V3 was flat).
+- **V5** (load pipelining): ≈0 vs V4 — OOO rename already hoists the loads.
+- **V6** (4-row-block contiguity): ties V4 at cache-resident shapes and wins
+  big in the true-DRAM regime (**RMSNorm +131 %, LayerNorm +71 % vs V0** at
+  64 MB) — the winning lever is *access density*, not residency (residency was
+  measured to be already satisfied). **Incumbent for both norms.**
+- **Welford** (LayerNorm single-pass): a documented **double negative** —
+  25–30 % slower than V6 *and* ~100× less accurate on shifted FP32 data. On
+  SIMD the stable two-pass wins on both speed and accuracy.
+
+Reading guide (the sections are in build order, not sprint-letter order)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The detailed sections below appear in the order the work was actually done,
+which is the honest "measure before optimize" narrative — so **Sprint 2b's
+first ablation (V0–V3) appears before Sprint 2a (roofline validation)**: the
+early V0–V3 percentages were quoted against a peak that 2a later proved was
+the wrong ceiling, and 2a restates them. The logical order is:
+
+1. **Sprint 2a — roofline validation** — what "peak" really measures; the
+   three ceilings; the byte-counting convention.
+2. **Sprint 2b — RMSNorm** — the V0 kernel, the V0–V3 ablation (with its
+   interim numbers), then round two (V4–V6) against the validated roofline.
+3. **Sprint 2c — LayerNorm** — the V0 kernel and the full V1–V6 + Welford
+   ablation, plus the LayerNorm-vs-RMSNorm comparison.
+
+Frozen for Sprint 3+: **RMSNorm V6 and LayerNorm V6** are the SSVE baselines
+the ZA kernel (Sprint 3) must beat and the JIT (Sprint 4) must emit. The
+quantified hand-off: true 3R→2R pass fusion needs more resident state than the
+32 Z-registers hold, so it is the Sprint-3 ZA hypothesis — and LayerNorm is
+where it has structural headroom (+33 % traffic reduction available; none on
+RMSNorm).
+
 Sprint 2 — Hand-written SSVE RMSNorm kernel
 --------------------------------------------
 
