@@ -222,22 +222,45 @@ ablation outcome; a timeboxed prototype with an explained verdict beats an open-
       A pre-registered, valid "ZA adds nothing here, and here is why" outcome. **V6 stays the
       frozen RMSNorm incumbent for the JIT (Sprint 4).**
 
-**LayerNorm ZA variant (Mariza) — gated:**
-- [ ] Gate resolved to a **reasoned skip**: the RMSNorm ZA verdict is negative and the
-      `mova`-throughput bottleneck is norm-agnostic. LayerNorm's 3R+1W structure has the larger
-      residency headroom of the two, so if any ZA prototype is worth it, it is there — but it
-      inherits the same `mova`-cost ceiling. Handoff + data recorded in the report; final call
-      is Mariza's (a reasoned skip is a valid ablation note).
+**LayerNorm ZA variant (Mariza):**
+- [x] Gate resolved by **building the prototype** rather than taking the reasoned skip: the
+      RMSNorm `mova`-throughput bottleneck is a hypothesis until measured on LayerNorm's own
+      structure, and LayerNorm's larger headroom (3R+1W vs RMSNorm's 2R+1W) made it worth the
+      direct test.
+- [x] Hand-written ZA kernel (`layer_norm_za.S`): full **3-pass ZA residency** — `x` staged in
+      ZA once during the mean pass, reused from ZA for BOTH the variance pass and the normalize
+      pass (3R+1W → 1R+1W, a 50% traffic cut vs RMSNorm's 33%), going further than the Sprint-2c
+      "3R→2R" partial-fusion sketch for the most decisive test available. Reduction stays SSVE
+      (context.md §5); `smstart`/`smstop` manage PSTATE.SM + PSTATE.ZA correctly; VLA (tile
+      geometry from `cntw`, no literal 16); streaming three-pass fallback for `N > 4*SVL`.
+- [x] Verified vs `layer_norm_ref` (tile boundaries, row tails, mismatched leading dims, the
+      fallback path, large-magnitude stress); 5 new test cases in `test_norm`, all pass on M4.
+- [x] Benchmarked vs V6 on the same M×N grid as RMSNorm's ZA table. **VERDICT: ZA loses
+      decisively — 51–68% slower than V6 in the fast path, a LARGER loss than RMSNorm's
+      39–65%, exactly as the pre-registered hypothesis predicted** (proportionally more `mova`
+      ops — 3/element vs RMSNorm's 2 — for a proportionally bigger traffic cut still nets a
+      worse margin). Fallback (no ZA) is 11–12% slower than V6, expected since it's a plain
+      single-block three-pass without V6's contiguity grouping/ILP. **V6 stays the frozen
+      LayerNorm incumbent for the JIT (Sprint 4), for both norms.**
+
+**Correctness fix found during this work (both kernels):** an eps register-stash bug affecting
+13 of the 15 existing SSVE/ZA kernels (RMSNorm V0–V6 + `rms_norm_za`, LayerNorm V2/V4/V5/V6/
+Welford) — eps was silently lost across `smstart` (a stack-reload aliasing bug in most, a false
+assumption that D8 survives `smstart` in RMSNorm V0), invisible under every existing tolerance
+but producing NaN whenever sumsq/variance is exactly zero. Fixed in all 13 kernels (dedicated
+stack slot, stored before `smstart`, reloaded after — memory survives the PSTATE.SM transition,
+no register does); 2 new regression tests added; full suite re-verified green (352,473
+assertions, 93 cases).
 
 **Sprint close-out (docs + commits):**
-- [x] **Sphinx report updated:** Sprint-3 section — the hypothesis *as written before
-      measuring*, the ZA kernel design (ZA staging, SSVE reduction, PSTATE.SM/ZA handling), and
-      the measured verdict vs V6 (loss, explained via the `mova` bottleneck). Rebuilt locally
-      (`build succeeded`, only the pre-existing cosmetic asm-lexer warnings).
-- [ ] **Commit discipline throughout:** atomic conventional commits per file on
-      `feat/sprint3-za-rmsnorm` (`feat(norm): add rms_norm_za …`, `test(norm): …`,
-      `bench(norm): …`, `docs(norm): …`). **Remaining: open the PR into `main`, CI green before
-      merge** (two-person review — Ketsia/Mariza).
+- [x] **Sphinx report updated:** Sprint-3 section — RMSNorm's original ZA writeup, PLUS the new
+      LayerNorm ZA hypothesis/design/measured-verdict subsection, PLUS the eps register-stash
+      correctness note. Heading underlines checked; docs build previously verified working on
+      this file's structure (Sphinx itself unavailable in this environment to rebuild).
+- [x] **Commit discipline throughout:** atomic conventional commits per file on
+      `feat/sprint3-za-layernorm` (`fix(norm): …` for the eps bugfix, `feat(norm): add
+      layer_norm_za …`, `test(norm): …`, `bench(norm): …`, `docs(norm): …`). **Remaining: open
+      the PR into `main`, CI green before merge** (two-person review — Ketsia/Mariza).
 
 **Done when:** a verified ZA kernel exists with a measured verdict vs the SSVE winner (win,
 loss, or tie — each with its explanation), the best kernel **per architecture** is frozen

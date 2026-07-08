@@ -8,6 +8,7 @@ add_library(norm_lib
     layer_norm_ssve_v5.S        # V5: V4 + software-pipelined loads
     layer_norm_ssve_v6.S        # V6: 4-row-block contiguity grouping
     layer_norm_ssve_welford.S   # Welford: online single-pass mean+var
+    layer_norm_za.S             # Sprint 3: ZA-tile residency (3R+1W -> 1R+1W fusion, gated)
     rms_norm_ssve.S             # V0: baseline SSVE kernel
     rms_norm_ssve_v1.S          # V1: FRSQRTE+FRSQRTS (no FSQRT/FDIV)
     rms_norm_ssve_v2.S          # V2: V1 + pre-computed 1/N
@@ -35,6 +36,7 @@ set_source_files_properties(
     layer_norm_ssve_v5.S
     layer_norm_ssve_v6.S
     layer_norm_ssve_welford.S
+    layer_norm_za.S
     rms_norm_ssve.S
     rms_norm_ssve_v1.S
     rms_norm_ssve_v2.S

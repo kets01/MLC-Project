@@ -1106,6 +1106,64 @@ TEST_CASE("RMSNorm ZA: large-magnitude stress input (stability)", "[norm][sprint
 
 
 // ===========================================================================
+// Sprint 3 — LayerNorm ZA-tile residency kernel (layer_norm_za), gated
+//
+// Unlike rms_norm_za (2R+1W -> 1R+1W), this prototype stages x in ZA once
+// during the mean pass and reuses it from ZA for BOTH the variance pass and
+// the normalize pass: a full 3R+1W -> 1R+1W fusion. Same tile-boundary
+// walk as the RMSNorm ZA suite (single tile, multi-tile, the 4*SVL
+// residency boundary, row tails, mismatched leading dims, and the N > 4*SVL
+// fallback), reusing the Sprint-2c check_ln_variant / check_ln_variant_stress
+// helpers since layer_norm_za shares the canonical LayerNorm signature.
+//
+// Mean and variance each use a single accumulator in strict column order
+// (reference order) across all four tile sections, so no reassociation
+// tolerance is needed beyond the FRSQRTE+NR margin already used by V1/V6
+// (kAbsMarginNR). All cases skip on CI (no SME) and run fully on the M4.
+// ===========================================================================
+
+// ZA path, one tile: N < SVL (column tail inside tile 0) and N == SVL.
+TEST_CASE("LayerNorm ZA: single tile, N < SVL and N == SVL", "[norm][sprint3][za][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required (layer_norm_za uses smstart/smstop + ZA)");
+    check_ln_variant(layer_norm_za, 16, 8,  16, 16, 1e-5f);   // N < SVL: tile 0 partial
+    check_ln_variant(layer_norm_za, 16, 16, 16, 16, 1e-5f);   // N == SVL: tile 0 full
+}
+
+// ZA path, multiple tiles: N spanning 2-3 tiles with a partial last tile,
+// and N == 4*SVL exactly (all four tiles full — the residency boundary).
+TEST_CASE("LayerNorm ZA: multi-tile, partial last tile and 4*SVL boundary", "[norm][sprint3][za][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required (layer_norm_za uses smstart/smstop + ZA)");
+    check_ln_variant(layer_norm_za, 16, 24, 16, 16, 1e-5f);   // tiles 0 full + 1 partial
+    check_ln_variant(layer_norm_za, 16, 40, 16, 16, 1e-5f);   // tiles 0,1 full + 2 partial
+    check_ln_variant(layer_norm_za, 16, 64, 16, 16, 1e-5f);   // all four tiles full (=4*SVL)
+}
+
+// ZA path with a row tail: M not a multiple of SVL exercises the WHILELO
+// row predicate through the mova into/out of ZA, across several row blocks
+// and mismatched leading dims.
+TEST_CASE("LayerNorm ZA: row tail + multiple row blocks + mismatched ld", "[norm][sprint3][za][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required (layer_norm_za uses smstart/smstop + ZA)");
+    check_ln_variant(layer_norm_za, 7,  40, 8,   8,  1e-5f);   // single partial block
+    check_ln_variant(layer_norm_za, 100, 48, 128, 112, 1e-5f); // full blocks + row tail, ld>M
+}
+
+// Fallback path: N just past the ZA capacity (4*SVL + 1) and a realistic
+// large transformer width — both take the streaming three-pass, so
+// correctness there must hold too even though ZA is not used.
+TEST_CASE("LayerNorm ZA: fallback path (N > 4*SVL)", "[norm][sprint3][za][layernorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required (layer_norm_za uses smstart/smstop + ZA)");
+    check_ln_variant(layer_norm_za, 16, 65,   16, 16, 1e-5f);  // one past capacity
+    check_ln_variant(layer_norm_za, 64, 2048, 64, 64, 1e-5f);  // large width, fallback
+}
+
+// Stress: large-magnitude shifted input (N=37 -> ZA path on the M4).
+TEST_CASE("LayerNorm ZA: large-magnitude stress input (stability)", "[norm][sprint3][za][layernorm][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required (layer_norm_za uses smstart/smstop + ZA)");
+    check_ln_variant_stress(layer_norm_za);
+}
+
+
+// ===========================================================================
 // Sprint 2a — roofline-probe correctness (bw_probe_ssve)
 //
 // The probe is a STREAM scale-add (d[i] = s[i] + 1.0f), not a norm kernel,
@@ -1142,4 +1200,82 @@ TEST_CASE("BW probe SSVE: n = 0 is a safe no-op", "[norm][sprint2][roofline]") {
     std::vector<float> s(4, 1.0f), d(4, -7.0f);
     bw_probe_ssve(d.data(), s.data(), 0);
     for (int i = 0; i < 4; ++i) REQUIRE(d[i] == -7.0f);  // untouched
+}
+
+
+// ===========================================================================
+// Regression — eps register-stash clobber (found during Sprint 3, LayerNorm ZA)
+//
+// Every SSVE/ZA kernel stashed epsilon in the callee-saved S8/D8 register
+// before SMSTART, intending to read it back afterwards. Two shapes of that
+// pattern shipped, and BOTH were broken:
+//   - RMSNorm V1-V6 and rms_norm_za reloaded eps from [sp,#NN] — but that
+//     stack slot held the CALLER's old d8 (saved by "str d8" *before* the
+//     eps fmov overwrote the register), never eps itself.
+//   - RMSNorm V0 read eps directly back from S8/Z8 after SMSTART, no stack
+//     detour at all — but SMSTART clobbers D8 too, not just D9-D15 as
+//     assumed, so the register itself doesn't survive the transition either.
+// Every existing tolerance-based test passed regardless, because eps's
+// effect on non-degenerate data is far below the FP32 comparison tolerance.
+// The bug is only observable when sumsq/variance is EXACTLY zero, so eps is
+// the only thing standing between a valid reciprocal and 1/0 = inf, and
+// inf * 0 = NaN propagates through the normalize step.
+//
+// The fix (all 13 affected kernels): stash eps to a dedicated stack slot
+// BEFORE smstart and reload from that same address after — memory, unlike
+// any register, is unaffected by a PSTATE.SM transition. These cases lock
+// that fix in place: an all-zero RMSNorm row (sumsq == 0 exactly) and an
+// all-constant LayerNorm row (var == 0 exactly) must produce a finite,
+// correct result, not NaN.
+// ===========================================================================
+
+TEST_CASE("RMSNorm SSVE kernels: all-zero row is finite (eps regression)",
+          "[norm][sprint3][regression][eps]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    const int64_t M = 16, N = 16, ld = M;
+    std::vector<float> a(ld * N, 0.0f);          // sumsq == 0 exactly per row
+    std::vector<float> gamma(N, 1.0f);
+
+    auto check = [&](KernelFn kernel, const char* name) {
+        std::vector<float> b(ld * N, 123.0f);
+        kernel(a.data(), b.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+        for (int64_t i = 0; i < ld * N; ++i) {
+            INFO(name << " b[" << i << "]=" << b[i]);
+            REQUIRE(std::isfinite(b[i]));
+            REQUIRE(b[i] == Approx(0.0f).margin(1e-6f));
+        }
+    };
+    check(rms_norm_ssve,    "rms_norm_ssve");
+    check(rms_norm_ssve_v1, "rms_norm_ssve_v1");
+    check(rms_norm_ssve_v2, "rms_norm_ssve_v2");
+    check(rms_norm_ssve_v3, "rms_norm_ssve_v3");
+    check(rms_norm_ssve_v4, "rms_norm_ssve_v4");
+    check(rms_norm_ssve_v5, "rms_norm_ssve_v5");
+    check(rms_norm_ssve_v6, "rms_norm_ssve_v6");
+    check(rms_norm_za,      "rms_norm_za");
+}
+
+TEST_CASE("LayerNorm SSVE kernels: all-constant row is finite (eps regression)",
+          "[norm][sprint3][regression][eps]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    const int64_t M = 16, N = 16, ld = M;
+    std::vector<float> a(ld * N, 3.0f);          // var == 0 exactly per row
+    std::vector<float> gamma(N, 1.0f), beta(N, 0.5f);
+
+    auto check = [&](LNKernelFn kernel, const char* name) {
+        std::vector<float> b(ld * N, 123.0f);
+        kernel(a.data(), b.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+        for (int64_t i = 0; i < ld * N; ++i) {
+            INFO(name << " b[" << i << "]=" << b[i]);
+            REQUIRE(std::isfinite(b[i]));
+            REQUIRE(b[i] == Approx(0.5f).margin(1e-6f));   // (x-mean)=0 -> output == beta
+        }
+    };
+    check(layer_norm_ssve,          "layer_norm_ssve");
+    check(layer_norm_ssve_v1,       "layer_norm_ssve_v1");
+    check(layer_norm_ssve_v2,       "layer_norm_ssve_v2");
+    check(layer_norm_ssve_v4,       "layer_norm_ssve_v4");
+    check(layer_norm_ssve_v5,       "layer_norm_ssve_v5");
+    check(layer_norm_ssve_v6,       "layer_norm_ssve_v6");
+    check(layer_norm_ssve_welford,  "layer_norm_ssve_welford");
 }

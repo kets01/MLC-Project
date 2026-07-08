@@ -305,6 +305,15 @@ static double bench_za(const float* a, float* b, const float* gamma,
     return bench([&]() { rms_norm_za(a, b, gamma, m, n, ld, ld, eps); }, reps);
 }
 
+__attribute__((noinline))
+static double bench_ln_za(const float* a, float* b, const float* gamma,
+                          const float* beta, int64_t m, int64_t n, int64_t ld,
+                          float eps, int reps = 50) {
+    using namespace mini_jit::norm;
+    layer_norm_za(a, b, gamma, beta, m, n, ld, ld, eps);
+    return bench([&]() { layer_norm_za(a, b, gamma, beta, m, n, ld, ld, eps); }, reps);
+}
+
 // ---------------------------------------------------------------------------
 // Ablation row: prints GiB/s and % delta vs V0 baseline.
 // ---------------------------------------------------------------------------
@@ -619,6 +628,58 @@ int main() {
         double gza = to_gibs((double)vbytes, (double)vsec_za);
 
         print_ablation_row("V6 (2R+1W, SSVE)",    vm, vn, g6,  (double)vpeak, 0.0);
+        print_ablation_row("ZA residency",         vm, vn, gza, (double)vpeak, g6, "V6");
+        std::cout << "\n";
+    }
+
+    // -----------------------------------------------------------------------
+    // Section 2c (Sprint 3, gated): LayerNorm ZA-tile residency vs V6.
+    //
+    // Unlike rms_norm_za (2R+1W -> 1R+1W), layer_norm_za goes further: x is
+    // staged in ZA once during the mean pass and reused from ZA for BOTH the
+    // variance pass and the normalize pass, so the ZA fast path is a full
+    // 3R+1W -> 1R+1W fusion (50% traffic cut, vs RMSNorm's 33%). Hypothesis
+    // (written before measuring, given the RMSNorm verdict): if a 33%
+    // traffic cut still lost 39-65% to mova throughput, a 50% cut needs a
+    // proportionally bigger mova tax (3 mova ops/element here: 1 store into
+    // ZA + 2 loads back out, vs RMSNorm's 1 store + 1 load) to break even.
+    // Expect this to also lose, likely by a larger margin than RMSNorm's,
+    // confirming mova throughput -- not DRAM bandwidth -- is the norm-
+    // agnostic bottleneck. A win here would be the surprising result.
+    // -----------------------------------------------------------------------
+    std::cout << "\n--- LayerNorm ZA residency vs SSVE V6 (Sprint 3, gated) ---\n";
+    std::cout << std::left << std::setw(24) << "variant"
+              << "  rows   feat    GiB/s  (% of 1-core SSVE peak)  vs V6\n";
+    std::cout << std::string(78, '-') << "\n";
+
+    const Shape ln_za_shapes[] = {
+        { 128,   16},   // 1 tile, ZA path
+        { 128,   32},   // 2 tiles, ZA path
+        { 128,   64},   // 4 tiles full (=4*SVL), ZA path — max residency
+        {1024,   64},   // more row blocks at the residency boundary
+        {4096,   64},   // large footprint, still ZA path
+        { 128, 2048},   // N > 64 -> fallback (expect tie/loss vs V6)
+        {1024, 2048},   // N > 64 -> fallback
+    };
+
+    for (const auto& s : ln_za_shapes) {
+        const int64_t ld = s.m;
+        std::vector<float> a(ld * s.n), b(ld * s.n, 0.0f);
+        std::vector<float> gamma(s.n, 1.0f), beta(s.n, 0.0f);
+        for (int64_t i = 0; i < ld * s.n; ++i)
+            a[i] = static_cast<float>((i % 17) - 8) * 0.1f;
+
+        // volatile: SMSTART zeroes D9-D15; keep timing off callee-saved FP regs.
+        volatile double vsec_v6 = bench_ln_ssve_v6(a.data(), b.data(), gamma.data(), beta.data(), s.m, s.n, ld, 1e-5f);
+        volatile double vsec_za = bench_ln_za     (a.data(), b.data(), gamma.data(), beta.data(), s.m, s.n, ld, 1e-5f);
+
+        volatile int64_t vm = s.m, vn = s.n;
+        volatile double vbytes = norm_bytes(vm, vn);
+
+        double g6  = to_gibs((double)vbytes, (double)vsec_v6);
+        double gza = to_gibs((double)vbytes, (double)vsec_za);
+
+        print_ablation_row("V6 (3R+1W, SSVE)",    vm, vn, g6,  (double)vpeak, 0.0);
         print_ablation_row("ZA residency",         vm, vn, gza, (double)vpeak, g6, "V6");
         std::cout << "\n";
     }
