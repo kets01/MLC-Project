@@ -56,14 +56,19 @@
 SYMBOL(rms_norm_ssve):
 
     // -----------------------------------------------------------------------
-    // Prologue — 64-byte stack frame, 16-byte aligned.
+    // Prologue — 80-byte stack frame, 16-byte aligned (extended from 64 to
+    // fit a dedicated eps stash slot at [sp,#64]: streaming-mode entry
+    // clobbers D8 along with D9-D15, so eps cannot simply live in S8 across
+    // smstart — verified empirically; memory is the only thing that survives).
     //
     //  [sp+ 0] x19, x20  — a_base / b_base byte pointers (row-block base)
     //  [sp+16] x21, x22  — gamma ptr / M (total rows)
     //  [sp+32] x23, x24  — N (columns) / ld_a in BYTES (= ld_a_elem * 4)
-    //  [sp+48] x25 / d8  — ld_b in BYTES / epsilon (callee-saved FP register)
+    //  [sp+48] x25 / d8  — ld_b in BYTES / callee-saved FP register (unused
+    //                      for eps now, kept saved/restored regardless)
+    //  [sp+64] epsilon   — dedicated eps stash, stored before smstart
     // -----------------------------------------------------------------------
-    stp  x19, x20, [sp, #-64]!
+    stp  x19, x20, [sp, #-80]!
     stp  x21, x22, [sp, #16]
     stp  x23, x24, [sp, #32]
     str  x25,      [sp, #48]
@@ -75,7 +80,6 @@ SYMBOL(rms_norm_ssve):
     // x24 = ld_a * 4  (byte stride between consecutive columns in A;
     //                  also the byte distance between a[r,c] and a[r,c+1]
     //                  since a[r,c+1] = a[r + (c+1)*ld_a] = a[r,c] + ld_a elems)
-    // S8  = epsilon   (first FP argument lives in S0; copy to callee-saved S8)
     // -----------------------------------------------------------------------
     mov   x19, x0          // a_base (byte pointer to a[0,0])
     mov   x20, x1          // b_base (byte pointer to b[0,0])
@@ -84,7 +88,8 @@ SYMBOL(rms_norm_ssve):
     mov   x23, x4          // N      (total columns / feature dimension)
     lsl   x24, x5, #2      // ld_a_bytes = ld_a * 4
     lsl   x25, x6, #2      // ld_b_bytes = ld_b * 4
-    fmov  s8,  s0          // save epsilon into callee-saved S8
+    fmov  s8,  s0          // kept for consistency (not relied on across smstart)
+    str   s0,  [sp, #64]   // dedicated eps stash, stored BEFORE smstart
 
     cbz   x22, .Lrow_done
 
@@ -149,8 +154,10 @@ SYMBOL(rms_norm_ssve):
     dup    z3.s, z0.s[0]               // z3 = {N, N, …}
     fdiv   z2.s, p1/m, z2.s, z3.s     // z2[i] = sumsq[i] / N
 
-    // Broadcast epsilon from S8 (= Z8.S[0]):
-    dup    z3.s, z8.s[0]               // z3 = {ε, ε, …}
+    // Broadcast epsilon, reloaded from the dedicated stack slot each block
+    // (S8/D8 does not survive smstart, so it cannot be read from Z8 here):
+    ldr    s0, [sp, #64]
+    dup    z3.s, z0.s[0]               // z3 = {ε, ε, …}
     fadd   z2.s, p1/m, z2.s, z3.s     // z2[i] = sumsq[i]/N + ε
 
     // Square root then reciprocal (both predicated; inactive lanes unchanged):
@@ -213,5 +220,5 @@ SYMBOL(rms_norm_ssve):
     ldr  x25,      [sp, #48]
     ldp  x23, x24, [sp, #32]
     ldp  x21, x22, [sp, #16]
-    ldp  x19, x20, [sp], #64
+    ldp  x19, x20, [sp], #80
     ret
