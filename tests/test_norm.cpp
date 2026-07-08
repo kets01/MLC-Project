@@ -1049,6 +1049,63 @@ TEST_CASE("RMSNorm SSVE V6: large-magnitude stress input", "[norm][sprint2][abla
 
 
 // ===========================================================================
+// Sprint 3 — RMSNorm ZA-tile residency kernel (rms_norm_za)
+//
+// The ZA-resident fast path is taken when the row fits in ZA (N <= 4*SVL;
+// 64 on the M4's 512-bit SVL).  These cases deliberately walk the tile
+// boundaries so the four ZA_LOAD/ZA_STORE macro expansions and the
+// column/row tails are all exercised; the N > 4*SVL cases take the
+// streaming fallback.  rms_norm_za shares the canonical signature, so the
+// Sprint-2 check_variant / check_variant_stress helpers drive it directly.
+//
+// The kernel sums squares in a single accumulator in strict column order
+// (reference order), so the standard kTol = 1e-5 applies — no reassociation
+// widening.  All cases skip on CI (no SME) and run fully on the M4.
+// ===========================================================================
+
+// ZA path, one tile: N < SVL (column tail inside tile 0) and N == SVL.
+TEST_CASE("RMSNorm ZA: single tile, N < SVL and N == SVL", "[norm][sprint3][za][rmsnorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required (rms_norm_za uses smstart/smstop + ZA)");
+    check_variant(rms_norm_za, 16, 8,  16, 16, 1e-5f);   // N < SVL: tile 0 partial
+    check_variant(rms_norm_za, 16, 16, 16, 16, 1e-5f);   // N == SVL: tile 0 full
+}
+
+// ZA path, multiple tiles: N spanning 2-3 tiles with a partial last tile,
+// and N == 4*SVL exactly (all four tiles full — the residency boundary).
+TEST_CASE("RMSNorm ZA: multi-tile, partial last tile and 4*SVL boundary", "[norm][sprint3][za][rmsnorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required (rms_norm_za uses smstart/smstop + ZA)");
+    check_variant(rms_norm_za, 16, 24, 16, 16, 1e-5f);   // tiles 0 full + 1 partial
+    check_variant(rms_norm_za, 16, 40, 16, 16, 1e-5f);   // tiles 0,1 full + 2 partial
+    check_variant(rms_norm_za, 16, 64, 16, 16, 1e-5f);   // all four tiles full (=4*SVL)
+}
+
+// ZA path with a row tail: M not a multiple of SVL exercises the WHILELO
+// row predicate through the mova into/out of ZA (inactive lanes must not be
+// stored), across several row blocks and mismatched leading dims.
+TEST_CASE("RMSNorm ZA: row tail + multiple row blocks + mismatched ld", "[norm][sprint3][za][rmsnorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required (rms_norm_za uses smstart/smstop + ZA)");
+    check_variant(rms_norm_za, 7,  40, 8,   8,  1e-5f);  // single partial block
+    check_variant(rms_norm_za, 100, 48, 128, 112, 1e-5f); // full blocks + row tail, ld>M
+}
+
+// Fallback path: N just past the ZA capacity (4*SVL + 1) and a realistic
+// large transformer width — both take the streaming two-pass, so correctness
+// there must hold too even though ZA is not used.
+TEST_CASE("RMSNorm ZA: fallback path (N > 4*SVL)", "[norm][sprint3][za][rmsnorm]") {
+    if (!cpu_supports_sme()) SKIP("SME required (rms_norm_za uses smstart/smstop + ZA)");
+    check_variant(rms_norm_za, 16, 65,   16, 16, 1e-5f); // one past capacity
+    check_variant(rms_norm_za, 64, 2048, 64, 64, 1e-5f); // large width, fallback
+}
+
+// Stress: large-magnitude shifted input (N=64 -> ZA path).  Same 5e-4 FP32
+// tolerance as the SSVE variants (sumsq accumulates in FP32 vs the double ref).
+TEST_CASE("RMSNorm ZA: large-magnitude stress input (stability)", "[norm][sprint3][za][rmsnorm][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required (rms_norm_za uses smstart/smstop + ZA)");
+    check_variant_stress(rms_norm_za);
+}
+
+
+// ===========================================================================
 // Sprint 2a — roofline-probe correctness (bw_probe_ssve)
 //
 // The probe is a STREAM scale-add (d[i] = s[i] + 1.0f), not a norm kernel,
