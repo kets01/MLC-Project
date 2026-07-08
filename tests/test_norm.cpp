@@ -1143,3 +1143,81 @@ TEST_CASE("BW probe SSVE: n = 0 is a safe no-op", "[norm][sprint2][roofline]") {
     bw_probe_ssve(d.data(), s.data(), 0);
     for (int i = 0; i < 4; ++i) REQUIRE(d[i] == -7.0f);  // untouched
 }
+
+
+// ===========================================================================
+// Regression — eps register-stash clobber (found during Sprint 3, LayerNorm ZA)
+//
+// Every SSVE/ZA kernel stashed epsilon in the callee-saved S8/D8 register
+// before SMSTART, intending to read it back afterwards. Two shapes of that
+// pattern shipped, and BOTH were broken:
+//   - RMSNorm V1-V6 and rms_norm_za reloaded eps from [sp,#NN] — but that
+//     stack slot held the CALLER's old d8 (saved by "str d8" *before* the
+//     eps fmov overwrote the register), never eps itself.
+//   - RMSNorm V0 read eps directly back from S8/Z8 after SMSTART, no stack
+//     detour at all — but SMSTART clobbers D8 too, not just D9-D15 as
+//     assumed, so the register itself doesn't survive the transition either.
+// Every existing tolerance-based test passed regardless, because eps's
+// effect on non-degenerate data is far below the FP32 comparison tolerance.
+// The bug is only observable when sumsq/variance is EXACTLY zero, so eps is
+// the only thing standing between a valid reciprocal and 1/0 = inf, and
+// inf * 0 = NaN propagates through the normalize step.
+//
+// The fix (all 13 affected kernels): stash eps to a dedicated stack slot
+// BEFORE smstart and reload from that same address after — memory, unlike
+// any register, is unaffected by a PSTATE.SM transition. These cases lock
+// that fix in place: an all-zero RMSNorm row (sumsq == 0 exactly) and an
+// all-constant LayerNorm row (var == 0 exactly) must produce a finite,
+// correct result, not NaN.
+// ===========================================================================
+
+TEST_CASE("RMSNorm SSVE kernels: all-zero row is finite (eps regression)",
+          "[norm][sprint3][regression][eps]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    const int64_t M = 16, N = 16, ld = M;
+    std::vector<float> a(ld * N, 0.0f);          // sumsq == 0 exactly per row
+    std::vector<float> gamma(N, 1.0f);
+
+    auto check = [&](KernelFn kernel, const char* name) {
+        std::vector<float> b(ld * N, 123.0f);
+        kernel(a.data(), b.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+        for (int64_t i = 0; i < ld * N; ++i) {
+            INFO(name << " b[" << i << "]=" << b[i]);
+            REQUIRE(std::isfinite(b[i]));
+            REQUIRE(b[i] == Approx(0.0f).margin(1e-6f));
+        }
+    };
+    check(rms_norm_ssve,    "rms_norm_ssve");
+    check(rms_norm_ssve_v1, "rms_norm_ssve_v1");
+    check(rms_norm_ssve_v2, "rms_norm_ssve_v2");
+    check(rms_norm_ssve_v3, "rms_norm_ssve_v3");
+    check(rms_norm_ssve_v4, "rms_norm_ssve_v4");
+    check(rms_norm_ssve_v5, "rms_norm_ssve_v5");
+    check(rms_norm_ssve_v6, "rms_norm_ssve_v6");
+    check(rms_norm_za,      "rms_norm_za");
+}
+
+TEST_CASE("LayerNorm SSVE kernels: all-constant row is finite (eps regression)",
+          "[norm][sprint3][regression][eps]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    const int64_t M = 16, N = 16, ld = M;
+    std::vector<float> a(ld * N, 3.0f);          // var == 0 exactly per row
+    std::vector<float> gamma(N, 1.0f), beta(N, 0.5f);
+
+    auto check = [&](LNKernelFn kernel, const char* name) {
+        std::vector<float> b(ld * N, 123.0f);
+        kernel(a.data(), b.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+        for (int64_t i = 0; i < ld * N; ++i) {
+            INFO(name << " b[" << i << "]=" << b[i]);
+            REQUIRE(std::isfinite(b[i]));
+            REQUIRE(b[i] == Approx(0.5f).margin(1e-6f));   // (x-mean)=0 -> output == beta
+        }
+    };
+    check(layer_norm_ssve,          "layer_norm_ssve");
+    check(layer_norm_ssve_v1,       "layer_norm_ssve_v1");
+    check(layer_norm_ssve_v2,       "layer_norm_ssve_v2");
+    check(layer_norm_ssve_v4,       "layer_norm_ssve_v4");
+    check(layer_norm_ssve_v5,       "layer_norm_ssve_v5");
+    check(layer_norm_ssve_v6,       "layer_norm_ssve_v6");
+    check(layer_norm_ssve_welford,  "layer_norm_ssve_welford");
+}
