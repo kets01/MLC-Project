@@ -52,13 +52,18 @@ SYM(layer_norm_ssve_v2):
     lsl   x25, x6, #2
     lsl   x26, x7, #2
     fmov  s8, s0
+    str   s0, [sp, #72]            // dedicated eps stash, stored BEFORE smstart
+                                    // (distinct from the d8 callee-save slot above;
+                                    // verified empirically that streaming-mode entry
+                                    // clobbers D8 too, not just D9-D15 as assumed —
+                                    // memory is the only thing smstart cannot touch)
 
     cbz   x23, .Ldone_v2
 
     smstart sm
     ptrue p0.s, all
 
-    ldr   s0, [sp, #64]
+    ldr   s0, [sp, #72]            // eps reloaded from the dedicated stack slot
     dup   z7.s, z0.s[0]            // z7 = [eps,...]
 
     fmov  s0, #1.0
