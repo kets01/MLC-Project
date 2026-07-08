@@ -585,9 +585,135 @@ Sprint 2b status
 - **Best result:** 26.74 GiB/s (V1, M=128, N=2048) = 33.6 % of vectorised peak.
 - **LayerNorm SSVE ablation:** to be done after the LayerNorm V0 kernel is written.
 
+Sprint 2a — Roofline validation
+--------------------------------
+
+**Goal:** validate the peak the V0–V3 percentages were judged against.  Every
+"% of peak" so far used a single 79.58 GiB/s figure; before optimizing
+further, establish *what* that number measures — and what the right ceiling
+for a single-threaded streaming-mode kernel actually is.
+
+What the old "peak" measured
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Disassembly of the benchmark binary answers the first question: the C++
+STREAM probe (``bw_scale_add``) autovectorizes to **NEON** (``ldp q`` pairs +
+``fadd.4s`` + ``stp q``, 64 bytes per iteration) and runs **single-threaded**.
+So 79.58 GiB/s was already a *single-core* figure — but a single-core **NEON**
+figure.  The norm kernels execute in a different mode entirely: streaming SVE
+inside ``SMSTART``/``SMSTOP``, with ``LD1W``/``ST1W``.  Nothing guarantees
+those two modes see the same per-core bandwidth, so a second probe was needed.
+
+The streaming-mode probe
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+``src/norm/bw_probe_ssve.S`` re-runs the same scale-add
+(``d[i] = s[i] + 1.0f``, 128 MiB arrays) the way the kernels access memory:
+one streaming region, contiguous ``LD1W``/``ST1W``, four independent
+load/add/store chains per iteration, predicated VLA tail (no hard-coded SVL).
+It is verified bit-exactly against the scalar loop by two Catch2 cases
+(``[sprint2][roofline]``) before any bandwidth number derived from it is
+trusted.  The benchmark process requests ``QOS_CLASS_USER_INTERACTIVE``
+(macOS has no core-pinning API; this is the strongest P-core scheduling
+hint), and a third, multi-threaded probe measures the chip-wide aggregate.
+
+The three ceilings (Apple M4, best-of-10, 128 MiB arrays)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table::
+   :header-rows: 1
+
+   * - Ceiling
+     - GiB/s
+     - Role
+   * - single-core NEON (compiler-vectorized)
+     - 79.5
+     - what the old "peak" was
+   * - **single-core SSVE streaming (LD1W/ST1W)**
+     - **59.5**
+     - **the kernel roofline**
+   * - chip-wide (10 threads, NEON)
+     - 89.8
+     - Sprint-5 threading target
+
+Two structural facts fall out:
+
+- **Streaming mode has ~25 % less single-core bandwidth than NEON mode** on
+  the M4 (59.5 vs 79.5 GiB/s).  The kernels were being judged against a
+  ceiling they cannot physically reach in their execution mode.
+- **One core already sustains ~66 % of the chip-wide aggregate** (59.5 of
+  89.8 GiB/s).  Threading across rows (Sprint 5) can buy at most ~1.5x, not
+  10x — the M4's memory system saturates with very few cores.
+
+Byte-counting convention (now stated explicitly)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+All GiB/s figures — kernels *and* probes — count **useful bytes**:
+1 read + 1 write per element, the algorithm's minimum traffic.  The V0–V3
+kernels as implemented are two-pass over memory (reduction reads x, normalize
+reads x again, then writes y = 2R+1W), so their *moved*-bytes figure is 1.5x
+the printed one.  Keeping the useful-bytes convention makes the two-pass cost
+visible as a lower % of peak — which is exactly the gap the residency lever
+(V6) attacks, rather than a number to hide.
+
+V0–V3 restated against the validated roofline
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Against the 59.5 GiB/s single-core streaming ceiling, the picture improves
+from the interim "31–34 %" (which used the NEON figure):
+
+- large-N shapes (N ≥ 512): **42–46 % of the kernel roofline** (best ~27 GiB/s);
+  in moved-bytes terms the kernel sustains ~40 GiB/s ≈ **67 % of the ceiling**
+- small-N shapes (N = 64): 31–43 % depending on M (see below)
+
+Small-N regime: overhead quantified
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Sweeping N at fixed M with the V1 kernel and fitting
+:math:`t(N) = t_0 + b \cdot N`:
+
+- **M=128:** the fit is clean — fixed cost :math:`t_0 \approx 1` µs/call
+  (streaming entry, prologue, 8 per-row-block setups + ``inv_rms``
+  serializations), equal to the streaming work at **N ≈ 30–40**, asymptote
+  ~27.5 GiB/s.  The N=64 dip is fully explained by fixed overhead, not by a
+  different memory regime.  (The deeper ``SMSTART``/``SMSTOP`` cost study
+  stays in Sprint 7.)
+- **M=1024:** the linear model is *invalid* (negative intercept) — throughput
+  is not constant in N.  At N=4096 the working set (x plus y, 32 MiB) no
+  longer fits in cache and throughput falls from ~25 to ~18.6 GiB/s: the
+  normalize pass stops re-reading x from cache and pays the full 2R+1W DRAM
+  cost.  This is the first direct measurement of the two-pass structural
+  penalty — evidence for V6 (residency blocking), not an anomaly.
+
+Decision gate: V4–V6 proceed
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The gate asked: is V1 already ≳80–85 % of the single-core roofline?  **No —
+best case is ~46 % (useful bytes) / ~67 % (moved bytes).**  Real single-core
+headroom remains, from two attributable sources: memory-level parallelism in
+the strided two-pass loop (V4 multi-accumulator, V5 load pipelining) and the
+2R+1W → 1R+1W traffic reduction (V6 residency), whose payoff the M=1024/N=4096
+falloff bounds directly.  V4–V6 are therefore worth pursuing before the ZA
+prototype (Sprint 3).
+
+Sprint 2a status
+~~~~~~~~~~~~~~~~
+
+- **Probe:** ``bw_probe_ssve.S`` written, verified bit-exact, committed.
+- **Benchmark:** ``main_norm`` reports all three ceilings, states the byte
+  convention in its header, computes every % against the single-core SSVE
+  ceiling, and prints the small-N sweep with the overhead fit (flagging the
+  cache-boundary regime where the fit is invalid).
+- **Reproducibility:** ceilings stable to ±0.3 % across runs; the
+  M=1024/N=4096 falloff reproduces.
+
 Next
 ~~~~
 
-Sprint 2 (LayerNorm): hand-written SSVE kernel for LayerNorm — two-pass,
-VLA, predicated tails, verified against the reference, measured vs the
-roofline; followed by the same V1–V3 ablation.
+Sprint 2b round two (V4–V6, gate passed): multi-accumulator reduction ILP,
+load software-pipelining, and two-pass residency blocking — each verified,
+benchmarked against the 59.5 GiB/s single-core streaming roofline, and kept
+only if it beats the incumbent.  Then Sprint 2c (LayerNorm): hand-written
+SSVE kernel — two-pass, VLA, predicated tails, verified against the
+reference, measured against both validated ceilings; followed by its own
+ablation including the Welford-vs-two-pass comparison.
