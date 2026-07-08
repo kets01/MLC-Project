@@ -1303,3 +1303,160 @@ Sprint 2c ablation status
   coverage complete for every variant.
 - **Incumbents frozen for Sprint 3/4:** RMSNorm V6 and LayerNorm V6.
 - **Decision-C numbers recorded:** LN/RMS = 0.43–0.56 on identical shapes.
+
+Sprint 3 — Hand-written SME/ZA RMSNorm kernel (``rms_norm_za``)
+---------------------------------------------------------------
+
+The second kernel *architecture* for RMSNorm: the same math as the SSVE
+winner V6, but staged through the SME **ZA** array instead of streamed
+twice. The goal is not a new speed record — Sprint 2a already put V6 near
+the single-core streaming ceiling — but to attribute exactly what the ZA
+tile does, and does not, buy a bandwidth-bound horizontal reduction
+(context.md §5; ROADMAP Sprint 3 "honest expectation-setting").
+
+The hypothesis, written before measuring
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+ZA does not raise DRAM bandwidth. RMSNorm must see a row's **entire**
+sum-of-squares before it can normalize, so V6 re-reads ``x`` in pass 2
+(2R+1W). That second read is only avoidable if the whole row-block stays
+resident on core between the two passes. ZA gives ~4 KB of extra on-core
+storage — four 32-bit tiles ZA0..ZA3, each ``SVL_S × SVL_S`` = 16×16 FP32
+on the M4 — beyond the 32 Z-registers, exactly enough to hold one
+``SVL``-row × (≤ 4·SVL)-col block. So the *only* lever available is:
+stage ``x`` in ZA during the reduction, read it back from ZA in pass 2,
+and turn 2R+1W into **1R+1W** — but only where the row fits
+(``N ≤ 4·SVL`` = 64 on the M4). That is precisely the small-N,
+streaming-overhead-dominated regime, so the pre-registered expectation was:
+**a possible small-N win if the saved read outweighs the cost of shuffling
+``x`` through ZA, and no win at all for the large-N bandwidth-bound shapes
+(row does not fit → fall back to streaming → tie/lose V6).**
+
+Kernel design (``rms_norm_za.S``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- **Reduction stays SSVE.** The per-row sum-of-squares is a horizontal
+  reduction (``fmla`` accumulating ``x*x`` in a Z-register), never routed
+  through ZA — a matrix accumulator maps poorly onto a horizontal collapse
+  (context.md §5). ZA is used as **pure residency staging**, not compute.
+- **Pass 1 (1 memory read):** for each column, ``ld1w`` the ``x`` vector
+  (SVL consecutive rows, column-major), ``fmla`` it into the accumulator,
+  and ``mova`` it into a ZA tile slice.
+- **inv_rms:** ``1/√(sumsq/N + ε)`` per lane, via ``FRSQRTE`` + one
+  Newton-Raphson step (same sequence as V1/V6).
+- **Pass 2 (1 memory write):** for each column, ``mova`` ``x`` back **from
+  ZA**, apply ``γ[col]`` and ``inv_rms``, ``st1w``.
+- **VLA (decision D):** tile geometry is derived from ``cntw`` (SVL), not a
+  literal 16; the path split is ``N`` vs ``4·SVL`` computed at runtime. The
+  four ZA tiles are emitted as four ``.macro`` expansions (the tile number
+  is an instruction immediate, not a register, so it cannot be looped).
+- **PSTATE handling:** bare ``smstart``/``smstop`` enable and disable
+  **both** PSTATE.SM and PSTATE.ZA for the whole norm (one streaming
+  region); every ZA slice is written before it is read, so no ``zero {za}``
+  is needed, and ZA is disabled before return (no lazy-save/AAPCS64 hazard).
+- **Fallback (``N > 4·SVL``):** a correct streaming two-pass (2R+1W, no ZA)
+  so the kernel is right for every shape. This is not the performance
+  story — V6 remains the large-N incumbent.
+- A single accumulator sums in strict column order (reference order), so no
+  reassociation tolerance is needed: verified at ``kTol = 1e-5`` (86 test
+  cases in ``test_norm``, tile-boundary / row-tail / mismatched-ld /
+  fallback / large-magnitude-stress cases all pass on M4).
+
+Measured: ZA residency vs V6 (Apple M4, useful bytes = 1R+1W)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table:: Sprint 3 — ``rms_norm_za`` vs ``rms_norm_ssve_v6``
+   :header-rows: 1
+
+   * - shape
+     - path
+     - V6 GiB/s
+     - ZA GiB/s
+     - ZA vs V6
+   * - M=128, N=16
+     - ZA (1 tile)
+     - 11.5
+     - 6.8
+     - **−41 %**
+   * - M=128, N=32
+     - ZA (2 tiles)
+     - 16.3
+     - 8.6
+     - **−47 %**
+   * - M=128, N=64
+     - ZA (4 tiles, max residency)
+     - 21.5
+     - 8.4
+     - **−61 %**
+   * - M=1024, N=64
+     - ZA (4 tiles)
+     - 30.2
+     - 10.9
+     - **−64 %**
+   * - M=4096, N=64
+     - ZA (4 tiles)
+     - 31.1
+     - 11.0
+     - **−65 %**
+   * - M=128, N=2048
+     - fallback (streaming)
+     - 34.8
+     - 25.1
+     - −28 %
+   * - M=1024, N=2048
+     - fallback (streaming)
+     - 38.0
+     - 24.7
+     - −35 %
+
+Verdict: ZA loses decisively, and the reason is instructive
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ZA-resident fast path is **39–65 % slower than V6**, even though it
+moves strictly *less* memory (1R+1W vs 2R+1W — a real 33 % traffic
+reduction on this regime). The clinching data point: the ZA kernel's own
+streaming **fallback** at N=2048 (≈25 GiB/s) is *faster* than its
+**ZA-resident** path at N=64 (8–11 GiB/s). Staging through ZA is the
+bottleneck, not memory.
+
+The mechanism: each element now costs two extra ``mova`` ops — one
+``Z→ZA`` in pass 1, one ``ZA→Z`` in pass 2 — and ``mova`` to/from the ZA
+array is throughput-limited on the M4. At the modest bandwidth these
+shapes sustain (10–35 GiB/s), the memory system was never the binding
+constraint that ZA relieves, so trading a DRAM read for two ``mova`` ops is
+a net loss. This is the same lesson as context.md §5's reduction warning,
+now confirmed for **residency staging** too: routing a bandwidth-bound
+horizontal-reduction norm through the matrix array costs more than it saves.
+
+Reconciling with the Sprint-2c note: the "+33 % traffic reduction
+available" framing referred to the *fusion arithmetic*; the measurement
+shows the reduction is only reachable in the ``N ≤ 4·SVL`` regime (the row
+must fit in ZA), and even there the ``mova`` cost dominates, so the traffic
+saving never converts into a time saving. For the large-N shapes that are
+actually bandwidth-bound, ZA cannot hold the row at all — structurally out
+of reach. "ZA adds nothing here, and here is why" is the pre-registered,
+fully valid ablation outcome (ROADMAP Sprint 3).
+
+- **RMSNorm architecture verdict:** SSVE **V6 stays the frozen incumbent**
+  for Sprint 4's JIT. ``rms_norm_za`` is kept in the tree and the ablation
+  table as a *measured, explained* negative — the honest-engineering
+  deliverable, not a failure.
+- **LayerNorm ZA (Mariza, gated):** the RMSNorm verdict is negative, and
+  the ``mova``-throughput bottleneck is norm-agnostic, so LayerNorm ZA is
+  unpromising for the *same* reason. LayerNorm's 3R+1W structure does give
+  it the larger residency headroom of the two (its extra read is what ZA
+  would eliminate), so if any ZA staging is worth a prototype it is there —
+  but it inherits the same ``mova``-cost ceiling. Decision left to Mariza
+  with this data; a reasoned skip is a valid ablation note (ROADMAP
+  Sprint 3).
+
+Sprint 3 status
+~~~~~~~~~~~~~~~
+
+- **Kernel:** ``rms_norm_za.S`` — verified on M4 (86 test cases in
+  ``test_norm``), guarded by ``cpu_supports_sme()``, VLA, one streaming
+  region with correct PSTATE.SM/ZA handling.
+- **Measured verdict:** ZA residency is 39–65 % slower than V6 in its fast
+  path; V6 remains the RMSNorm incumbent for the JIT (Sprint 4).
+- **Lever attributed:** the loss is the ``mova`` staging cost, quantified
+  against V6 and against the kernel's own non-ZA fallback.
