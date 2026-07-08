@@ -1441,22 +1441,182 @@ fully valid ablation outcome (ROADMAP Sprint 3).
   for Sprint 4's JIT. ``rms_norm_za`` is kept in the tree and the ablation
   table as a *measured, explained* negative — the honest-engineering
   deliverable, not a failure.
-- **LayerNorm ZA (Mariza, gated):** the RMSNorm verdict is negative, and
-  the ``mova``-throughput bottleneck is norm-agnostic, so LayerNorm ZA is
-  unpromising for the *same* reason. LayerNorm's 3R+1W structure does give
-  it the larger residency headroom of the two (its extra read is what ZA
-  would eliminate), so if any ZA staging is worth a prototype it is there —
-  but it inherits the same ``mova``-cost ceiling. Decision left to Mariza
-  with this data; a reasoned skip is a valid ablation note (ROADMAP
-  Sprint 3).
+- **LayerNorm ZA (Mariza):** gate resolved by building the prototype rather
+  than taking the reasoned skip — see below. Verdict: also negative, and by
+  a *larger* margin than RMSNorm's.
+
+Sprint 3 — Hand-written SME/ZA LayerNorm kernel (``layer_norm_za``)
+---------------------------------------------------------------------
+
+The gated second half of Sprint 3. RMSNorm's ZA verdict was negative, but
+LayerNorm's 3R+1W structure has more theoretical residency headroom than
+RMSNorm's 2R+1W (its *two* extra reads, not one, are what ZA staging could
+eliminate), so the gate was resolved by measuring rather than skipping.
+
+The hypothesis, written before measuring
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+RMSNorm's ``mova``-throughput finding (above) is norm-agnostic in principle,
+but LayerNorm's larger headroom makes it worth a direct test rather than an
+inference. Rather than the partial "3R→2R" fusion sketched in Sprint 2c
+(fuse only the mean+variance sub-passes, still re-read ``x`` once for
+normalize), this prototype goes further: ``x`` is staged in ZA **once**
+during the mean pass and reused from ZA for **both** the variance pass and
+the normalize pass — a true 3R+1W → 1R+1W fusion, a 50 % traffic cut versus
+RMSNorm's 33 %. This is the most decisive version of the test available: it
+costs *three* ``mova`` ops per element (one store into ZA, two loads back
+out) against RMSNorm's two (one store, one load). Pre-registered expectation:
+if a 33 % traffic cut already lost 39–65 % to ``mova`` throughput, a 50 % cut
+needs a proportionally *bigger* saving to break even, and instead pays a
+proportionally bigger ``mova`` tax. Expected outcome: also a loss, likely by
+a *larger* margin than RMSNorm's — which would confirm ``mova`` throughput,
+not DRAM bandwidth, as the real, norm-agnostic ceiling. A win would be the
+surprising result.
+
+Kernel design (``layer_norm_za.S``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- **Reduction stays SSVE** (context.md §5): both the mean sum and the
+  sum-of-squared-deviations are horizontal reductions (``fadd`` / ``fmla``
+  accumulating in Z-registers), never routed through the ZA matrix
+  accumulator. ZA is pure residency staging for ``x``.
+- **Pass 1 (1 memory read):** ``ld1w`` each column's ``x``, accumulate into
+  the mean sum, ``mova`` it into a ZA tile slice.
+- **Pass 2 (0 memory reads):** ``mova`` ``x`` back **from ZA**, center on the
+  mean, accumulate the squared deviation.
+- **inv_std:** ``FRSQRTE`` + one Newton-Raphson step (same sequence as V1/V6).
+- **Pass 3 (1 memory write):** ``mova`` ``x`` back **from ZA a second time**,
+  apply ``(x-mean)*inv_std*gamma[col]+beta[col]``, ``st1w``.
+- **VLA (decision D):** tile geometry derived from ``cntw`` (SVL); the path
+  split is ``N`` vs ``4·SVL`` computed at runtime, same four-tile ZA
+  layout as ``rms_norm_za``.
+- **PSTATE handling:** bare ``smstart``/``smstop`` for the whole norm (one
+  streaming region), every ZA slice written before read, ZA disabled before
+  return.
+- **Fallback (``N > 4·SVL``):** a correct streaming three-pass (3R+1W, no
+  ZA, single-block predicated — not the 4-block-contiguity-grouped structure
+  V6 uses, since this fallback is a correctness net, not the performance
+  story).
+- Single accumulators (mean, variance) run in strict column order across all
+  four tile sections, matching the reference's summation order exactly —
+  verified at ``kTol``/``kAbsMarginNR``, no reassociation widening needed.
+  Verified vs ``layer_norm_ref`` (tile boundaries, row tails, mismatched
+  leading dims, the ``N > 4·SVL`` fallback, and the large-magnitude stress
+  case; 5 new test cases in ``test_norm``, all passing on M4).
+
+Measured: ZA residency vs V6 (Apple M4, useful bytes = 1R+1W)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table:: Sprint 3 — ``layer_norm_za`` vs ``layer_norm_ssve_v6``
+   :header-rows: 1
+
+   * - shape
+     - path
+     - V6 GiB/s
+     - ZA GiB/s
+     - ZA vs V6
+   * - M=128, N=16
+     - ZA (1 tile)
+     - 7.5
+     - 3.7
+     - **−51 %**
+   * - M=128, N=32
+     - ZA (2 tiles)
+     - 9.9
+     - 4.1
+     - **−59 %**
+   * - M=128, N=64
+     - ZA (4 tiles, max residency)
+     - 11.8
+     - 4.6
+     - **−61 %**
+   * - M=1024, N=64
+     - ZA (4 tiles)
+     - 14.7
+     - 4.8
+     - **−68 %**
+   * - M=4096, N=64
+     - ZA (4 tiles)
+     - 15.0
+     - 5.1
+     - **−66 %**
+   * - M=128, N=2048
+     - fallback (streaming)
+     - 15.1
+     - 13.4
+     - −11 %
+   * - M=1024, N=2048
+     - fallback (streaming)
+     - 16.3
+     - 14.3
+     - −12 %
+
+Verdict: ZA loses decisively — and by more than RMSNorm's loss
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ZA-resident fast path is **51–68 % slower than V6** — a bigger loss
+than RMSNorm's 39–65 %, exactly as the pre-registered hypothesis predicted.
+The mechanism is the same one RMSNorm exposed: ``mova`` throughput, not DRAM
+bandwidth, is the binding constraint at these shapes, and LayerNorm's
+prototype pays it three times per element instead of twice. The 50 % traffic
+cut (vs RMSNorm's 33 %) is real, but it converts into *more* saved DRAM
+time than RMSNorm's cut did — and that extra saving still isn't enough to
+cover the extra ``mova`` op's cost, so the margin gets *worse*, not better.
+This is the cleanest confirmation available that the RMSNorm finding
+generalizes: trading DRAM reads for ZA residency is a structural loss on
+this hardware for a bandwidth-bound horizontal-reduction norm, regardless of
+how many reads are being traded away.
+
+The fallback path (no ZA, N > 4·SVL) is 11–12 % slower than V6 — expected,
+since this fallback is a plain single-block three-pass without V6's
+4-row-block contiguity grouping or multi-accumulator ILP (the same pattern
+``rms_norm_za``'s own fallback shows against V6, there by 28–35 %); it exists
+for correctness on every shape, not to compete with V6.
+
+- **LayerNorm architecture verdict:** SSVE **V6 stays the frozen incumbent**
+  for Sprint 4's JIT, for both norms. ``layer_norm_za`` is kept in the tree
+  and the ablation table as a *measured, explained* negative, and its
+  bigger-than-RMSNorm loss margin is itself evidence: it closes the question
+  Sprint 2c left open (whether LayerNorm's larger headroom might tip ZA
+  staging into a win) with a direct, decisive answer rather than an
+  inference from RMSNorm alone.
+
+Correctness note: an eps register-stash bug, found and fixed during this work
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+While building ``layer_norm_za``, an empirical check (an all-zero RMSNorm row,
+sumsq = 0 exactly) surfaced a real correctness bug affecting **every**
+existing SSVE/ZA kernel except the two original LayerNorm baselines
+(``layer_norm_ssve``/``_v1``): each stashed ``eps`` in the callee-saved S8/D8
+register before ``smstart``, intending to read it back afterwards, either via
+a stack slot that actually still held the *caller's* old ``d8`` (saved by
+``str d8`` *before* the eps ``fmov`` overwrote the register), or by reading
+S8/D8 directly post-``smstart`` — which also fails, because streaming-mode
+entry clobbers D8 too, not just D9–D15 as had been assumed. Every existing
+tolerance-based test passed regardless, since eps's effect on non-degenerate
+data is far below the FP32 comparison tolerance; the bug is only observable
+when sumsq/variance is exactly zero, where eps is the only thing standing
+between a valid reciprocal and ``1/0 = inf`` (then ``inf * 0 = NaN``
+propagates through the normalize step). Fixed in all 13 affected kernels by
+stashing eps to a **dedicated stack slot before smstart** and reloading from
+that same address afterwards — memory, unlike any register, is unaffected by
+a PSTATE.SM transition. Two new regression tests lock this in (all-zero
+RMSNorm row, all-constant LayerNorm row, both required to be finite). Full
+test suite re-verified green after the fix (352 473 assertions, 93 cases).
 
 Sprint 3 status
 ~~~~~~~~~~~~~~~
 
-- **Kernel:** ``rms_norm_za.S`` — verified on M4 (86 test cases in
+- **RMSNorm kernel:** ``rms_norm_za.S`` — verified on M4 (86 test cases in
   ``test_norm``), guarded by ``cpu_supports_sme()``, VLA, one streaming
-  region with correct PSTATE.SM/ZA handling.
-- **Measured verdict:** ZA residency is 39–65 % slower than V6 in its fast
-  path; V6 remains the RMSNorm incumbent for the JIT (Sprint 4).
-- **Lever attributed:** the loss is the ``mova`` staging cost, quantified
-  against V6 and against the kernel's own non-ZA fallback.
+  region with correct PSTATE.SM/ZA handling. Measured verdict: ZA residency
+  is 39–65 % slower than V6 in its fast path.
+- **LayerNorm kernel:** ``layer_norm_za.S`` — verified on M4 (5 test cases,
+  full 3-pass ZA residency), same guards and VLA discipline. Measured
+  verdict: ZA residency is 51–68 % slower than V6 in its fast path — a
+  larger loss than RMSNorm's, confirming the mechanism generalizes.
+- **Lever attributed for both:** the loss is the ``mova`` staging cost,
+  quantified against V6 and against each kernel's own non-ZA fallback.
+- **V6 (both norms) frozen as the incumbent for Sprint 4's JIT.**
+- **Correctness fix:** the eps register-stash bug above, fixed across all
+  13 affected kernels with two new regression tests.
