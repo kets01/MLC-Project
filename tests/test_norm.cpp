@@ -418,6 +418,43 @@ TEST_CASE("RMSNorm SSVE V3: large-magnitude stress input", "[norm][sprint2][abla
     check_variant_stress(rms_norm_ssve_v3);
 }
 
+// ---------------------------------------------------------------------------
+// V4 — four independent FMLA accumulator chains in the reduction (Sprint 2b)
+//
+// New code paths vs V2: the 4-column main loop, the 0-3 column remainder
+// loop, and the accumulator combine.  N is chosen to hit every remainder
+// class (N%4 = 0,1,2,3) and the below-one-iteration case (N < 4).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RMSNorm SSVE V4: small square, N multiple of 4 and of VL", "[norm][sprint2][ablation][v4]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v4, 16, 32, 16, 16, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V4: remainder classes N%4 = 1, 2, 3", "[norm][sprint2][ablation][v4]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v4, 8, 49, 8, 8, 1e-5f);   // 49 % 4 == 1
+    check_variant(rms_norm_ssve_v4, 8, 50, 8, 8, 1e-5f);   // 50 % 4 == 2 (+ VL tail)
+    check_variant(rms_norm_ssve_v4, 8, 51, 8, 8, 1e-5f);   // 51 % 4 == 3
+}
+
+TEST_CASE("RMSNorm SSVE V4: N < 4 (remainder-only, main loop skipped)", "[norm][sprint2][ablation][v4]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v4, 16, 1, 16, 16, 1e-5f);
+    check_variant(rms_norm_ssve_v4, 16, 3, 16, 16, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V4: multi-row-block, different leading dims", "[norm][sprint2][ablation][v4]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v4, 40, 37, 48, 40, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V4: large-magnitude stress input", "[norm][sprint2][ablation][v4][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant_stress(rms_norm_ssve_v4);
+}
+
+
 // ===========================================================================
 // Sprint 2a — roofline-probe correctness (bw_probe_ssve)
 //
