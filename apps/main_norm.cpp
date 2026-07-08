@@ -297,22 +297,31 @@ static double bench_ssve_v6(const float* a, float* b, const float* gamma,
     return bench([&]() { rms_norm_ssve_v6(a, b, gamma, m, n, ld, ld, eps); });
 }
 
+__attribute__((noinline))
+static double bench_za(const float* a, float* b, const float* gamma,
+                       int64_t m, int64_t n, int64_t ld, float eps, int reps = 50) {
+    using namespace mini_jit::norm;
+    rms_norm_za(a, b, gamma, m, n, ld, ld, eps);
+    return bench([&]() { rms_norm_za(a, b, gamma, m, n, ld, ld, eps); }, reps);
+}
+
 // ---------------------------------------------------------------------------
 // Ablation row: prints GiB/s and % delta vs V0 baseline.
 // ---------------------------------------------------------------------------
 
 static void print_ablation_row(const char* label, int64_t m, int64_t n,
-                                double gibs, double peak, double v0_gibs) {
-    double delta_pct = (v0_gibs > 0.0) ? (gibs / v0_gibs - 1.0) * 100.0 : 0.0;
+                                double gibs, double peak, double base_gibs,
+                                const char* base_name = "V0") {
+    double delta_pct = (base_gibs > 0.0) ? (gibs / base_gibs - 1.0) * 100.0 : 0.0;
     std::cout << std::left  << std::setw(24) << label
               << "  M=" << std::setw(5) << m
               << "  N=" << std::setw(5) << n
               << "  " << std::fixed << std::setprecision(2) << std::setw(7) << gibs
               << " GiB/s"
               << "  (" << std::setprecision(1) << (100.0 * gibs / peak) << "% peak)";
-    if (v0_gibs > 0.0) {
+    if (base_gibs > 0.0) {
         std::cout << "  " << (delta_pct >= 0 ? "+" : "") << std::setprecision(1)
-                  << delta_pct << "% vs V0";
+                  << delta_pct << "% vs " << base_name;
     }
     std::cout << "\n";
 }
@@ -559,6 +568,58 @@ int main() {
         print_ablation_row("V4 (4-acc ILP)",      vm, vn, g4, (double)vpeak, g0);
         print_ablation_row("V5 (V4 + load pipe)", vm, vn, g5, (double)vpeak, g0);
         print_ablation_row("V6 (4-block contig)", vm, vn, g6, (double)vpeak, g0);
+        std::cout << "\n";
+    }
+
+    // -----------------------------------------------------------------------
+    // Section 2b (Sprint 3): RMSNorm ZA-tile residency vs the SSVE winner V6.
+    //
+    // Hypothesis (written before measuring, ROADMAP Sprint 3): ZA cannot raise
+    // DRAM bandwidth; it only turns V6's 2R+1W into 1R+1W where a row fits in
+    // ZA (N <= 4*SVL = 64 on the M4).  That is the small-N, streaming-overhead-
+    // dominated regime, so the saved read may be eaten by SMSTART + mova cost.
+    // For N > 64 the ZA kernel falls back to a streaming two-pass and should
+    // tie/lose V6.  Both kernels are timed on USEFUL bytes (1R+1W): a higher
+    // ZA number means the residency fusion genuinely did the useful work
+    // faster.  Note the moved-bytes gap: in the ZA fast path ZA moves exactly
+    // the useful 1R+1W, whereas V6 moves 2R+1W (1.5x), so any ZA win here also
+    // reflects a real ~33% traffic reduction on this regime.
+    // -----------------------------------------------------------------------
+    std::cout << "\n--- RMSNorm ZA residency vs SSVE V6 (Sprint 3) ---\n";
+    std::cout << std::left << std::setw(24) << "variant"
+              << "  rows   feat    GiB/s  (% of 1-core SSVE peak)  vs V6\n";
+    std::cout << std::string(78, '-') << "\n";
+
+    // N <= 64 -> ZA fast path (residency active).  N > 64 -> fallback.
+    const Shape za_shapes[] = {
+        { 128,   16},   // 1 tile, ZA path
+        { 128,   32},   // 2 tiles, ZA path
+        { 128,   64},   // 4 tiles full (=4*SVL), ZA path — max residency
+        {1024,   64},   // more row blocks at the residency boundary
+        {4096,   64},   // large footprint, still ZA path
+        { 128, 2048},   // N > 64 -> fallback (expect tie/loss vs V6)
+        {1024, 2048},   // N > 64 -> fallback
+    };
+
+    for (const auto& s : za_shapes) {
+        const int64_t ld = s.m;
+        std::vector<float> a(ld * s.n), b(ld * s.n, 0.0f);
+        std::vector<float> gamma(s.n, 1.0f);
+        for (int64_t i = 0; i < ld * s.n; ++i)
+            a[i] = static_cast<float>((i % 17) - 8) * 0.1f;
+
+        // volatile: SMSTART zeroes D9-D15; keep timing off callee-saved FP regs.
+        volatile double vsec_v6 = bench_ssve_v6(a.data(), b.data(), gamma.data(), s.m, s.n, ld, 1e-5f);
+        volatile double vsec_za = bench_za      (a.data(), b.data(), gamma.data(), s.m, s.n, ld, 1e-5f);
+
+        volatile int64_t vm = s.m, vn = s.n;
+        volatile double vbytes = norm_bytes(vm, vn);
+
+        double g6  = to_gibs((double)vbytes, (double)vsec_v6);
+        double gza = to_gibs((double)vbytes, (double)vsec_za);
+
+        print_ablation_row("V6 (2R+1W, SSVE)",    vm, vn, g6,  (double)vpeak, 0.0);
+        print_ablation_row("ZA residency",         vm, vn, gza, (double)vpeak, g6, "V6");
         std::cout << "\n";
     }
 
