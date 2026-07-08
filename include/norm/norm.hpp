@@ -86,6 +86,17 @@ void rms_norm_ssve_v4(const float* a,
                       int64_t      ld_b,
                       float        epsilon);
 
+// V5: V4 + explicit software-pipelining of the reduction loads (group B
+// loads issued ahead of group A's FMLAs, rotating; Sprint 2b round two).
+void rms_norm_ssve_v5(const float* a,
+                      float*       b,
+                      const float* gamma,
+                      int64_t      m,
+                      int64_t      n,
+                      int64_t      ld_a,
+                      int64_t      ld_b,
+                      float        epsilon);
+
 // Sprint 2a roofline probe (NOT a norm kernel): STREAM-style scale-add
 // d[i] = s[i] + 1.0f executed in streaming mode with contiguous LD1W/ST1W —
 // measures the single-core bandwidth ceiling the SSVE kernels can actually
