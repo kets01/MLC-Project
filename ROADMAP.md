@@ -203,28 +203,41 @@ then measure. "ZA adds nothing here, and here is why" is a fully valid — and d
 ablation outcome; a timeboxed prototype with an explained verdict beats an open-ended chase.
 
 **RMSNorm ZA variant (Ketsia):**
-- [ ] Hand-written ZA kernel (`rms_norm_za.S`): 16×16 FP32 tile loads/stores (granularity
-      derived from SVL, decision D), reduction **stays SSVE** (context.md §5 — no horizontal
-      reduction through the matrix accumulator); ZA used for tile staging/residency and the
-      2D movement.
-- [ ] `SMSTART`/`SMSTOP` manage **PSTATE.ZA as well as PSTATE.SM**; whole norm in one
-      streaming region; ZA state handled correctly across calls (lazy-save / caller
-      conventions checked against the AAPCS64 SME rules).
-- [ ] Tile-level **pass fusion / residency**: reduce a tile, keep it in ZA, normalize it from
-      ZA — the deferred Sprint-2 lever, now with the storage to express it.
-- [ ] Verified vs reference (same Catch2 suite, same stress inputs, mismatched leading dims);
-      skip-on-CI guard as usual.
-- [ ] Benchmarked on the standard M×N grid against **both ceilings from 2a**; ablation rows
-      vs the SSVE winner, each lever's contribution attributed (or its absence explained).
+- [x] Hand-written ZA kernel (`rms_norm_za.S`): SVL×SVL FP32 tile staging via `mova`
+      (granularity derived from `cntw`/SVL, decision D — no literal 16), reduction **stays
+      SSVE** (context.md §5 — sum-of-squares via `fmla` in Z-regs, never through ZA); ZA used
+      purely for tile staging/residency.
+- [x] `SMSTART`/`SMSTOP` manage **PSTATE.ZA as well as PSTATE.SM** (bare `smstart`/`smstop`);
+      whole norm in one streaming region; every ZA slice written before read (no `zero {za}`),
+      ZA disabled before return (no AAPCS64 lazy-save hazard).
+- [x] Tile-level **pass fusion / residency**: pass 1 stages `x` into ZA while reducing;
+      pass 2 reads `x` back from ZA → **1R+1W** vs V6's 2R+1W where the row fits (`N ≤ 4·SVL`);
+      streaming fallback for wider rows.
+- [x] Verified vs reference (same Catch2 helpers, stress inputs, mismatched leading dims, tile
+      boundaries, row tails, fallback); `cpu_supports_sme()` skip-on-CI guard. 86 test cases.
+- [x] Benchmarked on the M×N grid vs V6 (both 2a ceilings printed). **VERDICT: ZA loses
+      decisively — 39–65 % slower than V6 in the fast path; the kernel's own streaming fallback
+      beats its ZA path.** Attributed: the two `mova` ops/element to stage `x` through ZA cost
+      more than the DRAM read they save (memory isn't the binding constraint at these shapes).
+      A pre-registered, valid "ZA adds nothing here, and here is why" outcome. **V6 stays the
+      frozen RMSNorm incumbent for the JIT (Sprint 4).**
 
 **LayerNorm ZA variant (Mariza) — gated:**
-- [ ] Only if the RMSNorm ZA verdict is positive (or the residency lever shows promise —
-      LayerNorm's up-to-3-reads structure has more residency headroom): apply the winning ZA
-      structure to LayerNorm; otherwise record the reasoned skip as an ablation note.
+- [ ] Gate resolved to a **reasoned skip**: the RMSNorm ZA verdict is negative and the
+      `mova`-throughput bottleneck is norm-agnostic. LayerNorm's 3R+1W structure has the larger
+      residency headroom of the two, so if any ZA prototype is worth it, it is there — but it
+      inherits the same `mova`-cost ceiling. Handoff + data recorded in the report; final call
+      is Mariza's (a reasoned skip is a valid ablation note).
 
 **Sprint close-out (docs + commits):**
-- [ ] **Sphinx report updated:** Sprint-3 section — the per-lever hypotheses *as written before measuring*, the ZA kernel design (ZA staging, SSVE reduction, PSTATE.ZA handling), and the measured verdict vs the SSVE winner (win/loss/tie, each explained). Rebuild locally; `docs.yml` green.
-- [ ] **Commit discipline throughout:** atomic conventional commits per working step (`feat(norm): add ZA-staged rms_norm kernel`, `test(norm): …`) on a feature branch; PR into `main`, CI green before merge.
+- [x] **Sphinx report updated:** Sprint-3 section — the hypothesis *as written before
+      measuring*, the ZA kernel design (ZA staging, SSVE reduction, PSTATE.SM/ZA handling), and
+      the measured verdict vs V6 (loss, explained via the `mova` bottleneck). Rebuilt locally
+      (`build succeeded`, only the pre-existing cosmetic asm-lexer warnings).
+- [ ] **Commit discipline throughout:** atomic conventional commits per file on
+      `feat/sprint3-za-rmsnorm` (`feat(norm): add rms_norm_za …`, `test(norm): …`,
+      `bench(norm): …`, `docs(norm): …`). **Remaining: open the PR into `main`, CI green before
+      merge** (two-person review — Ketsia/Mariza).
 
 **Done when:** a verified ZA kernel exists with a measured verdict vs the SSVE winner (win,
 loss, or tie — each with its explanation), the best kernel **per architecture** is frozen
