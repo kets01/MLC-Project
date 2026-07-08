@@ -370,10 +370,11 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
     double n_half  = (b_slope > 0.0) ? t0 / b_slope : 0.0;
 
     // The linear model assumes constant per-element throughput.  A negative
-    // intercept means throughput FELL as N grew — i.e. the sweep crossed a
-    // cache-capacity boundary (the normalize pass stops re-reading x from
-    // cache and hits DRAM: the 2R+1W structural cost becoming visible), and
-    // the fit is not a valid overhead estimate.
+    // intercept means throughput FELL as N grew — the sweep crossed into the
+    // true-DRAM regime (total footprint > L2, so reps no longer stay
+    // cache-assisted; the Sprint-2b diagnostic showed access density, not
+    // pass-2 residency, binds there), and the fit is not a valid overhead
+    // estimate.
     if (t0 >= 0.0) {
         std::cout << "  fit t(N) = t0 + b*N:  t0 = " << std::setprecision(3) << t0 * 1e6
                   << " us/call fixed overhead,  asymptotic " << std::setprecision(2) << asym
@@ -382,9 +383,9 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
                   << std::setprecision(0) << n_half << "\n\n";
     } else {
         std::cout << "  fit t(N) = t0 + b*N: INVALID (t0 < 0) — throughput is not\n"
-                  << "  constant in N: the sweep crosses the cache-capacity boundary\n"
-                  << "  (2R+1W: at large M*N the normalize pass re-reads x from DRAM,\n"
-                  << "  not cache).  Overhead statement only valid for the M=128 sweep.\n\n";
+                  << "  constant in N: the sweep enters the true-DRAM regime (total\n"
+                  << "  footprint exceeds L2; see the Sprint-2b density diagnostic).\n"
+                  << "  Overhead statement only valid for the M=128 sweep.\n\n";
     }
 }
 
