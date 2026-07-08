@@ -676,6 +676,56 @@ TEST_CASE("LayerNorm SSVE Welford: N=1 (single column, no loop body)", "[norm][s
     check_ln_variant(layer_norm_ssve_welford, 8, 1, 8, 8, 1e-5f);
 }
 
+// ---------------------------------------------------------------------------
+// Stress coverage for the remaining LayerNorm variants (Sprint 2c gap-fill).
+//
+// V0/V1/V2 already have large-magnitude stress cases; V4/V5/V6 change the
+// reduction structure (multi-accumulator, pipelining, 4-block grouping) and
+// Welford changes the ALGORITHM — exactly the cases where cancellation
+// behaviour could differ, so each gets the same SHIFT=1e4 input.  Welford's
+// claim to numerical stability (vs the catastrophic naive E[x2]-mean2) is
+// verified here, not assumed: the ablation verdict "slower than two-pass"
+// is only meaningful if its accuracy actually holds.
+// ---------------------------------------------------------------------------
+
+static void check_ln_variant_stress(LNKernelFn kernel) {
+    const int64_t M = 4, N = 37, ld = M;
+    const float   SHIFT   = 1e4f;
+    const float   kMargin = 1e-3f;  // same bound as the V0 stress case
+    std::vector<float> gamma(N, 1.0f), beta(N, 0.0f);
+    auto a = make_matrix(M, N, ld, [&](int64_t r, int64_t c) {
+        return SHIFT + static_cast<float>((r * 3 + c * 5) % 11) - 5.0f;
+    });
+    std::vector<float> b_ref(ld * N, 0.0f), b_ker(ld * N, 0.0f);
+    layer_norm_ref(a.data(), b_ref.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+    kernel(a.data(), b_ker.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+    for (int64_t col = 0; col < N; ++col)
+        for (int64_t row = 0; row < M; ++row)
+            REQUIRE(b_ker[row + col * ld] ==
+                    Approx(b_ref[row + col * ld]).margin(kMargin));
+}
+
+TEST_CASE("LayerNorm SSVE V4: large-magnitude stress input", "[norm][sprint2c][ssve][layernorm][v4][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant_stress(layer_norm_ssve_v4);
+}
+
+TEST_CASE("LayerNorm SSVE V5: large-magnitude stress input", "[norm][sprint2c][ssve][layernorm][v5][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant_stress(layer_norm_ssve_v5);
+}
+
+TEST_CASE("LayerNorm SSVE V6: large-magnitude stress input", "[norm][sprint2c][ssve][layernorm][v6][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant_stress(layer_norm_ssve_v6);
+}
+
+TEST_CASE("LayerNorm SSVE Welford: large-magnitude stress input (the stability claim)", "[norm][sprint2c][ssve][layernorm][welford][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant_stress(layer_norm_ssve_welford);
+}
+
+
 // ===========================================================================
 // Sprint 2 — RMSNorm SSVE kernel tests (V0 baseline + V1/V2/V3 ablation)
 //
