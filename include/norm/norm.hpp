@@ -198,6 +198,21 @@ void rms_norm_ssve_v6(const float* a,
                       int64_t      ld_b,
                       float        epsilon);
 
+// RMSNorm — hand-written SME/ZA kernel (Sprint 3).  Uses the ZA tiles as an
+// on-core residency buffer so pass 2 reads x from ZA instead of re-reading it
+// from memory (1R+1W vs the SSVE winner's 2R+1W) whenever a row fits in ZA
+// (N <= 4*SVL); wider rows fall back to a correct streaming two-pass.  The
+// reduction stays SSVE (context.md §5).  Same interface as rms_norm_ssve;
+// requires cpu_supports_sme() == true, no-op otherwise.
+void rms_norm_za(const float* a,
+                 float*       b,
+                 const float* gamma,
+                 int64_t      m,
+                 int64_t      n,
+                 int64_t      ld_a,
+                 int64_t      ld_b,
+                 float        epsilon);
+
 // Sprint 2a roofline probe (NOT a norm kernel): STREAM-style scale-add
 // d[i] = s[i] + 1.0f executed in streaming mode with contiguous LD1W/ST1W —
 // measures the single-core bandwidth ceiling the SSVE kernels can actually
