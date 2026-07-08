@@ -289,11 +289,23 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
     double asym    = to_gibs(8.0 * static_cast<double>(m), b_slope);
     double n_half  = (b_slope > 0.0) ? t0 / b_slope : 0.0;
 
-    std::cout << "  fit t(N) = t0 + b*N:  t0 = " << std::setprecision(3) << t0 * 1e6
-              << " us/call fixed overhead,  asymptotic " << std::setprecision(2) << asym
-              << " GiB/s (" << std::setprecision(1) << (100.0 * asym / vpeak)
-              << "% of 1-core SSVE peak),  overhead = streaming work at N ~ "
-              << std::setprecision(0) << n_half << "\n\n";
+    // The linear model assumes constant per-element throughput.  A negative
+    // intercept means throughput FELL as N grew — i.e. the sweep crossed a
+    // cache-capacity boundary (the normalize pass stops re-reading x from
+    // cache and hits DRAM: the 2R+1W structural cost becoming visible), and
+    // the fit is not a valid overhead estimate.
+    if (t0 >= 0.0) {
+        std::cout << "  fit t(N) = t0 + b*N:  t0 = " << std::setprecision(3) << t0 * 1e6
+                  << " us/call fixed overhead,  asymptotic " << std::setprecision(2) << asym
+                  << " GiB/s (" << std::setprecision(1) << (100.0 * asym / vpeak)
+                  << "% of 1-core SSVE peak),  overhead = streaming work at N ~ "
+                  << std::setprecision(0) << n_half << "\n\n";
+    } else {
+        std::cout << "  fit t(N) = t0 + b*N: INVALID (t0 < 0) — throughput is not\n"
+                  << "  constant in N: the sweep crosses the cache-capacity boundary\n"
+                  << "  (2R+1W: at large M*N the normalize pass re-reads x from DRAM,\n"
+                  << "  not cache).  Overhead statement only valid for the M=128 sweep.\n\n";
+    }
 }
 
 // ---------------------------------------------------------------------------
