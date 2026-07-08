@@ -122,6 +122,23 @@ void layer_norm_ssve_welford(const float* a,
                              int64_t      ld_b,
                              float        epsilon);
 
+// LayerNorm — hand-written SME/ZA kernel (Sprint 3, gated).  Full 3-pass ZA
+// residency: x is staged in ZA during the mean pass and reused from ZA for
+// BOTH the variance pass and the normalize pass (3R+1W -> 1R+1W, vs the SSVE
+// winner V6's 3R+1W) whenever a row fits in ZA (N <= 4*SVL); wider rows fall
+// back to a correct streaming three-pass.  The reduction stays SSVE
+// (context.md §5).  Same interface as layer_norm_ssve_v6; requires
+// cpu_supports_sme() == true, no-op otherwise.
+void layer_norm_za(const float* a,
+                   float*       b,
+                   const float* gamma,
+                   const float* beta,
+                   int64_t      m,
+                   int64_t      n,
+                   int64_t      ld_a,
+                   int64_t      ld_b,
+                   float        epsilon);
+
 // RMSNorm — hand-written Streaming SVE kernel (Sprint 2, V0 baseline).
 // Same interface as rms_norm_ref; requires cpu_supports_sme() == true.
 // Returns immediately (no-op) when SME is absent so the caller can skip.
