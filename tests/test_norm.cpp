@@ -72,12 +72,22 @@ static std::vector<float> scalar_rms_norm(const std::vector<float>& a,
 // because reference.cpp converts through float→double→float.
 static constexpr float kTol = 1e-5f;
 
+// Multi-accumulator variants (V4+) reassociate the sum-of-squares: four
+// partial sums combined in tree order instead of the reference's sequential
+// order.  Neither order is more correct, but a single FP32 rounding
+// difference in sumsq can move the output by up to ~1.1e-5 relative (worst
+// observed, N=4 where each accumulator holds exactly one term).  Those
+// variants are verified against the honest tolerance they actually meet —
+// documented here rather than silently widening the gate for V0-V3.
+static constexpr float kTolReassoc = 2e-5f;
+
 static void check_close(const std::vector<float>& got,
                         const std::vector<float>& ref,
-                        int64_t m, int64_t n, int64_t ld) {
+                        int64_t m, int64_t n, int64_t ld,
+                        float tol = kTol) {
     for (int64_t col = 0; col < n; ++col)
         for (int64_t row = 0; row < m; ++row)
-            REQUIRE(got[row + col * ld] == Approx(ref[row + col * ld]).epsilon(kTol));
+            REQUIRE(got[row + col * ld] == Approx(ref[row + col * ld]).epsilon(tol));
 }
 
 // ---------------------------------------------------------------------------
@@ -325,7 +335,7 @@ using KernelFn = void(*)(const float*, float*, const float*,
 // Run kernel against rms_norm_ref on a given shape and compare within kTol.
 static void check_variant(KernelFn kernel,
                            int64_t M, int64_t N, int64_t ld_a, int64_t ld_b,
-                           float eps) {
+                           float eps, float tol = kTol) {
     std::vector<float> gamma(N);
     for (int64_t i = 0; i < N; ++i) gamma[i] = 0.5f + 0.1f * static_cast<float>(i % 17);
     auto a = make_matrix(M, N, ld_a, [](int64_t r, int64_t c) {
@@ -334,7 +344,7 @@ static void check_variant(KernelFn kernel,
     std::vector<float> b_ref(ld_b * N, 0.0f), b_ker(ld_b * N, 0.0f);
     rms_norm_ref(a.data(), b_ref.data(), gamma.data(), M, N, ld_a, ld_b, eps);
     kernel(a.data(), b_ker.data(), gamma.data(), M, N, ld_a, ld_b, eps);
-    check_close(b_ker, b_ref, M, N, ld_b);
+    check_close(b_ker, b_ref, M, N, ld_b, tol);
 }
 
 // Large-magnitude stress check — same input as the V0 stress test.
@@ -416,4 +426,161 @@ TEST_CASE("RMSNorm SSVE V3: N=1 (peel-only, no pairs)", "[norm][sprint2][ablatio
 TEST_CASE("RMSNorm SSVE V3: large-magnitude stress input", "[norm][sprint2][ablation][v3][stress]") {
     if (!cpu_supports_sme()) SKIP("SME required");
     check_variant_stress(rms_norm_ssve_v3);
+}
+
+// ---------------------------------------------------------------------------
+// V4 — four independent FMLA accumulator chains in the reduction (Sprint 2b)
+//
+// New code paths vs V2: the 4-column main loop, the 0-3 column remainder
+// loop, and the accumulator combine.  N is chosen to hit every remainder
+// class (N%4 = 0,1,2,3) and the below-one-iteration case (N < 4).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RMSNorm SSVE V4: small square, N multiple of 4 and of VL", "[norm][sprint2][ablation][v4]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v4, 16, 32, 16, 16, 1e-5f, kTolReassoc);
+}
+
+TEST_CASE("RMSNorm SSVE V4: remainder classes N%4 = 1, 2, 3", "[norm][sprint2][ablation][v4]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v4, 8, 49, 8, 8, 1e-5f, kTolReassoc);   // 49 % 4 == 1
+    check_variant(rms_norm_ssve_v4, 8, 50, 8, 8, 1e-5f, kTolReassoc);   // 50 % 4 == 2 (+ VL tail)
+    check_variant(rms_norm_ssve_v4, 8, 51, 8, 8, 1e-5f, kTolReassoc);   // 51 % 4 == 3
+}
+
+TEST_CASE("RMSNorm SSVE V4: N < 4 (remainder-only, main loop skipped)", "[norm][sprint2][ablation][v4]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v4, 16, 1, 16, 16, 1e-5f, kTolReassoc);
+    check_variant(rms_norm_ssve_v4, 16, 3, 16, 16, 1e-5f, kTolReassoc);
+}
+
+TEST_CASE("RMSNorm SSVE V4: multi-row-block, different leading dims", "[norm][sprint2][ablation][v4]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v4, 40, 37, 48, 40, 1e-5f, kTolReassoc);
+}
+
+TEST_CASE("RMSNorm SSVE V4: large-magnitude stress input", "[norm][sprint2][ablation][v4][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant_stress(rms_norm_ssve_v4);
+}
+
+
+// ---------------------------------------------------------------------------
+// V5 — software-pipelined reduction loads (Sprint 2b)
+//
+// New code paths vs V4: the rotating A/B pipeline has TWO exits (group A or
+// group B left in flight, depending on the number of 4-column groups), a
+// preload-only path for 4 <= N < 8, and the same remainder loop.  N values
+// below hit each exit and each remainder class.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RMSNorm SSVE V5: pipeline exits — B-in-flight (N=32) and A-in-flight (N=28)", "[norm][sprint2][ablation][v5]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v5, 16, 32, 16, 16, 1e-5f, kTolReassoc);  // even groups -> tail B
+    check_variant(rms_norm_ssve_v5, 16, 28, 16, 16, 1e-5f, kTolReassoc);  // odd groups  -> tail A
+}
+
+TEST_CASE("RMSNorm SSVE V5: preload-only path (4 <= N < 8) and N < 4", "[norm][sprint2][ablation][v5]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v5, 16, 4, 16, 16, 1e-5f, kTolReassoc);
+    check_variant(rms_norm_ssve_v5, 16, 5, 16, 16, 1e-5f, kTolReassoc);
+    check_variant(rms_norm_ssve_v5, 16, 7, 16, 16, 1e-5f, kTolReassoc);
+    check_variant(rms_norm_ssve_v5, 16, 3, 16, 16, 1e-5f, kTolReassoc);
+    check_variant(rms_norm_ssve_v5, 16, 1, 16, 16, 1e-5f, kTolReassoc);
+}
+
+TEST_CASE("RMSNorm SSVE V5: remainder classes N%4 = 1, 2, 3", "[norm][sprint2][ablation][v5]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v5, 8, 49, 8, 8, 1e-5f, kTolReassoc);
+    check_variant(rms_norm_ssve_v5, 8, 50, 8, 8, 1e-5f, kTolReassoc);
+    check_variant(rms_norm_ssve_v5, 8, 51, 8, 8, 1e-5f, kTolReassoc);
+}
+
+TEST_CASE("RMSNorm SSVE V5: multi-row-block, different leading dims", "[norm][sprint2][ablation][v5]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v5, 40, 37, 48, 40, 1e-5f, kTolReassoc);
+}
+
+TEST_CASE("RMSNorm SSVE V5: large-magnitude stress input", "[norm][sprint2][ablation][v5][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant_stress(rms_norm_ssve_v5);
+}
+
+
+// ---------------------------------------------------------------------------
+// V6 — 4-row-block contiguity grouping (Sprint 2b)
+//
+// New code paths vs V4: the unpredicated 4-block group loop (needs M >= 4*VL)
+// and the predicated single-block tail (up to 3 blocks + partial).  On the
+// M4 (VL = 16 FP32) M=64 is exactly one group; M=100 is one group + two full
+// tail blocks + a 4-row partial; M<64 exercises tail-only.  V6 keeps the
+// reference's sequential per-row summation order (one accumulator per row
+// block), so it is verified at the strict kTol, not kTolReassoc.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RMSNorm SSVE V6: exactly one full group (M=4*VL on M4)", "[norm][sprint2][ablation][v6]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v6, 64, 32, 64, 64, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V6: group + full tail blocks + partial block (M=100)", "[norm][sprint2][ablation][v6]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v6, 100, 50, 100, 100, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V6: tail-only path (M < 4*VL)", "[norm][sprint2][ablation][v6]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v6, 8, 50, 8, 8, 1e-5f);
+    check_variant(rms_norm_ssve_v6, 40, 37, 48, 40, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V6: multiple groups, different leading dims, N=1", "[norm][sprint2][ablation][v6]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v6, 192, 37, 200, 224, 1e-5f);
+    check_variant(rms_norm_ssve_v6, 128, 1, 128, 128, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V6: large-magnitude stress input", "[norm][sprint2][ablation][v6][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant_stress(rms_norm_ssve_v6);
+}
+
+
+// ===========================================================================
+// Sprint 2a — roofline-probe correctness (bw_probe_ssve)
+//
+// The probe is a STREAM scale-add (d[i] = s[i] + 1.0f), not a norm kernel,
+// but it feeds every % -of-peak figure, so it gets the same treatment: verify
+// the streaming-mode LD1W/ST1W path against the scalar loop before trusting
+// any bandwidth number derived from it.  Scale-add is a single exact FP32
+// operation, so vector and scalar results must match bit-for-bit (== 0 diff).
+// ===========================================================================
+
+static void check_probe(int64_t n) {
+    std::vector<float> s(n), d(n, 0.0f), expect(n, 0.0f);
+    for (int64_t i = 0; i < n; ++i) s[i] = static_cast<float>((i % 251) - 125) * 0.25f;
+    for (int64_t i = 0; i < n; ++i) expect[i] = s[i] + 1.0f;
+
+    bw_probe_ssve(d.data(), s.data(), n);
+
+    for (int64_t i = 0; i < n; ++i) {
+        INFO("i=" << i);
+        REQUIRE(d[i] == expect[i]);
+    }
+}
+
+// Covers the 4-vector main loop, the per-VL tail loop, and a partial final
+// predicate — n values chosen to hit all three regardless of SVL.
+TEST_CASE("BW probe SSVE: main loop + tail + partial predicate", "[norm][sprint2][roofline]") {
+    if (!cpu_supports_sme()) SKIP("SME required (bw_probe_ssve uses smstart/smstop)");
+    check_probe(1024);   // multiple of 4*VL for any SVL up to 2048 bits
+    check_probe(259);    // odd: main loop + tail + partial last predicate
+    check_probe(3);      // below one vector: tail-only path
+}
+
+TEST_CASE("BW probe SSVE: n = 0 is a safe no-op", "[norm][sprint2][roofline]") {
+    if (!cpu_supports_sme()) SKIP("SME required (bw_probe_ssve uses smstart/smstop)");
+    std::vector<float> s(4, 1.0f), d(4, -7.0f);
+    bw_probe_ssve(d.data(), s.data(), 0);
+    for (int i = 0; i < 4; ++i) REQUIRE(d[i] == -7.0f);  // untouched
 }

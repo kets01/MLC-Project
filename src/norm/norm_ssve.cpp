@@ -10,6 +10,13 @@ extern "C" void rms_norm_ssve_v2(const float*, float*, const float*,
                                   int64_t, int64_t, int64_t, int64_t, float);
 extern "C" void rms_norm_ssve_v3(const float*, float*, const float*,
                                   int64_t, int64_t, int64_t, int64_t, float);
+extern "C" void rms_norm_ssve_v4(const float*, float*, const float*,
+                                  int64_t, int64_t, int64_t, int64_t, float);
+extern "C" void rms_norm_ssve_v5(const float*, float*, const float*,
+                                  int64_t, int64_t, int64_t, int64_t, float);
+extern "C" void rms_norm_ssve_v6(const float*, float*, const float*,
+                                  int64_t, int64_t, int64_t, int64_t, float);
+extern "C" void bw_probe_ssve(float*, const float*, int64_t);
 
 namespace mini_jit::norm {
 
@@ -38,6 +45,29 @@ void rms_norm_ssve_v3(const float* a, float* b, const float* gamma,
                       int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
     if (!cpu_supports_sme()) return;
     ::rms_norm_ssve_v3(a, b, gamma, m, n, ld_a, ld_b, epsilon);
+}
+
+void rms_norm_ssve_v4(const float* a, float* b, const float* gamma,
+                      int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
+    if (!cpu_supports_sme()) return;
+    ::rms_norm_ssve_v4(a, b, gamma, m, n, ld_a, ld_b, epsilon);
+}
+
+void rms_norm_ssve_v5(const float* a, float* b, const float* gamma,
+                      int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
+    if (!cpu_supports_sme()) return;
+    ::rms_norm_ssve_v5(a, b, gamma, m, n, ld_a, ld_b, epsilon);
+}
+
+void rms_norm_ssve_v6(const float* a, float* b, const float* gamma,
+                      int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
+    if (!cpu_supports_sme()) return;
+    ::rms_norm_ssve_v6(a, b, gamma, m, n, ld_a, ld_b, epsilon);
+}
+
+void bw_probe_ssve(float* d, const float* s, int64_t n) {
+    if (!cpu_supports_sme()) return;
+    ::bw_probe_ssve(d, s, n);
 }
 
 } // namespace mini_jit::norm

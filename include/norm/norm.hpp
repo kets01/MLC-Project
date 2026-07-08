@@ -75,4 +75,48 @@ void rms_norm_ssve_v3(const float* a,
                       int64_t      ld_b,
                       float        epsilon);
 
+// V4: V2 + four independent FMLA accumulator chains in the reduction pass
+// (memory-level-parallelism lever; Sprint 2b round two).
+void rms_norm_ssve_v4(const float* a,
+                      float*       b,
+                      const float* gamma,
+                      int64_t      m,
+                      int64_t      n,
+                      int64_t      ld_a,
+                      int64_t      ld_b,
+                      float        epsilon);
+
+// V5: V4 + explicit software-pipelining of the reduction loads (group B
+// loads issued ahead of group A's FMLAs, rotating; Sprint 2b round two).
+void rms_norm_ssve_v5(const float* a,
+                      float*       b,
+                      const float* gamma,
+                      int64_t      m,
+                      int64_t      n,
+                      int64_t      ld_a,
+                      int64_t      ld_b,
+                      float        epsilon);
+
+// V6: contiguity blocking — four consecutive VL-row blocks per group, so
+// each column touch is 256 B contiguous (4x denser DRAM access); one
+// accumulator per block keeps V4's ILP with the reference's summation order.
+void rms_norm_ssve_v6(const float* a,
+                      float*       b,
+                      const float* gamma,
+                      int64_t      m,
+                      int64_t      n,
+                      int64_t      ld_a,
+                      int64_t      ld_b,
+                      float        epsilon);
+
+// Sprint 2a roofline probe (NOT a norm kernel): STREAM-style scale-add
+// d[i] = s[i] + 1.0f executed in streaming mode with contiguous LD1W/ST1W —
+// measures the single-core bandwidth ceiling the SSVE kernels can actually
+// reach (the compiler-vectorized C++ probe runs in NEON mode, a different
+// execution mode and therefore a different ceiling).
+// No-op when cpu_supports_sme() == false.
+void bw_probe_ssve(float*       d,
+                   const float* s,
+                   int64_t      n);
+
 } // namespace mini_jit::norm
