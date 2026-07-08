@@ -49,8 +49,9 @@
 
 SYMBOL(rms_norm_ssve_v5):
 
-    // Prologue — identical to V0-V4.
-    stp  x19, x20, [sp, #-64]!
+    // Prologue — frame extended to 80 bytes (was 64) to fit a dedicated eps
+    // stash slot at [sp,#64] alongside the original layout.
+    stp  x19, x20, [sp, #-80]!
     stp  x21, x22, [sp, #16]
     stp  x23, x24, [sp, #32]
     str  x25,      [sp, #48]
@@ -64,13 +65,17 @@ SYMBOL(rms_norm_ssve_v5):
     lsl   x24, x5, #2          // stride_a in bytes
     lsl   x25, x6, #2          // stride_b in bytes
     fmov  s8,  s0
+    str   s0,  [sp, #64]       // dedicated eps stash, stored BEFORE smstart
+                                // (streaming-mode entry clobbers D8 too, not
+                                // just D9-D15 — memory survives smstart, no
+                                // register does; verified empirically)
 
     cbz   x22, .Lrow_done_v5
 
     smstart sm
     ptrue  p0.s, all
 
-    ldr    s0, [sp, #56]       // eps (from saved D8 slot)
+    ldr    s0, [sp, #64]       // eps reloaded from the dedicated stack slot
     dup    z8.s, z0.s[0]
 
     fmov  s0, #1.0
@@ -219,5 +224,5 @@ SYMBOL(rms_norm_ssve_v5):
     ldr  x25,      [sp, #48]
     ldp  x23, x24, [sp, #32]
     ldp  x21, x22, [sp, #16]
-    ldp  x19, x20, [sp], #64
+    ldp  x19, x20, [sp], #80
     ret
