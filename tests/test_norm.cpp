@@ -507,6 +507,45 @@ TEST_CASE("RMSNorm SSVE V5: large-magnitude stress input", "[norm][sprint2][abla
 }
 
 
+// ---------------------------------------------------------------------------
+// V6 — 4-row-block contiguity grouping (Sprint 2b)
+//
+// New code paths vs V4: the unpredicated 4-block group loop (needs M >= 4*VL)
+// and the predicated single-block tail (up to 3 blocks + partial).  On the
+// M4 (VL = 16 FP32) M=64 is exactly one group; M=100 is one group + two full
+// tail blocks + a 4-row partial; M<64 exercises tail-only.  V6 keeps the
+// reference's sequential per-row summation order (one accumulator per row
+// block), so it is verified at the strict kTol, not kTolReassoc.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RMSNorm SSVE V6: exactly one full group (M=4*VL on M4)", "[norm][sprint2][ablation][v6]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v6, 64, 32, 64, 64, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V6: group + full tail blocks + partial block (M=100)", "[norm][sprint2][ablation][v6]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v6, 100, 50, 100, 100, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V6: tail-only path (M < 4*VL)", "[norm][sprint2][ablation][v6]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v6, 8, 50, 8, 8, 1e-5f);
+    check_variant(rms_norm_ssve_v6, 40, 37, 48, 40, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V6: multiple groups, different leading dims, N=1", "[norm][sprint2][ablation][v6]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v6, 192, 37, 200, 224, 1e-5f);
+    check_variant(rms_norm_ssve_v6, 128, 1, 128, 128, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V6: large-magnitude stress input", "[norm][sprint2][ablation][v6][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant_stress(rms_norm_ssve_v6);
+}
+
+
 // ===========================================================================
 // Sprint 2a — roofline-probe correctness (bw_probe_ssve)
 //
