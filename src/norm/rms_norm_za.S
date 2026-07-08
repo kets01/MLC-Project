@@ -111,8 +111,9 @@
 
 SYMBOL(rms_norm_za):
 
-    // --- Prologue: preserve callee-saved GPRs and d8 (eps stash) -----------
-    stp  x19, x20, [sp, #-64]!
+    // --- Prologue: preserve callee-saved GPRs; frame extended to 80 bytes
+    // (was 64) to fit a dedicated eps stash slot at [sp,#64]. ----------------
+    stp  x19, x20, [sp, #-80]!
     stp  x21, x22, [sp, #16]
     stp  x23, x24, [sp, #32]
     str  x25,      [sp, #48]
@@ -125,7 +126,11 @@ SYMBOL(rms_norm_za):
     mov   x23, x4                // N
     lsl   x24, x5, #2            // stride_a in bytes
     lsl   x25, x6, #2            // stride_b in bytes
-    fmov  s8,  s0                // stash eps in d8 (survives smstart)
+    fmov  s8,  s0                // stash eps in d8 too (kept for consistency)
+    str   s0,  [sp, #64]         // dedicated eps stash, stored BEFORE smstart
+                                  // (bare smstart clobbers D8 as well as
+                                  // D9-D15 — memory survives smstart, no
+                                  // register does; verified empirically)
 
     cbz   x22, .Lrow_done        // M == 0: nothing to do, no streaming region
 
@@ -135,7 +140,7 @@ SYMBOL(rms_norm_za):
     ptrue p0.s, all
 
     // eps broadcast (z8) and 1/N broadcast (z5), computed once.
-    ldr    s0, [sp, #56]         // eps from the d8 slot
+    ldr    s0, [sp, #64]          // eps reloaded from the dedicated stack slot
     dup    z8.s, z0.s[0]
     fmov   s0, #1.0
     scvtf  s1, x23
@@ -245,5 +250,5 @@ SYMBOL(rms_norm_za):
     ldr  x25,      [sp, #48]
     ldp  x23, x24, [sp, #32]
     ldp  x21, x22, [sp, #16]
-    ldp  x19, x20, [sp], #64
+    ldp  x19, x20, [sp], #80
     ret
