@@ -186,6 +186,14 @@ static void print_row(const char* label, int64_t m, int64_t n,
 // ---------------------------------------------------------------------------
 
 __attribute__((noinline))
+static double bench_ln_ssve(const float* a, float* b, const float* gamma,
+                              const float* beta, int64_t m, int64_t n, int64_t ld, float eps) {
+    using namespace mini_jit::norm;
+    layer_norm_ssve(a, b, gamma, beta, m, n, ld, ld, eps);
+    return bench([&]() { layer_norm_ssve(a, b, gamma, beta, m, n, ld, ld, eps); });
+}
+
+__attribute__((noinline))
 static double bench_ssve(const float* a, float* b, const float* gamma,
                           int64_t m, int64_t n, int64_t ld, float eps) {
     using namespace mini_jit::norm;
@@ -405,6 +413,15 @@ int main() {
                            s.m, s.n, ld, ld, 1e-5f);
         });
         print_row("layer_norm_ref", s.m, s.n, to_gibs(bytes, ln_sec), vpeak);
+
+        if (have_sme) {
+            double lnssve_sec = bench_ln_ssve(a.data(), b.data(), gamma.data(), beta.data(),
+                                               s.m, s.n, ld, 1e-5f);
+            volatile int64_t vm = s.m, vn = s.n;
+            volatile double vbytes = norm_bytes(vm, vn);
+            volatile double vgibs  = to_gibs(vbytes, lnssve_sec);
+            print_row("layer_norm_ssve", (int64_t)vm, (int64_t)vn, (double)vgibs, vpeak);
+        }
 
         double rms_sec = bench([&]() {
             rms_norm_ref(a.data(), b.data(), gamma.data(), s.m, s.n, ld, ld, 1e-5f);
