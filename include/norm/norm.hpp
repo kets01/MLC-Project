@@ -97,6 +97,18 @@ void rms_norm_ssve_v5(const float* a,
                       int64_t      ld_b,
                       float        epsilon);
 
+// V6: contiguity blocking — four consecutive VL-row blocks per group, so
+// each column touch is 256 B contiguous (4x denser DRAM access); one
+// accumulator per block keeps V4's ILP with the reference's summation order.
+void rms_norm_ssve_v6(const float* a,
+                      float*       b,
+                      const float* gamma,
+                      int64_t      m,
+                      int64_t      n,
+                      int64_t      ld_a,
+                      int64_t      ld_b,
+                      float        epsilon);
+
 // Sprint 2a roofline probe (NOT a norm kernel): STREAM-style scale-add
 // d[i] = s[i] + 1.0f executed in streaming mode with contiguous LD1W/ST1W —
 // measures the single-core bandwidth ceiling the SSVE kernels can actually
