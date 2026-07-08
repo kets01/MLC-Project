@@ -946,22 +946,30 @@ Six new Catch2 test cases in ``tests/test_norm.cpp``, all tagged
 ``[sprint2c][ssve][layernorm]`` and guarded with
 ``if (!cpu_supports_sme()) SKIP("SME required")``:
 
-+------+-------------------------------------------+------------------------------+
-| Case | Shape / condition                         | What it exercises            |
-+======+===========================================+==============================+
-|  1   | M=8,  N=4  (N < SVL)                     | tail-only path               |
-+------+-------------------------------------------+------------------------------+
-|  2   | M=8,  N=16 (N = SVL)                     | single full vector, no tail  |
-+------+-------------------------------------------+------------------------------+
-|  3   | M=6,  N=19 (N = SVL + 3)                 | full vector + small tail     |
-+------+-------------------------------------------+------------------------------+
-|  4   | M=8,  N=37 (N = 2·SVL + 5)               | multiple vectors + tail,     |
-|      |                                           | outer row loop               |
-+------+-------------------------------------------+------------------------------+
-|  5   | M=5,  N=19, ld_a=ld_b=8 (ld > M)         | padded matrix, stride test   |
-+------+-------------------------------------------+------------------------------+
-|  6   | M=4,  N=37, SHIFT=1e4                    | large-magnitude stability    |
-+------+-------------------------------------------+------------------------------+
+.. list-table::
+   :header-rows: 1
+
+   * - Case
+     - Shape / condition
+     - What it exercises
+   * - 1
+     - M=8, N=4 (N < SVL)
+     - tail-only path
+   * - 2
+     - M=8, N=16 (N = SVL)
+     - single full vector, no tail
+   * - 3
+     - M=6, N=19 (N = SVL + 3)
+     - full vector + small tail
+   * - 4
+     - M=8, N=37 (N = 2·SVL + 5)
+     - multiple vectors + tail, outer row loop
+   * - 5
+     - M=5, N=19, ld_a=ld_b=8 (ld > M)
+     - padded matrix, stride test
+   * - 6
+     - M=4, N=37, SHIFT=1e4
+     - large-magnitude stability
 
 Cases 1–5 use relative tolerance ``kTol = 1e-5``.
 Case 6 uses an absolute margin of ``1e-3``: with a DC offset of 1×10⁴ and
@@ -1043,6 +1051,169 @@ Sprint 2c status
 - **Kernel:** ``src/norm/layer_norm_ssve.S`` — VLA, SME1 mandatory subset only,
   three passes (mean / variance / normalise), column-major contiguous loads
 - **Benchmark:** V0 baseline measured; 12–13 GiB/s (20–22 % of SSVE roofline)
-- **Next:** ablation — V1 (FRSQRTE+NR for ``inv_std``), V2 (pre-computed 1/N),
-  V4 (multi-accumulator), residency-blocking V6 (fuse mean+variance pass to
-  cut 3R+1W → 2R+1W); Welford single-pass comparison
+- **Ablation:** V1–V6 + Welford — see the next section
+
+Sprint 2c ablation — LayerNorm V1–V6 and the Welford verdict
+-------------------------------------------------------------
+
+**Goal:** replay the RMSNorm levers on LayerNorm's three-pass structure
+(characterized separately, not assumed to transfer) and run the algorithmic
+ablation the ROADMAP called the headline row: vectorized Welford single-pass
+vs the stable two-pass.  All variants verified on M4 first — including
+large-magnitude stress inputs for V4/V5/V6/Welford (added as gap-fill; a
+Welford speed verdict is only meaningful if its accuracy actually holds).
+
+Ablation results (59.4 GiB/s single-core streaming roofline, useful bytes)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table:: LayerNorm SSVE ablation, key rows (Apple M4)
+   :header-rows: 1
+
+   * - shape
+     - V0
+     - V2
+     - V4
+     - **V6**
+     - Welford
+   * - M=128, N=2048 (2 MB)
+     - 12.0
+     - 13.4
+     - 15.2
+     - **15.2**
+     - 11.7
+   * - M=1024, N=2048 (16 MB)
+     - 12.7
+     - 14.3
+     - 16.3
+     - **16.3**
+     - 12.1
+   * - M=4096, N=2048 (64 MB, true DRAM)
+     - 8.4
+     - 8.3
+     - 8.4
+     - **14.4**
+     - 8.1
+
+Per-lever verdicts (vs the RMSNorm outcomes)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- **V1 (FRSQRTE+NR for inv_std): ≈0** (−2.6 % to +2.9 %).  Same verdict as
+  RMSNorm: the reciprocal-sqrt latency is not on the critical path.
+- **V2 (pre-computed 1/N): +9–12 %** — *much bigger than RMSNorm's ≈0*, and
+  the clearest structure-dependent difference.  LayerNorm has **two**
+  per-block vector FDIVs (mean = Σx/N and variance = M2/N), and both sit at
+  serialization points *between* passes: mean gates pass 2, variance gates
+  ``inv_std`` and pass 3.  With three shorter passes over the same N, these
+  serial bubbles are a ~3x larger share of runtime than RMSNorm's single
+  once-per-block FDIV.  Hoisting them pays here; it didn't there.
+- **V4 (4-accumulator ILP): +26–28 %** at N=2048 — transfers cleanly from
+  RMSNorm (which saw +27–32 %).  Accumulating two statistics does not blunt
+  the lever.
+- **V5 (load pipelining): ≈0 vs V4** — transfers: OOO rename already covers
+  it once the chains are broken.
+- **V6 (4-row-block contiguity, three passes kept): ties V4** at
+  cache-assisted shapes and **+71 % vs V0 in the true-DRAM regime**
+  (8.4 → 14.4 GiB/s) — the density mechanism from Sprint 2b transfers, with
+  a smaller DRAM-regime multiple than RMSNorm's +131 % because LayerNorm
+  spends relatively more time in FP work per byte.  **V6 is the LayerNorm
+  incumbent** (never worse than V4 anywhere).
+
+Welford vs two-pass: two-pass dominates on BOTH axes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The comparison production libraries actually face, measured:
+
+- **Speed: Welford loses everywhere** — −2.5 % to −8.5 % vs V0, and
+  25–30 % below V6 — *despite moving 25 % fewer bytes* (2R+1W vs 3R+1W).
+  The pre-registered hypothesis held: the per-element recurrence
+  (``mean += delta/count``) serializes on SIMD, and the FDIV-per-column cost
+  swamps the traffic saving.
+- **Accuracy: Welford is ~100x worse on shifted data in FP32.**  Max
+  absolute error vs the double reference (M=16, N=512):
+
+  .. list-table::
+     :header-rows: 1
+
+     * - input shift
+       - two-pass V6
+       - Welford (FP32)
+     * - 0
+       - 1.2e-5
+       - 1.1e-5
+     * - 1e4
+       - **1.2e-5**
+       - **1.2e-3**
+     * - 1e5
+       - 2.5e-3
+       - 2.5e-3
+
+  The centered two-pass subtracts the mean *before* squaring, so its
+  variance arithmetic works on small values; FP32 Welford updates
+  ``mean`` at full input magnitude every element, accumulating rounding at
+  the scale of the shift.  (Welford is still far better than the
+  catastrophic naive ``E[x²]−µ²`` — but it is not a free replacement for
+  two-pass in FP32.)  At shift 1e5 both degrade equally: the input itself
+  has lost the bits.
+
+**Verdict:** on SIMD, the stable two-pass formulation wins on speed *and*
+FP32 accuracy.  Welford's ablation row is a strong negative — kept in the
+table with both measurements, not just the throughput number.
+
+LayerNorm vs RMSNorm on the same harness (decision C)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Best variant vs best variant (both V6), same shapes:
+
+.. list-table::
+   :header-rows: 1
+
+   * - shape
+     - LN V6 GiB/s
+     - RMS V6 GiB/s
+     - LN/RMS
+   * - M=128, N=64
+     - 11.4
+     - 22.2
+     - 0.52
+   * - M=128, N=2048
+     - 15.2
+     - 31.8
+     - 0.48
+   * - M=1024, N=2048
+     - 16.3
+     - 37.7
+     - 0.43
+   * - M=4096, N=2048
+     - 14.4
+     - 25.5
+     - 0.56
+
+**RMSNorm is 1.8–2.3x faster — well beyond the proposal's "10–40 %".**
+Two attributable causes: (1) structural traffic — LayerNorm's three passes
+move 4 units (3R+1W) per element vs RMSNorm's 3 (2R+1W), a 1.33x floor;
+(2) per-byte efficiency — LayerNorm adds the mean-subtract and β, and its
+two serialization points per block (mean, then variance) cost more than
+RMSNorm's one.  In moved-bytes terms LN V6 sustains ~33 GiB/s (55 % of the
+roofline) vs RMS V6's ~57 (95 %): the remaining LayerNorm-specific gap is
+the pass structure itself.
+
+What is deliberately left on the table
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+True 3R→2R pass fusion needs the variance pass's data kept resident until
+``inv_std`` is known — more state than 32 Z registers hold for real N.
+That is exactly tile-level staging, i.e. the **Sprint-3 ZA hypothesis**,
+now with a quantified target: +33 % traffic reduction available on
+LayerNorm (vs none on RMSNorm), so LayerNorm is where ZA staging has
+structural headroom.  Deeper group depth (8–16 blocks) remains a
+shape-specialized JIT decision (Sprint 4), threading toward the 88–90
+GiB/s chip ceiling is Sprint 5.
+
+Sprint 2c ablation status
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- **Kernels:** ``layer_norm_ssve_v1/v2/v4/v5/v6/welford.S`` — all verified
+  on M4 (81 test cases, 64 885 assertions in ``test_norm``), stress
+  coverage complete for every variant.
+- **Incumbents frozen for Sprint 3/4:** RMSNorm V6 and LayerNorm V6.
+- **Decision-C numbers recorded:** LN/RMS = 0.43–0.56 on identical shapes.
