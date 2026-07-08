@@ -75,6 +75,17 @@ void rms_norm_ssve_v3(const float* a,
                       int64_t      ld_b,
                       float        epsilon);
 
+// V4: V2 + four independent FMLA accumulator chains in the reduction pass
+// (memory-level-parallelism lever; Sprint 2b round two).
+void rms_norm_ssve_v4(const float* a,
+                      float*       b,
+                      const float* gamma,
+                      int64_t      m,
+                      int64_t      n,
+                      int64_t      ld_a,
+                      int64_t      ld_b,
+                      float        epsilon);
+
 // Sprint 2a roofline probe (NOT a norm kernel): STREAM-style scale-add
 // d[i] = s[i] + 1.0f executed in streaming mode with contiguous LD1W/ST1W —
 // measures the single-core bandwidth ceiling the SSVE kernels can actually
