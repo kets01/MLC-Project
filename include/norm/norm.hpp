@@ -75,4 +75,14 @@ void rms_norm_ssve_v3(const float* a,
                       int64_t      ld_b,
                       float        epsilon);
 
+// Sprint 2a roofline probe (NOT a norm kernel): STREAM-style scale-add
+// d[i] = s[i] + 1.0f executed in streaming mode with contiguous LD1W/ST1W —
+// measures the single-core bandwidth ceiling the SSVE kernels can actually
+// reach (the compiler-vectorized C++ probe runs in NEON mode, a different
+// execution mode and therefore a different ceiling).
+// No-op when cpu_supports_sme() == false.
+void bw_probe_ssve(float*       d,
+                   const float* s,
+                   int64_t      n);
+
 } // namespace mini_jit::norm
