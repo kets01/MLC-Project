@@ -147,7 +147,48 @@ correction to the Sprint-2a interpretation.
 
 ---
 
-## 6. Environment: `cmake` not on PATH (recurring from Sprint 3)
+## 6. Guard fix fallout: small-N sweep printed `GiB/s 0.00` (D-register clobber, again)
+
+**What I saw.** Immediately after fix #5, re-running the benchmark:
+
+```
+--- Small-N regime ---
+M=128:
+  N        us/call    GiB/s (% 1-core SSVE peak)
+  16        0.416      0.00     0.0 %      <- times right, GiB/s zero
+```
+
+The µs/call column showed the expected improvement (N=16 dropped from
+1.375 µs to 0.416 µs — the syscall gone), but every GiB/s printed 0.00.
+The same computation had printed correctly for weeks.
+
+**Cause.** The known SMSTART hazard, resurfaced by an unrelated change.
+`SMSTART` zeroes the callee-saved FP registers D9–D15 behind the compiler's
+back (the kernels save only D8), so the harness keeps timing values in
+`volatile` stack slots.  `small_n_sweep()` was the one section computing
+`to_gibs(norm_bytes(m, n), secs[k])` in a single expression without a
+volatile intermediate — it had merely been *lucky* in register allocation.
+Making `cpu_supports_sme()` trivially inlinable (fix #5) changed the
+allocator's choices, and part of the GiB/s computation landed in a
+D9–D15 register that the kernel call zeroes.
+
+**Fix.** The same two-hop volatile discipline used everywhere else in the
+file (`volatile double vbytes = ...; volatile double vgibs = to_gibs(...)`),
+with a comment naming the trigger.  Lesson repeated from Sprint 2: with an
+ABI-violating callee, *every* FP value computed near the call must be
+forced to the stack — "it printed fine last week" is register-allocator
+luck, not correctness.
+
+**Corrected result worth recording:** with the syscall removed, the N=16
+call drops from 1.375 µs to ~0.42 µs, throughput is flat (~29 GiB/s) from
+N=32 upward, and the fixed per-call cost is too small for the linear fit to
+resolve (intercept within noise of zero, ≲0.4 µs) — the Sprint-2a headline
+"t0 ≈ 1.4 µs/call, overhead = streaming work at N ≈ 41" was ~70% syscall.
+The report's Sprint-4 section restates the small-N regime accordingly.
+
+---
+
+## 7. Environment: `cmake` not on PATH (recurring from Sprint 3)
 
 Same as Sprint 3 error #2: the tool shell doesn't inherit the interactive
 PATH, so every cmake/ctest invocation is prefixed with
