@@ -358,6 +358,12 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
               << std::right << std::setw(12) << "us/call"
               << std::setw(12) << "GiB/s" << std::setw(22) << "(% 1-core SSVE peak)\n";
 
+    // Bench loop and print loop are SEPARATE on purpose.  SMSTART zeroes
+    // D9-D15 behind the compiler's back, and volatile inputs cannot protect
+    // FP CONSTANTS the compiler hoists into those registers for the loop
+    // (e.g. the 1/2^30 reciprocal inside to_gibs — this printed GiB/s as
+    // 0.00 when register allocation shifted).  With no SME call inside the
+    // print loop, nothing can be clobbered between computation and output.
     for (int k = 0; k < K; ++k) {
         const int64_t n  = ns[k];
         const int64_t ld = m;
@@ -367,14 +373,17 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
 
         // 200 reps: small shapes need more repetitions for a stable minimum.
         secs[k] = bench_ssve_v1(a.data(), b.data(), gamma.data(), m, n, ld, 1e-5f, 200);
+    }
 
-        volatile double vgibs = to_gibs(norm_bytes(m, n), secs[k]);
+    for (int k = 0; k < K; ++k) {
+        const int64_t n     = ns[k];
+        const double  gibs  = to_gibs(norm_bytes(m, n), secs[k]);
         std::cout << "  " << std::left << std::setw(6) << n
                   << std::right << std::fixed
                   << std::setw(12) << std::setprecision(3) << secs[k] * 1e6
-                  << std::setw(12) << std::setprecision(2) << vgibs
+                  << std::setw(12) << std::setprecision(2) << gibs
                   << std::setw(12) << std::setprecision(1)
-                  << (100.0 * vgibs / vpeak) << " %\n";
+                  << (100.0 * gibs / vpeak) << " %\n";
     }
 
     // Least-squares fit t = t0 + b*N (no SME calls past this point).
