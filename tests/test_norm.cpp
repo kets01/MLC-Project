@@ -1279,3 +1279,203 @@ TEST_CASE("LayerNorm SSVE kernels: all-constant row is finite (eps regression)",
     check(layer_norm_ssve_v6,       "layer_norm_ssve_v6");
     check(layer_norm_ssve_welford,  "layer_norm_ssve_welford");
 }
+
+// ===========================================================================
+// Sprint 4 — mini_jit::Norm JIT generator
+//
+// Three layers of verification, weakest to strongest:
+//   1. [encoders]      every new InstGen encoder reproduces the golden word
+//                      the toolchain assembled for the same instruction
+//                      (words taken from objdump of rms/layer_norm_ssve_v6.o).
+//   2. [encoding-diff] the generator's whole buffer is diffed word-by-word
+//                      against the LINKED hand-written kernel, read straight
+//                      from its function address at runtime — so the diff is
+//                      always against what the toolchain actually assembled,
+//                      never a stale copy.  A green diff proves the JIT
+//                      kernel byte-identical to a kernel that already passed
+//                      the full Sprint-2/3 suite.
+//   3. [jit]           the emitted kernel is executed and verified against
+//                      the C++ reference anyway (SME-guarded) — belt and
+//                      suspenders, and it also validates the JitEngine
+//                      buffer path (mmap/JIT-protect/icache-invalidate).
+//
+// 1 and 2 are host-portable and run on CI; 3 skips without SME.
+// ===========================================================================
+
+#include "norm/jit_norm.hpp"
+#include "week6/Instgen.hpp"
+#include <cstring>
+
+// The raw assembled kernels (not the SME-guard wrappers in mini_jit::norm) —
+// the encoding diff reads their instruction words from the linked binary.
+extern "C" void rms_norm_ssve_v6(const float*, float*, const float*,
+                                 int64_t, int64_t, int64_t, int64_t, float);
+extern "C" void layer_norm_ssve_v6(const float*, float*, const float*, const float*,
+                                   int64_t, int64_t, int64_t, int64_t, float);
+
+using IG = mini_jit::InstGen;
+using mini_jit::Norm;
+
+TEST_CASE("Sprint4 InstGen: base loads/stores match golden words", "[norm][sprint4][encoders]") {
+    // golden words: objdump of rms_norm_ssve_v6.o / layer_norm_ssve_v6.o
+    REQUIRE(IG::base_stp_pre_x(IG::x19, IG::x20, IG::sp, -80) == 0xa9bb53f3u); // stp x19,x20,[sp,#-0x50]!
+    REQUIRE(IG::base_stp_off_x(IG::x21, IG::x22, IG::sp,  16) == 0xa9015bf5u); // stp x21,x22,[sp,#0x10]
+    REQUIRE(IG::base_stp_off_x(IG::x25, IG::x26, IG::sp,  48) == 0xa9036bf9u); // stp x25,x26,[sp,#0x30]
+    REQUIRE(IG::base_ldp_off_x(IG::x23, IG::x24, IG::sp,  32) == 0xa94263f7u); // ldp x23,x24,[sp,#0x20]
+    REQUIRE(IG::base_ldp_post_x(IG::x19, IG::x20, IG::sp, 80) == 0xa8c553f3u); // ldp x19,x20,[sp],#0x50
+    REQUIRE(IG::base_str_imm_x(IG::x25, IG::sp, 48) == 0xf9001bf9u);           // str x25,[sp,#0x30]
+    REQUIRE(IG::base_ldr_imm_x(IG::x25, IG::sp, 48) == 0xf9401bf9u);           // ldr x25,[sp,#0x30]
+    REQUIRE(IG::simd_str_imm_d(IG::v8, IG::sp, 56)  == 0xfd001fe8u);           // str d8,[sp,#0x38]
+    REQUIRE(IG::simd_ldr_imm_d(IG::v8, IG::sp, 56)  == 0xfd401fe8u);           // ldr d8,[sp,#0x38]
+    REQUIRE(IG::simd_str_imm_s(IG::v0, IG::sp, 64)  == 0xbd0043e0u);           // str s0,[sp,#0x40]
+    REQUIRE(IG::simd_ldr_imm_s(IG::v0, IG::sp, 64)  == 0xbd4043e0u);           // ldr s0,[sp,#0x40]
+}
+
+TEST_CASE("Sprint4 InstGen: base moves/branches match golden words", "[norm][sprint4][encoders]") {
+    REQUIRE(IG::base_mov_reg_x(IG::x19, IG::x0) == 0xaa0003f3u);               // mov x19,x0
+    REQUIRE(IG::base_mov_reg_x(IG::x0,  IG::x6) == 0xaa0603e0u);               // mov x0,x6
+    REQUIRE(IG::base_cmp_reg_x(IG::x6, IG::x22) == 0xeb1600dfu);               // cmp x6,x22
+    REQUIRE(IG::base_b_cond(IG::cond_hi,  72) == 0x54000908u);                 // b.hi +72
+    REQUIRE(IG::base_b_cond(IG::cond_eq,  35) == 0x54000460u);                 // b.eq +35 (b.none)
+    REQUIRE(IG::base_b_ne(-10)            == 0x54fffec1u);                     // b.ne -10
+    REQUIRE(IG::base_b(-73)               == 0x17ffffb7u);                     // b -73
+    REQUIRE(IG::base_br_cbz_x(IG::x22, 123) == 0xb4000f76u);                   // cbz x22,+123
+    // existing encoders reused by the generator, pinned here too
+    REQUIRE(IG::base_lsl_x(IG::x24, IG::x5, 2)     == 0xd37ef4b8u);            // lsl x24,x5,#2
+    REQUIRE(IG::base_movz_x(IG::x0, 0)             == 0xd2800000u);            // mov x0,#0
+    REQUIRE(IG::base_add_reg_x(IG::x6, IG::x0, IG::x14) == 0x8b0e0006u);       // add x6,x0,x14
+    REQUIRE(IG::base_add_imm_x(IG::x10, IG::x10, 4)     == 0x9100114au);       // add x10,x10,#4
+    REQUIRE(IG::base_subs_imm_x(IG::x9, IG::x9, 1)      == 0xf1000529u);       // subs x9,x9,#1
+}
+
+TEST_CASE("Sprint4 InstGen: fp scalar ops match golden words", "[norm][sprint4][encoders]") {
+    REQUIRE(IG::fp_fmov_s(IG::v8, IG::v0)      == 0x1e204008u);                // fmov s8,s0
+    REQUIRE(IG::fp_fmov_imm_s(IG::v0, 0x70)    == 0x1e2e1000u);                // fmov s0,#1.0
+    REQUIRE(IG::fp_scvtf_s_x(IG::v1, IG::x23)  == 0x9e2202e1u);                // scvtf s1,x23
+    REQUIRE(IG::fp_fdiv_s(IG::v0, IG::v0, IG::v1) == 0x1e211800u);             // fdiv s0,s0,s1
+}
+
+TEST_CASE("Sprint4 InstGen: SVE/SME ops match golden words", "[norm][sprint4][encoders]") {
+    REQUIRE(IG::sme_smstart_sm_only() == 0xd503437fu);                         // smstart sm
+    REQUIRE(IG::sme_smstop_sm_only()  == 0xd503427fu);                         // smstop sm
+    // the Sprint-4 ptrue fix: fp32 must be .S (size=10), not .B
+    REQUIRE(IG::sve_ptrue_all(IG::p0, IG::dtype_t::fp32) == 0x2598e3e0u);      // ptrue p0.s
+    REQUIRE(IG::sve_cntw_x(IG::x14)   == 0x04a0e3eeu);                         // cntw x14
+    REQUIRE(IG::sve_incw_x(IG::x0)    == 0x04b0e3e0u);                         // incw x0
+    REQUIRE(IG::sve_addvl(IG::x19, IG::x19, 4) == 0x04335093u);                // addvl x19,x19,#4
+    REQUIRE(IG::sve_addvl(IG::x20, IG::x20, 1) == 0x04345034u);                // addvl x20,x20,#1
+    REQUIRE(IG::sve_dup_imm_s(IG::z2, 0)       == 0x25b8c002u);                // mov z2.s,#0
+    REQUIRE(IG::sve_dup_elem_s(IG::z8, IG::z0, 0) == 0x05242008u);             // mov z8.s,s0
+    REQUIRE(IG::sve_dup_elem_s(IG::z3, IG::z8, 0) == 0x05242103u);             // mov z3.s,s8
+    REQUIRE(IG::sve_ld1w_imm(IG::z0,  IG::p0, IG::x8, 0) == 0xa540a100u);      // ld1w {z0.s},p0/z,[x8]
+    REQUIRE(IG::sve_ld1w_imm(IG::z24, IG::p0, IG::x8, 1) == 0xa541a118u);      // ld1w {z24.s},[x8,#1,mul vl]
+    REQUIRE(IG::sve_ld1w_imm(IG::z0,  IG::p1, IG::x8, 0) == 0xa540a500u);      // ld1w {z0.s},p1/z,[x8]
+    REQUIRE(IG::sve_st1w_imm(IG::z26, IG::p0, IG::x9, 3) == 0xe543e13au);      // st1w {z26.s},[x9,#3,mul vl]
+    REQUIRE(IG::sve_st1w_imm(IG::z0,  IG::p1, IG::x9, 0) == 0xe540e520u);      // st1w {z0.s},p1,[x9]
+    REQUIRE(IG::sve_ld1rw_s(IG::z1, IG::p0, IG::x10) == 0x8540c141u);          // ld1rw {z1.s},p0/z,[x10]
+    REQUIRE(IG::sve_ld1rw_s(IG::z1, IG::p1, IG::x10) == 0x8540c541u);          // ld1rw {z1.s},p1/z,[x10]
+    REQUIRE(IG::sve_fmla_s(IG::z16, IG::p0, IG::z24, IG::z24) == 0x65b80310u); // fmla z16.s,p0/m,z24.s,z24.s
+    REQUIRE(IG::sve_fmla_s(IG::z2,  IG::p1, IG::z0,  IG::z0)  == 0x65a00402u); // fmla z2.s,p1/m,z0.s,z0.s
+    REQUIRE(IG::sve_fadd_p_s(IG::z2, IG::p0, IG::z8) == 0x65808102u);          // fadd z2.s,p0/m,z2.s,z8.s
+    REQUIRE(IG::sve_fsub_p_s(IG::z0, IG::p0, IG::z8) == 0x65818100u);          // fsub z0.s,p0/m,z0.s,z8.s
+    REQUIRE(IG::sve_fmul_p_s(IG::z2, IG::p0, IG::z5) == 0x658280a2u);          // fmul z2.s,p0/m,z2.s,z5.s
+    REQUIRE(IG::sve_fmul_s(IG::z3, IG::z4, IG::z2)   == 0x65820883u);          // fmul z3.s,z4.s,z2.s
+    REQUIRE(IG::sve_frsqrte_s(IG::z4, IG::z2)        == 0x658f3044u);          // frsqrte z4.s,z2.s
+    REQUIRE(IG::sve_frsqrts_s(IG::z3, IG::z4, IG::z3) == 0x65831c83u);         // frsqrts z3.s,z4.s,z3.s
+    REQUIRE(IG::sve_whilelo_s_x(IG::p1, IG::x0, IG::x22) == 0x25b61c01u);      // whilelo p1.s,x0,x22
+    REQUIRE(IG::sve_sel_s(IG::z2, IG::p1, IG::z2, IG::z3) == 0x05a3c442u);     // sel z2.s,p1,z2.s,z3.s
+}
+
+// --- encoding diff ---------------------------------------------------------
+
+// Read the instruction words of a linked function.  Code pages are readable
+// on macOS arm64 (no execute-only mappings), and the .S kernels are a single
+// straight-line symbol, so &fn is the first word and fn's RET is the last.
+template <typename Fn>
+static const uint32_t* linked_words(Fn* fn) {
+    return reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(fn));
+}
+
+static void encoding_diff(const std::vector<uint32_t>& jit,
+                          const uint32_t* golden) {
+    REQUIRE(!jit.empty());
+    // anchor: the hand-written kernel ends in exactly one RET; if the length
+    // of the two sequences disagreed, this word would not be RET.
+    REQUIRE(golden[jit.size() - 1] == 0xd65f03c0u);
+    for (size_t i = 0; i < jit.size(); ++i) {
+        INFO("word " << i << ": jit=" << IG::to_string_hex(jit[i])
+                     << " golden=" << IG::to_string_hex(golden[i]));
+        REQUIRE(jit[i] == golden[i]);
+    }
+}
+
+TEST_CASE("Sprint4 encoding diff: JIT RMSNorm == assembled rms_norm_ssve_v6",
+          "[norm][sprint4][encoding-diff]") {
+    Norm gen;
+    REQUIRE(gen.generate(Norm::ntype_t::rms) == Norm::error_t::success);
+    REQUIRE(gen.words().size() == 143);        // instruction count of the .S
+    encoding_diff(gen.words(), linked_words(&::rms_norm_ssve_v6));
+}
+
+TEST_CASE("Sprint4 encoding diff: JIT LayerNorm == assembled layer_norm_ssve_v6",
+          "[norm][sprint4][encoding-diff]") {
+    Norm gen;
+    REQUIRE(gen.generate(Norm::ntype_t::layer) == Norm::error_t::success);
+    REQUIRE(gen.words().size() == 194);
+    encoding_diff(gen.words(), linked_words(&::layer_norm_ssve_v6));
+}
+
+// --- execution: JIT kernel vs C++ reference (same cases as the V6 tests) ----
+
+TEST_CASE("Sprint4 JIT RMSNorm: executes correctly vs reference",
+          "[norm][sprint4][jit]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    Norm gen;
+    REQUIRE(gen.generate(Norm::ntype_t::rms) == Norm::error_t::success);
+    Norm::rms_kernel_t k = gen.get_rms_kernel();
+    REQUIRE(k != nullptr);
+    check_variant(k,  64, 32,  64,  64, 1e-5f);   // exactly one full group
+    check_variant(k, 100, 50, 100, 100, 1e-5f);   // group + tail blocks + partial
+    check_variant(k,   8, 50,   8,   8, 1e-5f);   // tail-only path
+    check_variant(k,  40, 37,  48,  40, 1e-5f);   // mismatched leading dims
+    check_variant(k, 192, 37, 200, 224, 1e-5f);   // multiple groups, padded lds
+    check_variant(k, 128,  1, 128, 128, 1e-5f);   // N=1
+    check_variant_stress(k);                      // large-magnitude stress
+}
+
+TEST_CASE("Sprint4 JIT LayerNorm: executes correctly vs reference",
+          "[norm][sprint4][jit]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    Norm gen;
+    REQUIRE(gen.generate(Norm::ntype_t::layer) == Norm::error_t::success);
+    Norm::layer_kernel_t k = gen.get_layer_kernel();
+    REQUIRE(k != nullptr);
+    check_ln_variant(k,  64, 32,  64,  64, 1e-5f);
+    check_ln_variant(k, 100, 50, 100, 100, 1e-5f);
+    check_ln_variant(k,   8, 50,   8,   8, 1e-5f);
+    check_ln_variant(k,  40, 37,  48,  40, 1e-5f);
+    check_ln_variant(k, 192, 37, 200, 224, 1e-5f);
+    check_ln_variant(k, 128,  1, 128, 128, 1e-5f);
+}
+
+TEST_CASE("Sprint4 JIT kernels: all-constant row is finite (eps regression)",
+          "[norm][sprint4][jit][eps]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    const int64_t M = 16, N = 16, ld = M;
+    std::vector<float> a(ld * N, 3.0f);
+    std::vector<float> gamma(N, 1.0f), beta(N, 0.5f);
+
+    Norm gr;  REQUIRE(gr.generate(Norm::ntype_t::rms)   == Norm::error_t::success);
+    Norm gl;  REQUIRE(gl.generate(Norm::ntype_t::layer) == Norm::error_t::success);
+
+    std::vector<float> br(ld * N, 123.0f);
+    gr.get_rms_kernel()(a.data(), br.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+    for (int64_t i = 0; i < ld * N; ++i) REQUIRE(std::isfinite(br[i]));
+
+    std::vector<float> bl(ld * N, 123.0f);
+    gl.get_layer_kernel()(a.data(), bl.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+    for (int64_t i = 0; i < ld * N; ++i) {
+        REQUIRE(std::isfinite(bl[i]));
+        REQUIRE(bl[i] == Approx(0.5f).margin(1e-6f));
+    }
+}
