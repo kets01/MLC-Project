@@ -1,0 +1,188 @@
+# Sprint 4 — errors encountered and how they were solved
+
+An honest log of what actually went wrong while building the `mini_jit::Norm`
+JIT generator, and how each was fixed.  Kept truthful, as in Sprint 3: the
+generator itself passed the encoding-diff and all execution tests on the
+**first** run — the encoding work went in without a single debugging session,
+*because* every encoder was written against golden words extracted from the
+toolchain-assembled kernels before any emission code existed.  The real
+errors this sprint were found *by* that methodology in code that already
+existed and was believed correct — which is precisely the argument for it.
+
+---
+
+## 1. `ctest` found no tests ("No tests were found!!!")
+
+**What I saw**
+
+```
+$ ctest --test-dir build
+Test project .../MLC-project/build
+No tests were found!!!
+```
+
+despite every module registering with `add_test(...)`.
+
+**Cause.** In the root `CMakeLists.txt`, `enable_testing()` sat at the
+**bottom of the file — after all `add_subdirectory()` calls**.  CMake only
+writes a subdirectory's tests into `CTestTestfile.cmake` if testing is
+already enabled when that directory is processed, so every `add_test()` in
+the week/norm modules was silently ignored.  Pre-existing on `main` since
+the repo began; nobody noticed because everyone ran the test binaries
+directly (`./build/src/norm/test_norm`), which CLAUDE.md lists as an
+accepted alternative.
+
+**Fix.** Moved `enable_testing()` above the `add_subdirectory()` block
+(commit `fix(build)`).  `ctest --test-dir build` now discovers and runs all
+seven suites.
+
+---
+
+## 2. `Norm.hpp` could not be created — APFS is case-insensitive
+
+**What I saw**
+
+```
+Write include/norm/Norm.hpp
+→ error: File has not been read yet.  (i.e. "this file already exists")
+```
+
+for a file that did not appear in `ls`.
+
+**Cause.** macOS APFS is **case-insensitive by default**: `Norm.hpp` and the
+existing `norm.hpp` are the *same directory entry*.  The tooling saw an
+existing file where I intended a new one.  The `context.md` target layout
+(`src/mini_jit/Norm.h`) silently assumed a case-sensitive filesystem.
+
+**Fix.** Named the generator files `jit_norm.hpp` / `jit_norm.cpp` (also
+more consistent with the repo's lowercase header style: `norm.hpp`,
+`jit_engine.hpp`, `jit_kernel.hpp`).  Noted in the header comment why the
+name deviates from context.md §12.
+
+---
+
+## 3. Latent InstGen bug: `sve_ptrue_all(fp32)` emitted `PTRUE P.B`, not `P.S`
+
+**What I saw.** Preparing the encoding diff, the golden word for
+`ptrue p0.s` in both assembled V6 kernels is `0x2598e3e0`, but the week6
+encoder returned `0x2518e3e0`.  Decoding the difference: bits 23:22
+(the size field) were `00` (= `.B`) instead of `10` (= `.S`) — the
+encoder's own doc comment says "size=10 (bits 23:22)" but the constant
+never matched it.
+
+**Cause.** Wrong base constant in `Instgen.cpp`, present since week 6 and
+functionally **masked in every existing caller**: an ALL-true `.B`
+predicate governs `.S` operations identically to an ALL-true `.S`
+predicate, so Unary and Gemm still computed correct results.  A textbook
+"it assembles and runs, but is not the instruction you meant"
+(CLAUDE.md §10) — invisible to behavioral tests, caught the moment an
+exact word comparison existed.
+
+**Fix.** Corrected the constant to `0x2598e3e0` (now matching the comment),
+added a pinning unit test, and re-ran the week5/week6 suites (green — the
+change is behavior-preserving for them by the masking argument above).
+
+---
+
+## 4. Latent InstGen naming bug: `sme_smstart_sm()` actually enables ZA too
+
+**What I saw.** The golden word for the norm kernels' `smstart sm` is
+`0xd503437f` (`MSR SVCRSM, #1` — streaming mode only).  The week6
+`sme_smstart_sm()` returns `0xd503477f`, which is `MSR SVCRSMZA, #1` —
+`SMSTART` with **both** PSTATE.SM and PSTATE.ZA.  Same for the stop pair
+(`0xd503427f` vs `0xd503467f`).
+
+**Cause.** Misnamed encoder.  Harmless-to-necessary for its existing users
+(Gemm genuinely needs ZA for `fmopa`; Unary merely enables ZA needlessly),
+but wrong for the norm kernels, which deliberately run SM-only — and it
+would have silently introduced the AAPCS64 lazy-save/ZA-state hazards the
+Sprint-3 kernels were carefully designed around.
+
+**Fix.** Did **not** change the existing encoder (Gemm depends on its actual
+behavior); added correctly-named `sme_smstart_sm_only()` /
+`sme_smstop_sm_only()` with a doc comment spelling out the distinction, and
+improved the old pair's comments.  Pinned both words in the encoder tests.
+
+---
+
+## 5. JIT kernel benchmarked FASTER than the word-identical hand-written one
+
+**What I saw.** First run of the Sprint-4 parity benchmark:
+
+```
+RMS V6 hand-written   M=128  N=64    22.54 GiB/s
+RMS V6 JIT-emitted    M=128  N=64    39.61 GiB/s   +75.7% vs hand
+...
+RMS V6 hand-written   M=1024 N=2048  37.98 GiB/s
+RMS V6 JIT-emitted    M=1024 N=2048  38.47 GiB/s   +1.3%  vs hand
+```
+
+The encoding diff proves the two kernels are **word-for-word identical**, so
++75.7% at the small shape is physically impossible for the code itself —
+the discrepancy had to be in the *call path*, and it shrank with shape size
+exactly like a fixed per-call cost.
+
+**Cause.** The hand-written kernels are benchmarked through their
+`mini_jit::norm` guard wrappers, and `cpu_supports_sme()` performed an
+**uncached `sysctlbyname` syscall on every single call** (~1 µs).  The JIT
+function pointer is called directly, no wrapper.  At M=128/N=64 the kernel
+itself does ~1.3 µs of work, so the syscall was ~75% overhead; at
+M=1024/N=2048 it amortizes into the noise.
+
+Ripple effect: every small-shape number in the Sprint-2/3 tables — and in
+particular the Sprint-2a small-N fit's headline "fixed cost t0 ≈ 1 µs/call,
+overhead = streaming work at N ≈ 30–40" — was measured **through the same
+wrapper** and therefore includes ~1 µs of *syscall*, not kernel overhead.
+The qualitative conclusions survive (there IS a fixed per-call cost; the
+N=64 dip is real), but t0 was roughly doubled by the harness, and the
+"overhead = work" crossover N was overstated.  Corrected numbers after the
+fix: see the re-measured Section 5/6 tables in the report.
+
+**Fix.** Cached the sysctl result in a function-local `static` (CPU features
+cannot change at runtime; static-local init is thread-safe).  Re-ran the
+full suite and the benchmark: JIT and hand-written are now at parity within
+noise at **all** shapes, and the small-N sweep's t0 dropped accordingly.
+The Sprint-4 report section documents both the before/after and the
+correction to the Sprint-2a interpretation.
+
+---
+
+## 6. Environment: `cmake` not on PATH (recurring from Sprint 3)
+
+Same as Sprint 3 error #2: the tool shell doesn't inherit the interactive
+PATH, so every cmake/ctest invocation is prefixed with
+`export PATH="/opt/homebrew/bin:$PATH"`.  Known, worked around immediately,
+listed only for completeness.
+
+---
+
+## What did NOT go wrong — and why (the methodology content)
+
+The generator emitted **337 instruction words across two kernels — plus 30
+new instruction encoders — and every test passed on the first run**:
+encoding diff green for both norms (143 + 194 words), all execution tests
+green on M4, 34,006 assertions.  That is not luck; it is the order of
+operations:
+
+- **Golden words before any encoder.**  Both winning `.S` kernels were
+  assembled by the toolchain and `objdump`'d *first*; every encoder was
+  written against the Arm ARM field layout and immediately pinned to a
+  golden word from that disassembly.  No encoder was ever "probably right".
+- **The diff reads the linked kernel, not a copy.**  The encoding-diff test
+  takes the address of the linked `rms/layer_norm_ssve_v6` functions and
+  compares the JIT buffer against the actual code bytes in the test binary —
+  so the reference can never go stale if the `.S` changes.
+- **Transcription, not re-derivation.**  The emission functions are a 1:1
+  transcription of the hand-written kernels (same registers, same order),
+  so the JIT inherits the trust of a kernel that already passed 350k+
+  assertions — including the Sprint-3 eps-stash fix — instead of
+  re-earning it.
+- **Branch offsets computed, then verified by the same diff.**  Forward
+  branches are backpatched from recorded label indices; a single off-by-one
+  anywhere would break the word-for-word diff loudly at that index.
+
+The two latent week6 bugs (#3, #4) and the harness bug (#5) were all found
+*by* this exactness, in code that behavioral tests had passed for weeks.
+That is the sprint's real lesson: behavioral tests verify what code does;
+an encoding diff verifies what code *is* — and the second catches classes
+of error the first structurally cannot.
