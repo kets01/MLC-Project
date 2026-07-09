@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 #include "norm/norm.hpp"
+#include "norm/jit_norm.hpp"  // Sprint 4: mini_jit::Norm
 #include "week3/utility.hpp"  // cpu_supports_sme()
 
 #ifdef __APPLE__
@@ -357,6 +358,12 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
               << std::right << std::setw(12) << "us/call"
               << std::setw(12) << "GiB/s" << std::setw(22) << "(% 1-core SSVE peak)\n";
 
+    // Bench loop and print loop are SEPARATE on purpose.  SMSTART zeroes
+    // D9-D15 behind the compiler's back, and volatile inputs cannot protect
+    // FP CONSTANTS the compiler hoists into those registers for the loop
+    // (e.g. the 1/2^30 reciprocal inside to_gibs — this printed GiB/s as
+    // 0.00 when register allocation shifted).  With no SME call inside the
+    // print loop, nothing can be clobbered between computation and output.
     for (int k = 0; k < K; ++k) {
         const int64_t n  = ns[k];
         const int64_t ld = m;
@@ -366,14 +373,17 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
 
         // 200 reps: small shapes need more repetitions for a stable minimum.
         secs[k] = bench_ssve_v1(a.data(), b.data(), gamma.data(), m, n, ld, 1e-5f, 200);
+    }
 
-        volatile double vgibs = to_gibs(norm_bytes(m, n), secs[k]);
+    for (int k = 0; k < K; ++k) {
+        const int64_t n     = ns[k];
+        const double  gibs  = to_gibs(norm_bytes(m, n), secs[k]);
         std::cout << "  " << std::left << std::setw(6) << n
                   << std::right << std::fixed
                   << std::setw(12) << std::setprecision(3) << secs[k] * 1e6
-                  << std::setw(12) << std::setprecision(2) << vgibs
+                  << std::setw(12) << std::setprecision(2) << gibs
                   << std::setw(12) << std::setprecision(1)
-                  << (100.0 * vgibs / vpeak) << " %\n";
+                  << (100.0 * gibs / vpeak) << " %\n";
     }
 
     // Least-squares fit t = t0 + b*N (no SME calls past this point).
@@ -787,6 +797,73 @@ int main() {
     std::cout << "\n--- Small-N regime: fixed overhead vs streaming work (V1 kernel) ---\n";
     small_n_sweep( 128, vpeak);
     small_n_sweep(1024, vpeak);
+
+    // -----------------------------------------------------------------------
+    // Section 6 (Sprint 4): JIT-emitted V6 vs hand-written V6 + emission cost.
+    //
+    // The encoding-diff test already proves the JIT buffer word-identical to
+    // the assembled .S, so the expectation is parity within noise: any gap
+    // would come from the buffer's placement (mmap'd JIT page vs the
+    // executable's text section), not the instructions.  Emission is a
+    // one-time cost; it is reported in µs alongside the per-call time of the
+    // smallest bench shape so the break-even call count is visible.
+    // -----------------------------------------------------------------------
+    std::cout << "\n--- Sprint 4: JIT-emitted V6 vs hand-written V6 ---\n";
+
+    mini_jit::Norm jit_rms, jit_ln;
+    volatile double emit_rms_us = bench([&]() {
+        jit_rms.generate(mini_jit::Norm::ntype_t::rms);
+    }, 100) * 1e6;
+    volatile double emit_ln_us = bench([&]() {
+        jit_ln.generate(mini_jit::Norm::ntype_t::layer);
+    }, 100) * 1e6;
+
+    std::cout << std::fixed << std::setprecision(1)
+              << "emission (one-time):  rms " << (double)emit_rms_us
+              << " us (" << jit_rms.words().size() << " words),  layer "
+              << (double)emit_ln_us << " us (" << jit_ln.words().size()
+              << " words)\n\n";
+
+    mini_jit::Norm::rms_kernel_t   krms = jit_rms.get_rms_kernel();
+    mini_jit::Norm::layer_kernel_t kln  = jit_ln.get_layer_kernel();
+
+    std::cout << std::left << std::setw(24) << "variant"
+              << "  rows   feat    GiB/s  (% of 1-core SSVE peak)  vs hand-written\n";
+    std::cout << std::string(80, '-') << "\n";
+
+    for (const auto& s : ablation_shapes) {
+        const int64_t ld = s.m;
+        std::vector<float> a(ld * s.n), b(ld * s.n, 0.0f);
+        std::vector<float> gamma(s.n, 1.0f), beta(s.n, 0.0f);
+        for (int64_t i = 0; i < ld * s.n; ++i)
+            a[i] = static_cast<float>((i % 17) - 8) * 0.1f;
+
+        // volatile: SMSTART zeroes D9-D15; keep timing off callee-saved FP regs.
+        volatile double sec_hw  = bench_ssve_v6(a.data(), b.data(), gamma.data(),
+                                                s.m, s.n, ld, 1e-5f);
+        volatile double sec_jit = bench([&]() {
+            krms(a.data(), b.data(), gamma.data(), s.m, s.n, ld, ld, 1e-5f);
+        });
+        volatile double lsec_hw  = bench_ln_ssve_v6(a.data(), b.data(), gamma.data(),
+                                                    beta.data(), s.m, s.n, ld, 1e-5f);
+        volatile double lsec_jit = bench([&]() {
+            kln(a.data(), b.data(), gamma.data(), beta.data(), s.m, s.n, ld, ld, 1e-5f);
+        });
+
+        volatile int64_t vm = s.m, vn = s.n;
+        volatile double vbytes = norm_bytes(vm, vn);
+
+        double gh  = to_gibs((double)vbytes, (double)sec_hw);
+        double gj  = to_gibs((double)vbytes, (double)sec_jit);
+        double lgh = to_gibs((double)vbytes, (double)lsec_hw);
+        double lgj = to_gibs((double)vbytes, (double)lsec_jit);
+
+        print_ablation_row("RMS V6 hand-written",  vm, vn, gh,  (double)vpeak, 0.0);
+        print_ablation_row("RMS V6 JIT-emitted",   vm, vn, gj,  (double)vpeak, gh,  "hand");
+        print_ablation_row("LN  V6 hand-written",  vm, vn, lgh, (double)vpeak, 0.0);
+        print_ablation_row("LN  V6 JIT-emitted",   vm, vn, lgj, (double)vpeak, lgh, "hand");
+        std::cout << "\n";
+    }
 
     return 0;
 }

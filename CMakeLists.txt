@@ -23,6 +23,11 @@ FetchContent_MakeAvailable(Catch2)
 
 include_directories(include)
 
+# Must precede the add_subdirectory() calls: add_test() only registers with
+# CTest in directories processed while testing is already enabled.  (It used
+# to sit at the bottom of this file, which is why `ctest` found no tests.)
+enable_testing()
+
 # The weekly logic is now ONLY in these folders
 add_subdirectory(src/week1)
 add_subdirectory(src/week2)
@@ -31,5 +36,3 @@ add_subdirectory(src/week5)
 add_subdirectory(src/week6)
 add_subdirectory(src/week7)
 add_subdirectory(src/norm)
-
-enable_testing()

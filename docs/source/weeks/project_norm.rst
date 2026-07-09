@@ -1620,3 +1620,167 @@ Sprint 3 status
 - **V6 (both norms) frozen as the incumbent for Sprint 4's JIT.**
 - **Correctness fix:** the eps register-stash bug above, fixed across all
   13 affected kernels with two new regression tests.
+
+Sprint 4 — JIT generation (mini_jit::Norm)
+-------------------------------------------
+
+Goal: generate the norm kernels **at runtime** instead of hand-writing them —
+a ``mini_jit::Norm`` generator following the week-6 ``Unary`` pattern:
+``generate(ntype)`` emits instruction words through ``InstGen`` into a week-5
+``JitEngine`` executable buffer; ``get_rms_kernel()`` / ``get_layer_kernel()``
+return a reusable function pointer.  Emission is a one-time cost.
+
+What gets emitted — and what deliberately does not
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The generator emits the **measured Sprint-2 winners**: ``rms_norm_ssve_v6``
+and ``layer_norm_ssve_v6``, transcribed 1:1 (same registers, same
+instruction order).  The ZA path is **not** emitted: the ROADMAP gated it on
+"if it earned its row", and Sprint 3's verdict was a decisive loss for both
+norms (39–68 % slower than V6, ``mova``-throughput-bound).  Emitting a
+kernel architecture that measurement rejected would add encoder surface and
+maintenance for a path no shape selects — the reasoned skip *is* the
+shape-dependent emission decision at SVL = 512.
+
+Verification: the encoding diff
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The JIT is verified by three layers, weakest to strongest
+(``tests/test_norm.cpp``, tags ``[sprint4][encoders]``,
+``[sprint4][encoding-diff]``, ``[sprint4][jit]``):
+
+1. **Per-encoder golden words.**  Every new ``InstGen`` encoder is pinned to
+   the exact word the toolchain assembled for the same instruction, taken
+   from ``objdump`` of the two ``.S`` objects, cross-checked against the Arm
+   ARM field layouts.  30 encoders were added (STP/LDP pairs, scalar
+   FMOV/SCVTF/FDIV, predicated FMLA/FMUL/FADD/FSUB, FRSQRTE/FRSQRTS, LD1RW,
+   LD1W/ST1W with ``MUL VL`` offsets, WHILELO, SEL, ADDVL, INCW, DUP, CBZ,
+   B.cond, and the SM-only SMSTART/SMSTOP forms).
+2. **Whole-kernel encoding diff.**  The generator's buffer is compared
+   word-for-word against the **linked** hand-written kernel, read straight
+   from its function address at runtime — the reference is what the
+   toolchain actually assembled, and can never go stale.  Green for both
+   norms: 143/143 words (RMSNorm) and 194/194 words (LayerNorm) identical.
+   A green diff means the JIT kernel *inherits* the trust of a kernel that
+   already passed the full Sprint-2/3 suite (including the eps-stash fix),
+   instead of re-earning it.
+3. **Execution anyway.**  The emitted kernels are run against the C++
+   reference on the same shape set as the V6 tests (groups, tails,
+   mismatched leading dimensions, N = 1, stress inputs, the zero-variance
+   eps regression) — this also exercises the ``JitEngine`` buffer path
+   (``MAP_JIT``, W^X toggling, icache invalidation).  All green on M4.
+
+Layers 1–2 are host-portable and run on CI; layer 3 skips without SME.
+
+What the exactness found: two latent InstGen bugs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Preparing the golden words surfaced two week-6 encoder bugs that every
+behavioral test had passed over (full detail in ``sprint4_errors.md``):
+
+- ``sve_ptrue_all(fp32)`` emitted ``PTRUE P.B`` (size bits 00), not the
+  ``PTRUE P.S`` its own comment promised — functionally masked because an
+  ALL-true ``.B`` predicate governs ``.S`` elements identically.  Fixed and
+  pinned by test; week-5/6 suites re-verified green.
+- ``sme_smstart_sm()`` actually encodes ``SMSTART`` (SM **and** ZA,
+  ``MSR SVCRSMZA``), not ``SMSTART SM``.  Correct for Gemm (which needs ZA),
+  wrong by name — and wrong for the norm kernels, which run SM-only to avoid
+  the ZA lazy-save hazards.  Left in place for its dependents; correctly
+  named ``sme_smstart_sm_only()`` / ``sme_smstop_sm_only()`` added alongside.
+
+"It assembles and runs" is not "it is the instruction you meant"
+(CLAUDE.md §10) — an encoding diff checks what the code *is*, and caught in
+minutes what weeks of behavioral tests structurally could not.
+
+A harness bug found by the parity run — and a Sprint-2a correction
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The first parity benchmark showed the word-identical JIT kernel **+76 %
+faster** than the hand-written one at M=128/N=64 — physically impossible for
+identical code, so the gap had to be the call path.  Cause: the hand-written
+kernels are benchmarked through their ``mini_jit::norm`` guard wrappers, and
+``cpu_supports_sme()`` performed an uncached ``sysctlbyname`` **syscall on
+every call** (~1 µs); the JIT pointer is called directly.  Fix: cache the
+result in a static (CPU features cannot change at runtime).
+
+Consequence for earlier numbers: the Sprint-2a small-N sweep ran through the
+same wrapper, so its headline "fixed cost t0 ≈ 1.4 µs/call, overhead =
+streaming work at N ≈ 41" was **~70 % syscall**.  With the guard fixed, the
+N=16 call drops from 1.375 µs to ~0.42 µs, throughput is flat (~29 GiB/s)
+from N=32 upward, and the true fixed per-call cost is too small for the
+linear fit to resolve (intercept within noise of zero, ≲0.4 µs).  The qualitative Sprint-2a conclusions stand (a
+fixed per-call cost exists; the N=64 dip is real), but the *magnitude* was
+harness, not hardware — recorded here as a correction, in the same spirit as
+Sprint 2b's correction of the 2a residency interpretation.
+
+Fixing the fix: the sweep's GiB/s column then printed 0.00 — the now
+trivially-inlinable guard shifted register allocation so the ``1/2^30``
+constant inside ``to_gibs`` landed in a callee-saved FP register that
+``SMSTART`` zeroes.  ``volatile`` inputs cannot protect a hoisted
+*constant*; the robust fix separates the bench loop from the print loop so
+no SME call sits between computation and output.  (Third appearance of the
+D9–D15 hazard in this project; each time in a new disguise.)
+
+Parity and emission cost (M4, corrected harness)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Emission (one-time): **~4.7 µs** for RMSNorm (143 words), **~4.8 µs** for
+LayerNorm (194 words) — recouped after a handful of small-shape calls, and
+the pointer is reused thereafter.
+
+.. list-table:: JIT-emitted V6 vs hand-written V6 (GiB/s, useful bytes, % of 59.5 GiB/s 1-core SSVE roofline)
+   :header-rows: 1
+
+   * - Shape (M×N)
+     - RMS hand
+     - RMS JIT
+     - Δ
+     - LN hand
+     - LN JIT
+     - Δ
+   * - 128×64
+     - 38.56 (65.2 %)
+     - 38.56 (65.2 %)
+     - +0.0 %
+     - 16.46 (27.8 %)
+     - 16.65 (28.1 %)
+     - +1.1 %
+   * - 128×2048
+     - 38.52 (65.1 %)
+     - 38.52 (65.1 %)
+     - +0.0 %
+     - 16.51 (27.9 %)
+     - 16.51 (27.9 %)
+     - −0.0 %
+   * - 1024×2048
+     - 38.44 (65.0 %)
+     - 38.45 (65.0 %)
+     - +0.0 %
+     - 16.49 (27.9 %)
+     - 16.48 (27.9 %)
+     - −0.0 %
+   * - 4096×2048 (DRAM)
+     - 25.84 (43.7 %)
+     - 26.21 (44.3 %)
+     - +1.5 %
+     - 14.42 (24.4 %)
+     - 14.44 (24.4 %)
+     - +0.1 %
+
+Parity within noise at every shape — exactly what a word-identical kernel
+must show once the call paths are equalized.  The mmap'd JIT page vs the
+executable's text section makes no measurable difference.
+
+Sprint 4 status
+~~~~~~~~~~~~~~~
+
+- ``mini_jit::Norm`` emits both SSVE V6 winners; ZA path skipped with its
+  measured rationale (Sprint 3).
+- 30 new ``InstGen`` encoders, each pinned to a toolchain golden word;
+  two latent week-6 encoder bugs found and resolved.
+- Encoding diff green for both norms (143 + 194 words); JIT kernels verified
+  against the reference on M4; full suite green.
+- Benchmark parity within noise at all shapes; emission ~5 µs one-time.
+- Harness corrections: ``cpu_supports_sme()`` syscall caching (with the
+  Sprint-2a t0 restatement) and the bench/print loop separation.
+- ``ctest`` discovery fixed repo-wide (``enable_testing()`` ordering).

@@ -1,6 +1,7 @@
 add_library(norm_lib
     reference.cpp
     norm_ssve.cpp               # C++ SME guard + extern-C bridge
+    jit_norm.cpp                # Sprint 4: mini_jit::Norm JIT generator
     layer_norm_ssve.S           # Sprint 2c: LayerNorm SSVE kernel V0 (Mariza)
     layer_norm_ssve_v1.S        # V1: FRSQRTE+NR replaces FSQRT+FDIV
     layer_norm_ssve_v2.S        # V2: V1 + pre-computed 1/N
@@ -53,6 +54,10 @@ set_source_files_properties(
 target_include_directories(norm_lib PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
+
+# jit_norm.cpp emits via week6 InstGen into a week5 JitEngine buffer
+# (jit_engine.hpp is header-only; InstGen needs the week6 library).
+target_link_libraries(norm_lib PRIVATE week6_lib)
 
 add_executable(test_norm ../../tests/test_norm.cpp)
 target_link_libraries(test_norm PRIVATE norm_lib week3_lib Catch2::Catch2WithMain)
