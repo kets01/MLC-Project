@@ -293,6 +293,139 @@ class mini_jit::InstGen {
     static uint32_t sve_fmax_s( sve_t  zd,
                                 pred_t pg,
                                 sve_t  zm );
+
+    // -----------------------------------------------------------------------
+    // Sprint 4 — encoders for the mini_jit::Norm generator.
+    // Each verified against the toolchain-assembled words of
+    // rms_norm_ssve_v6.S / layer_norm_ssve_v6.S (see tests/test_norm.cpp,
+    // tag [sprint4][encoders]) and the Arm ARM field layouts.
+    // -----------------------------------------------------------------------
+
+    //! condition codes for B.<cond> (Arm ARM C1.2.4)
+    typedef enum : uint32_t {
+      cond_eq = 0x0,   // equal  (SVE alias: B.NONE)
+      cond_ne = 0x1,   // not equal (SVE alias: B.ANY)
+      cond_hi = 0x8    // unsigned higher
+    } cond_t;
+
+    /**
+     * @brief SMSTART SM — enter Streaming SVE mode WITHOUT enabling ZA.
+     * Note: sme_smstart_sm() above actually encodes MSR SVCRSMZA,#1
+     * (SM *and* ZA — needed by Gemm's fmopa); this is the SM-only form
+     * the SSVE norm kernels use.
+     */
+    static uint32_t sme_smstart_sm_only();
+
+    //! SMSTOP SM — exit Streaming SVE mode only (see sme_smstart_sm_only).
+    static uint32_t sme_smstop_sm_only();
+
+    //! STP X<rt>, X<rt2>, [SP/X<rn>, #simm]!  (pre-index; simm in bytes, /8)
+    static uint32_t base_stp_pre_x( gpr_t rt, gpr_t rt2, gpr_t rn, int32_t simm );
+
+    //! STP X<rt>, X<rt2>, [X<rn>, #simm]  (signed offset; simm in bytes, /8)
+    static uint32_t base_stp_off_x( gpr_t rt, gpr_t rt2, gpr_t rn, int32_t simm );
+
+    //! LDP X<rt>, X<rt2>, [X<rn>, #simm]  (signed offset; simm in bytes, /8)
+    static uint32_t base_ldp_off_x( gpr_t rt, gpr_t rt2, gpr_t rn, int32_t simm );
+
+    //! LDP X<rt>, X<rt2>, [X<rn>], #simm  (post-index; simm in bytes, /8)
+    static uint32_t base_ldp_post_x( gpr_t rt, gpr_t rt2, gpr_t rn, int32_t simm );
+
+    //! STR X<rt>, [X<rn>, #uimm]  (unsigned offset; uimm in bytes, /8)
+    static uint32_t base_str_imm_x( gpr_t rt, gpr_t rn, uint32_t uimm );
+
+    //! LDR X<rt>, [X<rn>, #uimm]  (unsigned offset; uimm in bytes, /8)
+    static uint32_t base_ldr_imm_x( gpr_t rt, gpr_t rn, uint32_t uimm );
+
+    //! STR D<vt>, [X<rn>, #uimm]  (SIMD&FP 64-bit; uimm in bytes, /8)
+    static uint32_t simd_str_imm_d( simd_fp_t vt, gpr_t rn, uint32_t uimm );
+
+    //! LDR D<vt>, [X<rn>, #uimm]
+    static uint32_t simd_ldr_imm_d( simd_fp_t vt, gpr_t rn, uint32_t uimm );
+
+    //! STR S<vt>, [X<rn>, #uimm]  (SIMD&FP 32-bit; uimm in bytes, /4)
+    static uint32_t simd_str_imm_s( simd_fp_t vt, gpr_t rn, uint32_t uimm );
+
+    //! LDR S<vt>, [X<rn>, #uimm]
+    static uint32_t simd_ldr_imm_s( simd_fp_t vt, gpr_t rn, uint32_t uimm );
+
+    //! MOV X<rd>, X<rm>  (alias of ORR X<rd>, XZR, X<rm>)
+    static uint32_t base_mov_reg_x( gpr_t rd, gpr_t rm );
+
+    //! CMP X<rn>, X<rm>  (alias of SUBS XZR, X<rn>, X<rm>)
+    static uint32_t base_cmp_reg_x( gpr_t rn, gpr_t rm );
+
+    //! B.<cond> — offset19 in instructions from this instruction.
+    static uint32_t base_b_cond( cond_t cond, int32_t offset19 );
+
+    //! B — unconditional branch; offset26 in instructions.
+    static uint32_t base_b( int32_t offset26 );
+
+    //! CBZ X<rt>, <label> — offset19 in instructions.
+    static uint32_t base_br_cbz_x( gpr_t rt, int32_t imm19 );
+
+    //! FMOV S<vd>, S<vn>
+    static uint32_t fp_fmov_s( simd_fp_t vd, simd_fp_t vn );
+
+    //! FMOV S<vd>, #imm8 — imm8 is the encoded VFPExpandImm byte (1.0 = 0x70).
+    static uint32_t fp_fmov_imm_s( simd_fp_t vd, uint32_t imm8 );
+
+    //! SCVTF S<vd>, X<rn>  (signed 64-bit int → fp32)
+    static uint32_t fp_scvtf_s_x( simd_fp_t vd, gpr_t rn );
+
+    //! FDIV S<vd>, S<vn>, S<vm>
+    static uint32_t fp_fdiv_s( simd_fp_t vd, simd_fp_t vn, simd_fp_t vm );
+
+    //! CNTW X<rd>  (pattern ALL, mul #1) — fp32 lanes per vector.
+    static uint32_t sve_cntw_x( gpr_t rd );
+
+    //! INCW X<rd>  (pattern ALL, mul #1)
+    static uint32_t sve_incw_x( gpr_t rd );
+
+    //! ADDVL X<rd>, X<rn>, #simm6  (add simm6 * VL bytes)
+    static uint32_t sve_addvl( gpr_t rd, gpr_t rn, int32_t simm6 );
+
+    //! MOV Z<zd>.S, #simm8  (alias of DUP Z<zd>.S, #simm8)
+    static uint32_t sve_dup_imm_s( sve_t zd, int32_t simm8 );
+
+    //! DUP Z<zd>.S, Z<zn>.S[idx]  (broadcast element; idx 0-15 for fp32)
+    static uint32_t sve_dup_elem_s( sve_t zd, sve_t zn, uint32_t idx );
+
+    //! LD1W {Z<zt>.S}, P<pg>/Z, [X<rn>, #simm4, MUL VL]
+    static uint32_t sve_ld1w_imm( sve_t zt, pred_t pg, gpr_t rn, int32_t simm4 );
+
+    //! ST1W {Z<zt>.S}, P<pg>, [X<rn>, #simm4, MUL VL]
+    static uint32_t sve_st1w_imm( sve_t zt, pred_t pg, gpr_t rn, int32_t simm4 );
+
+    //! LD1RW {Z<zt>.S}, P<pg>/Z, [X<rn>, #uimm6*4]  (load + broadcast one fp32)
+    static uint32_t sve_ld1rw_s( sve_t zt, pred_t pg, gpr_t rn, uint32_t uimm6 = 0 );
+
+    //! FMLA Z<zda>.S, P<pg>/M, Z<zn>.S, Z<zm>.S
+    static uint32_t sve_fmla_s( sve_t zda, pred_t pg, sve_t zn, sve_t zm );
+
+    //! FADD Z<zdn>.S, P<pg>/M, Z<zdn>.S, Z<zm>.S  (predicated, destructive)
+    static uint32_t sve_fadd_p_s( sve_t zdn, pred_t pg, sve_t zm );
+
+    //! FSUB Z<zdn>.S, P<pg>/M, Z<zdn>.S, Z<zm>.S
+    static uint32_t sve_fsub_p_s( sve_t zdn, pred_t pg, sve_t zm );
+
+    //! FMUL Z<zdn>.S, P<pg>/M, Z<zdn>.S, Z<zm>.S
+    static uint32_t sve_fmul_p_s( sve_t zdn, pred_t pg, sve_t zm );
+
+    //! FMUL Z<zd>.S, Z<zn>.S, Z<zm>.S  (unpredicated)
+    static uint32_t sve_fmul_s( sve_t zd, sve_t zn, sve_t zm );
+
+    //! FRSQRTE Z<zd>.S, Z<zn>.S  (reciprocal sqrt estimate)
+    static uint32_t sve_frsqrte_s( sve_t zd, sve_t zn );
+
+    //! FRSQRTS Z<zd>.S, Z<zn>.S, Z<zm>.S  (Newton-Raphson step)
+    static uint32_t sve_frsqrts_s( sve_t zd, sve_t zn, sve_t zm );
+
+    //! WHILELO P<pd>.S, X<rn>, X<rm>  (64-bit scalar operands)
+    static uint32_t sve_whilelo_s_x( pred_t pd, gpr_t rn, gpr_t rm );
+
+    //! SEL Z<zd>.S, P<pg>, Z<zn>.S, Z<zm>.S
+    static uint32_t sve_sel_s( sve_t zd, pred_t pg, sve_t zn, sve_t zm );
 };
 
 #endif

@@ -73,11 +73,15 @@ uint32_t mini_jit::InstGen::sme_zero_za() {
 uint32_t mini_jit::InstGen::sve_ptrue_all( pred_t  pg,
                                            dtype_t dt ) {
   // PTRUE P<pg>.<T>, ALL
-  // fp32 (.S): base 0x2518e000, dtype bits: size=10 (bits 23:22)
+  // fp32 (.S): base 0x2598e000, dtype bits: size=10 (bits 23:22)
   // fp64 (.D): base 0x25D8e000, dtype bits: size=11 (bits 23:22)
   // Pattern ALL = 0x1f (bits 4:0)
   // Pd (bits 3:0)
-  uint32_t base = (dt == dtype_t::fp32) ? 0x2518e3e0u : 0x25d8e3e0u;
+  // Sprint-4 fix: the fp32 constant was 0x2518e3e0 = size=00 = PTRUE P.B,
+  // contradicting this comment.  Functionally masked for every existing
+  // caller (ALL-true .B governs .S identically) but caught by the
+  // encoding-diff against the assembled norm kernels.
+  uint32_t base = (dt == dtype_t::fp32) ? 0x2598e3e0u : 0x25d8e3e0u;
   // The base encodings above use p0; patch in pg
   uint32_t ins = base;
   ins = (ins & ~0xfu) | ((uint32_t)pg & 0xfu);
@@ -284,4 +288,198 @@ uint32_t mini_jit::InstGen::sve_fmax_s( sve_t  zd,
          | ((uint32_t)pg << 10)
          | ((uint32_t)zm <<  5)
          | (uint32_t)zd;
+}
+// ===========================================================================
+// Sprint 4 — encoders for the mini_jit::Norm generator.
+// Every base word below is verified against the toolchain-assembled
+// instruction words of rms_norm_ssve_v6.S / layer_norm_ssve_v6.S
+// (per-encoder unit tests: tests/test_norm.cpp, tag [sprint4][encoders])
+// and the Arm ARM field layouts.
+// ===========================================================================
+
+uint32_t mini_jit::InstGen::sme_smstart_sm_only() {
+  // MSR SVCRSM, #1 — streaming mode on, ZA untouched.
+  return 0xd503437fu;
+}
+
+uint32_t mini_jit::InstGen::sme_smstop_sm_only() {
+  // MSR SVCRSM, #0
+  return 0xd503427fu;
+}
+
+uint32_t mini_jit::InstGen::base_stp_pre_x( gpr_t rt, gpr_t rt2, gpr_t rn, int32_t simm ) {
+  // STP Xt, Xt2, [Xn, #simm]!  — imm7 scaled by 8
+  return 0xa9800000u
+         | (((uint32_t)(simm / 8) & 0x7fu) << 15)
+         | (reg_id(rt2) << 10) | (reg_id(rn) << 5) | reg_id(rt);
+}
+
+uint32_t mini_jit::InstGen::base_stp_off_x( gpr_t rt, gpr_t rt2, gpr_t rn, int32_t simm ) {
+  return 0xa9000000u
+         | (((uint32_t)(simm / 8) & 0x7fu) << 15)
+         | (reg_id(rt2) << 10) | (reg_id(rn) << 5) | reg_id(rt);
+}
+
+uint32_t mini_jit::InstGen::base_ldp_off_x( gpr_t rt, gpr_t rt2, gpr_t rn, int32_t simm ) {
+  return 0xa9400000u
+         | (((uint32_t)(simm / 8) & 0x7fu) << 15)
+         | (reg_id(rt2) << 10) | (reg_id(rn) << 5) | reg_id(rt);
+}
+
+uint32_t mini_jit::InstGen::base_ldp_post_x( gpr_t rt, gpr_t rt2, gpr_t rn, int32_t simm ) {
+  return 0xa8c00000u
+         | (((uint32_t)(simm / 8) & 0x7fu) << 15)
+         | (reg_id(rt2) << 10) | (reg_id(rn) << 5) | reg_id(rt);
+}
+
+uint32_t mini_jit::InstGen::base_str_imm_x( gpr_t rt, gpr_t rn, uint32_t uimm ) {
+  // STR Xt, [Xn, #uimm] — imm12 scaled by 8
+  return 0xf9000000u | (((uimm / 8u) & 0xfffu) << 10) | (reg_id(rn) << 5) | reg_id(rt);
+}
+
+uint32_t mini_jit::InstGen::base_ldr_imm_x( gpr_t rt, gpr_t rn, uint32_t uimm ) {
+  return 0xf9400000u | (((uimm / 8u) & 0xfffu) << 10) | (reg_id(rn) << 5) | reg_id(rt);
+}
+
+uint32_t mini_jit::InstGen::simd_str_imm_d( simd_fp_t vt, gpr_t rn, uint32_t uimm ) {
+  // STR Dt, [Xn, #uimm] — imm12 scaled by 8
+  return 0xfd000000u | (((uimm / 8u) & 0xfffu) << 10) | (reg_id(rn) << 5) | ((uint32_t)vt & 0x1fu);
+}
+
+uint32_t mini_jit::InstGen::simd_ldr_imm_d( simd_fp_t vt, gpr_t rn, uint32_t uimm ) {
+  return 0xfd400000u | (((uimm / 8u) & 0xfffu) << 10) | (reg_id(rn) << 5) | ((uint32_t)vt & 0x1fu);
+}
+
+uint32_t mini_jit::InstGen::simd_str_imm_s( simd_fp_t vt, gpr_t rn, uint32_t uimm ) {
+  // STR St, [Xn, #uimm] — imm12 scaled by 4
+  return 0xbd000000u | (((uimm / 4u) & 0xfffu) << 10) | (reg_id(rn) << 5) | ((uint32_t)vt & 0x1fu);
+}
+
+uint32_t mini_jit::InstGen::simd_ldr_imm_s( simd_fp_t vt, gpr_t rn, uint32_t uimm ) {
+  return 0xbd400000u | (((uimm / 4u) & 0xfffu) << 10) | (reg_id(rn) << 5) | ((uint32_t)vt & 0x1fu);
+}
+
+uint32_t mini_jit::InstGen::base_mov_reg_x( gpr_t rd, gpr_t rm ) {
+  // ORR Xd, XZR, Xm
+  return 0xaa0003e0u | (reg_id(rm) << 16) | reg_id(rd);
+}
+
+uint32_t mini_jit::InstGen::base_cmp_reg_x( gpr_t rn, gpr_t rm ) {
+  // SUBS XZR, Xn, Xm
+  return 0xeb00001fu | (reg_id(rm) << 16) | (reg_id(rn) << 5);
+}
+
+uint32_t mini_jit::InstGen::base_b_cond( cond_t cond, int32_t offset19 ) {
+  return 0x54000000u | (((uint32_t)offset19 & 0x7ffffu) << 5) | (uint32_t)cond;
+}
+
+uint32_t mini_jit::InstGen::base_b( int32_t offset26 ) {
+  return 0x14000000u | ((uint32_t)offset26 & 0x3ffffffu);
+}
+
+uint32_t mini_jit::InstGen::base_br_cbz_x( gpr_t rt, int32_t imm19 ) {
+  return 0xb4000000u | (((uint32_t)imm19 & 0x7ffffu) << 5) | reg_id(rt);
+}
+
+uint32_t mini_jit::InstGen::fp_fmov_s( simd_fp_t vd, simd_fp_t vn ) {
+  return 0x1e204000u | (((uint32_t)vn & 0x1fu) << 5) | ((uint32_t)vd & 0x1fu);
+}
+
+uint32_t mini_jit::InstGen::fp_fmov_imm_s( simd_fp_t vd, uint32_t imm8 ) {
+  return 0x1e201000u | ((imm8 & 0xffu) << 13) | ((uint32_t)vd & 0x1fu);
+}
+
+uint32_t mini_jit::InstGen::fp_scvtf_s_x( simd_fp_t vd, gpr_t rn ) {
+  return 0x9e220000u | (reg_id(rn) << 5) | ((uint32_t)vd & 0x1fu);
+}
+
+uint32_t mini_jit::InstGen::fp_fdiv_s( simd_fp_t vd, simd_fp_t vn, simd_fp_t vm ) {
+  return 0x1e201800u | (((uint32_t)vm & 0x1fu) << 16)
+         | (((uint32_t)vn & 0x1fu) << 5) | ((uint32_t)vd & 0x1fu);
+}
+
+uint32_t mini_jit::InstGen::sve_cntw_x( gpr_t rd ) {
+  // CNTW Xd, ALL, MUL #1
+  return 0x04a0e3e0u | reg_id(rd);
+}
+
+uint32_t mini_jit::InstGen::sve_incw_x( gpr_t rd ) {
+  return 0x04b0e3e0u | reg_id(rd);
+}
+
+uint32_t mini_jit::InstGen::sve_addvl( gpr_t rd, gpr_t rn, int32_t simm6 ) {
+  return 0x04205000u | (reg_id(rn) << 16)
+         | (((uint32_t)simm6 & 0x3fu) << 5) | reg_id(rd);
+}
+
+uint32_t mini_jit::InstGen::sve_dup_imm_s( sve_t zd, int32_t simm8 ) {
+  // DUP Zd.S, #simm8 (size=10)
+  return 0x25b8c000u | (((uint32_t)simm8 & 0xffu) << 5) | (uint32_t)zd;
+}
+
+uint32_t mini_jit::InstGen::sve_dup_elem_s( sve_t zd, sve_t zn, uint32_t idx ) {
+  // DUP Zd.S, Zn.S[idx] — imm2:tsz = idx:100
+  uint32_t imm5 = ((idx & 0xfu) << 3) | 0x4u;
+  return 0x05202000u | (imm5 << 16) | (((uint32_t)zn & 0x1fu) << 5) | (uint32_t)zd;
+}
+
+uint32_t mini_jit::InstGen::sve_ld1w_imm( sve_t zt, pred_t pg, gpr_t rn, int32_t simm4 ) {
+  // LD1W {Zt.S}, Pg/Z, [Xn, #simm4, MUL VL]
+  return 0xa540a000u | (((uint32_t)simm4 & 0xfu) << 16)
+         | ((uint32_t)pg << 10) | (reg_id(rn) << 5) | (uint32_t)zt;
+}
+
+uint32_t mini_jit::InstGen::sve_st1w_imm( sve_t zt, pred_t pg, gpr_t rn, int32_t simm4 ) {
+  return 0xe540e000u | (((uint32_t)simm4 & 0xfu) << 16)
+         | ((uint32_t)pg << 10) | (reg_id(rn) << 5) | (uint32_t)zt;
+}
+
+uint32_t mini_jit::InstGen::sve_ld1rw_s( sve_t zt, pred_t pg, gpr_t rn, uint32_t uimm6 ) {
+  // LD1RW {Zt.S}, Pg/Z, [Xn, #uimm6*4]
+  return 0x8540c000u | ((uimm6 & 0x3fu) << 16)
+         | ((uint32_t)pg << 10) | (reg_id(rn) << 5) | (uint32_t)zt;
+}
+
+uint32_t mini_jit::InstGen::sve_fmla_s( sve_t zda, pred_t pg, sve_t zn, sve_t zm ) {
+  return 0x65a00000u | (((uint32_t)zm & 0x1fu) << 16)
+         | ((uint32_t)pg << 10) | (((uint32_t)zn & 0x1fu) << 5) | (uint32_t)zda;
+}
+
+uint32_t mini_jit::InstGen::sve_fadd_p_s( sve_t zdn, pred_t pg, sve_t zm ) {
+  return 0x65808000u | ((uint32_t)pg << 10)
+         | (((uint32_t)zm & 0x1fu) << 5) | (uint32_t)zdn;
+}
+
+uint32_t mini_jit::InstGen::sve_fsub_p_s( sve_t zdn, pred_t pg, sve_t zm ) {
+  return 0x65818000u | ((uint32_t)pg << 10)
+         | (((uint32_t)zm & 0x1fu) << 5) | (uint32_t)zdn;
+}
+
+uint32_t mini_jit::InstGen::sve_fmul_p_s( sve_t zdn, pred_t pg, sve_t zm ) {
+  return 0x65828000u | ((uint32_t)pg << 10)
+         | (((uint32_t)zm & 0x1fu) << 5) | (uint32_t)zdn;
+}
+
+uint32_t mini_jit::InstGen::sve_fmul_s( sve_t zd, sve_t zn, sve_t zm ) {
+  return 0x65800800u | (((uint32_t)zm & 0x1fu) << 16)
+         | (((uint32_t)zn & 0x1fu) << 5) | (uint32_t)zd;
+}
+
+uint32_t mini_jit::InstGen::sve_frsqrte_s( sve_t zd, sve_t zn ) {
+  return 0x658f3000u | (((uint32_t)zn & 0x1fu) << 5) | (uint32_t)zd;
+}
+
+uint32_t mini_jit::InstGen::sve_frsqrts_s( sve_t zd, sve_t zn, sve_t zm ) {
+  return 0x65801c00u | (((uint32_t)zm & 0x1fu) << 16)
+         | (((uint32_t)zn & 0x1fu) << 5) | (uint32_t)zd;
+}
+
+uint32_t mini_jit::InstGen::sve_whilelo_s_x( pred_t pd, gpr_t rn, gpr_t rm ) {
+  // WHILELO Pd.S, Xn, Xm (64-bit operands)
+  return 0x25a01c00u | (reg_id(rm) << 16) | (reg_id(rn) << 5) | (uint32_t)pd;
+}
+
+uint32_t mini_jit::InstGen::sve_sel_s( sve_t zd, pred_t pg, sve_t zn, sve_t zm ) {
+  return 0x05a0c000u | (((uint32_t)zm & 0x1fu) << 16) | ((uint32_t)pg << 10)
+         | (((uint32_t)zn & 0x1fu) << 5) | (uint32_t)zd;
 }
