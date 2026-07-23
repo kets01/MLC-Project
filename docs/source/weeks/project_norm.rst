@@ -1437,6 +1437,79 @@ actually bandwidth-bound, ZA cannot hold the row at all — structurally out
 of reach. "ZA adds nothing here, and here is why" is the pre-registered,
 fully valid ablation outcome (ROADMAP Sprint 3).
 
+DRAM-regime addendum: no footprint rescues ZA
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The table above tops out at a 1 MB footprint (M=4096, N=64) — cache-resident,
+so a skeptic could argue ZA never got the chance to save a *real* DRAM read.
+This addendum closes that gap by re-measuring at true-DRAM footprints (32–64 MB,
+well past the 16 MB L2), in both the ZA fast path (N=64, huge M, so the row
+still fits in ZA) and the streaming fallback (N=2048). This is precisely the
+regime where ZA's 1R+1W traffic saving *should* pay if it ever does.
+
+.. list-table:: Sprint 3 DRAM addendum — ``rms_norm_za`` vs ``rms_norm_ssve_v6`` (M4, useful bytes = 1R+1W)
+   :header-rows: 1
+
+   * - shape
+     - footprint
+     - path
+     - V6 GiB/s
+     - ZA GiB/s
+     - ZA vs V6
+   * - M=131072, N=64
+     - 32 MB
+     - ZA (N≤64)
+     - 22.4
+     - 10.1
+     - **−55 %**
+   * - M=262144, N=64
+     - 64 MB
+     - ZA (N≤64)
+     - 22.6
+     - 10.1
+     - **−55 %**
+   * - M=4096, N=2048
+     - 32 MB
+     - fallback
+     - 25.4
+     - 11.1
+     - **−57 %**
+   * - M=8192, N=2048
+     - 64 MB
+     - fallback
+     - 23.5
+     - 11.1
+     - **−53 %**
+
+Verdict: **no footprint rescues ZA.** The ZA path stays pinned at ~10 GiB/s
+regardless of total size — the same ``mova``-throughput ceiling as the 1 MB
+cache case — because ``mova``, not memory, is what limits it. Meanwhile V6
+*does* slow in DRAM (37 → 22 GiB/s), confirming V6 is the kernel actually
+touching the memory system, yet it still delivers ~2.2× the ZA path. The
+mechanism: V6's 4-row-block reuse distance keeps each row's pass-2 re-read
+L1/L2-resident even at a 64 MB footprint (22 GiB/s is far above what a genuine
+2R-from-DRAM would sustain), so the DRAM read ZA "saves" was never a DRAM read.
+Combined with the row-fits constraint (residency only reachable at N≤64, which
+is cache-resident anyway), the regime where ZA saves traffic and the regime
+where traffic binds do not overlap — at any footprint.
+
+.. note::
+
+   **Known AAPCS64 hazard, re-confirmed and escalated (fix before TEIR — ROADMAP
+   Sprint 5).** This is the same SMSTART/D-register clobber first hit in Sprint 2
+   and logged in ``sprint4_errors.md`` (#6, #8), not a new discovery. Getting
+   stable timings again required forcing all loop/timestamp state into memory: a
+   fresh Release build zeroed every benchmark after the first streaming call. Root
+   cause: ``smstart``/``smstop`` zero all of ``d8–d15`` (they alias the low bits of
+   ``z8–z15``), and ``layer_norm_ssve_v6.S`` also uses ``z8–z15`` as accumulators,
+   but both V6 kernels save/restore **only ``d8``** — so a caller's ``d9–d15`` are
+   clobbered. Invisible to the Catch2 tests and worked around in the bench with
+   ``volatile`` so far. The escalation: TEIR's runtime (Sprint 5) calls the kernel
+   without that workaround, so the latent bug becomes live. The numbers above were
+   taken with a robust standalone driver; the fix (save/restore ``d8–d15`` in both
+   the ``.S`` and the JIT generator, then re-run the encoding-diff) is a Sprint-5
+   prerequisite.
+
 - **RMSNorm architecture verdict:** SSVE **V6 stays the frozen incumbent**
   for Sprint 4's JIT. ``rms_norm_za`` is kept in the tree and the ablation
   table as a *measured, explained* negative — the honest-engineering
