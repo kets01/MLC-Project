@@ -221,6 +221,16 @@ ablation outcome; a timeboxed prototype with an explained verdict beats an open-
       more than the DRAM read they save (memory isn't the binding constraint at these shapes).
       A pre-registered, valid "ZA adds nothing here, and here is why" outcome. **V6 stays the
       frozen RMSNorm incumbent for the JIT (Sprint 4).**
+- [x] **DRAM-regime addendum (gap-fill, closes the ablation):** re-measured the ZA vs V6
+      comparison at true-DRAM footprints (32–64 MB, past the 16 MB L2) in both the ZA fast
+      path (N=64, huge M) and the streaming fallback — the regime where ZA's 1R+1W traffic
+      saving *should* pay if it ever does. **It does not: ZA stays pinned at ~10 GiB/s
+      regardless of footprint (mova-bound), while V6 delivers ~22–25 GiB/s → ZA still loses
+      53–57 %.** V6's 4-row-block reuse distance keeps pass-2's re-read L1/L2-resident even at
+      64 MB, so the DRAM read ZA "saves" was never a DRAM read. There is no footprint where
+      residency staging wins. (This work also surfaced the d8–d15 ABI bug above — the fresh-build
+      bench zeroed until all loop state was forced to memory; numbers taken with a robust
+      standalone driver. Folded into the `main_norm` ZA table + report.)
 
 **LayerNorm ZA variant (Mariza):**
 - [x] Gate resolved by **building the prototype** rather than taking the reasoned skip: the
@@ -299,6 +309,7 @@ accumulator does and doesn't help a bandwidth-bound vector op.
 
 **Goal:** let the week7 TEIR runtime place the norm in a loop nest and invoke the JIT kernel — the `context.md` flow, end to end.
 
+- [ ] **PREREQUISITE — fix the d8–d15 AAPCS64 violation in the frozen V6 kernels before TEIR calls them.** This is the **known** SMSTART/D-register hazard (first hit in Sprint 2, logged as `sprint4_errors.md` #6 and #8), escalated here from a caller-side `volatile` workaround to a *required fix*: TEIR's runtime calls the kernel from a loop nest that will **not** have that workaround, so the latent bug becomes a live one. AAPCS64 requires a callee to preserve the low 64 bits of `v8–v15` (`d8–d15`). Entering/leaving streaming mode (`smstart`/`smstop`) zeroes **all** of `d8–d15` (they alias the low 128 bits of `z8–z15`, which streaming-mode transitions clear), and `layer_norm_ssve_v6.S` additionally uses `z8–z15` directly as its mean/variance accumulators. Both `rms_norm_ssve_v6.S` and `layer_norm_ssve_v6.S` save/restore **only `d8`**, so a caller's `d9–d15` are silently clobbered across the call. This is invisible to the Catch2 tests (they hold nothing live in `d9–d15` across a single call) and was worked around caller-side in `main_norm`'s bench harness with `volatile`, but it **will corrupt TEIR's runtime state** when the loop nest calls the kernel without that workaround (it already zeroed the bench timing in a fresh Release build; see the Sprint-3 DRAM-regime addendum). **Fix:** save/restore `d8–d15` around the streaming region. This must be applied to **both** the hand-written `.S` *and* the `mini_jit::Norm` generator (Sprint 4 emits word-identical copies, so the JIT carries the same bug), then the Sprint-4 **encoding-diff must be re-run** so the two stay bit-identical. Verify with a caller that holds live FP values in `d9–d15` across the call.
 - [ ] Register the norm as a TEIR **primitive** (an `Invocation` the runtime resolves to the generated kernel), reconciling the canonical signature with TEIR's `CompiledKernel = void(float*,float*,float*)` convention (map input/γβ/output onto a/b/c).
 - [ ] Drive a small multi-row tensor through TEIR `Iteration` nodes → per-tile `Invocation` → generated kernel; honor strides and leading dimensions (decision F).
 - [ ] Verify the **TEIR-invoked** result against the C++ reference for the same shapes (catches layout/stride/tile-boundary bugs, not just the bare kernel).
@@ -319,9 +330,21 @@ accumulator does and doesn't help a bandwidth-bound vector op.
 - [ ] **Ablation study**: GiB/s for scalar reference → naive SSVE → VLA SSVE → V4–V6 memory levers → ZA-tiled (hand-written) → JIT (per path) → TEIR+OpenMP, and **LayerNorm two-pass vs Welford vs RMSNorm single-pass** on the same harness (decision C). Each row attributable, negatives explained.
 - [ ] Report GiB/s **vs both validated ceilings** (single-core and chip-wide) across shapes (small→large feature dims, varying row counts); state bytes counted and the convention used.
 - [ ] Verify every optimized configuration still matches the reference (decision B).
+- [ ] **SME2 exploration (new instruction-set lever — the M4 actually exposes it).** Hardware
+      correction: `sysctl` on the target M4 reports `hw.optional.arm.FEAT_SME2: 1` — the machine
+      supports **SME2**, not only SME1 as the docs conservatively assumed. SME2 does **not** raise
+      the DRAM roofline, so it cannot help the bandwidth-bound large-N shapes; the one lever worth
+      testing is **multi-vector `mova`/`ld1`/`st1` (2- and 4-vector forms)**, which could lift the
+      ZA path's ~10 GiB/s `mova`-throughput ceiling *if* that ceiling is instruction-issue-bound
+      rather than ZA-port-bound. Pre-registered expectation: even a 2× `mova` speedup only brings
+      ZA to ~20 GiB/s — a tie-at-best with V6, and only in the N≤64 window that is cache-resident
+      anyway, so it does not create a win; multi-vector SSVE `ld1w`/`st1w`/`fmla` on the V6
+      streaming path is the more promising angle but V6 is already ~95 % of moved-bytes single-core.
+      Measure it, keep each result (positive or explained-negative) as an ablation row, and guard
+      the SME2 path behind a `FEAT_SME2` runtime check so it degrades to the SME1 kernel on M1/M2.
 
 **Done when:** an ablation table shows each optimization's contribution and how close to peak the best kernel gets — at both the single-core and the threaded level.
-**Tooling:** none new.
+**Tooling:** none new (Arm ARM for the SME2 multi-vector encodings; verify against `FEAT_SME2`).
 **Learning focus:** roofline analysis, ablation methodology, attributing speed-ups.
 
 ---
