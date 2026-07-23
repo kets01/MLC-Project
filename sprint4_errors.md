@@ -197,6 +197,65 @@ listed only for completeness.
 
 ---
 
+## 8. DRAM-regime ZA addendum: the D9–D15 clobber, a third time — now a TEIR blocker
+
+**What I saw.** Adding four true-DRAM shapes (32–64 MB) to the RMSNorm ZA
+ablation and running `main_norm` on a **fresh Release build**, every GiB/s
+column printed `0.00` — not just the new rows, but *every* row after the
+first SME kernel call, including the scalar-reference rows that touch no SME
+at all. The ceiling probes (run before any norm kernel) measured fine
+(59.5 GiB/s), and the very first row (`layer_norm_ref`, scalar) printed 4.09
+before the first streaming call poisoned everything after it.
+
+**Cause.** The same ABI-violating callee from #6 and Sprint 2:
+`smstart`/`smstop` zero `d8–d15` and the V6 kernels save/restore only `d8`,
+so a caller's `d9–d15` are destroyed. This build's register allocator placed
+timing state in `d9–d15`; the `volatile double best` in `bench()` was not
+enough because the *timestamp* values (not just the accumulator) landed
+there too. Confirmed by writing a standalone driver: per-call timing and
+loop-outer timing both failed until **all** loop state — counter, bound,
+both timestamps — was forced to `volatile` memory, after which V6 measured
+consistently (the re-measured V6 matched the first within noise).
+
+**Fix (for the measurement).** A standalone driver with fully volatile loop
+control (`scratchpad`, not committed); numbers folded into the report's
+DRAM-addendum table and the `main_norm` ZA shape list.
+
+**Escalation (the real lesson).** Twice now this was patched caller-side with
+`volatile`. That works only because *we* control the caller. **TEIR's runtime
+(Sprint 5) calls the kernel from a generated loop nest with no such
+discipline**, so the latent bug becomes a live one that will corrupt runtime
+state. Recorded as a Sprint-5 **prerequisite** in `ROADMAP.md`: fix the
+kernels properly (save/restore `d8–d15` around the streaming region) in both
+the `.S` and the `mini_jit::Norm` generator, then re-run the Sprint-4
+encoding-diff so the two stay bit-identical. "Force every nearby FP value to
+the stack" is a workaround; preserving the callee-saved registers is the fix.
+
+---
+
+## 9. clang backend crash compiling a C++ caller with `-march=…+sme`
+
+**What I saw.** Building the standalone measurement driver (plain C++ that
+just *calls* the prebuilt kernels) with `-march=armv9-a+sme`:
+
+```
+fatal error: error in backend: Cannot select: … AArch64ISD::UUNPKLO …
+clang frontend command failed with exit code 70
+```
+
+**Cause.** Passing `+sme` to a C++ translation unit lets the compiler try to
+lower `std::vector`/lambda code through scalable-vector codegen, and Apple
+clang 16's backend hits an unimplemented selection path. The project never
+does this: the kernels are hand-written `.S`, and only the assembler sees
+`+sme` (`target_compile_options(norm_lib …)` applies to the `.S` files); the
+C++ callers are compiled with plain `-march`.
+
+**Fix.** Compiled the driver without `+sme` — it only needs to *link* the
+`.a`, not generate SME. Noted for anyone writing a new C++ harness: do **not**
+add `+sme` to C++ TUs; it belongs on the assembly sources only.
+
+---
+
 ## What did NOT go wrong — and why (the methodology content)
 
 The generator emitted **337 instruction words across two kernels — plus 30
