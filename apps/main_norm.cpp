@@ -618,6 +618,17 @@ int main() {
         {4096,   64},   // large footprint, still ZA path
         { 128, 2048},   // N > 64 -> fallback (expect tie/loss vs V6)
         {1024, 2048},   // N > 64 -> fallback
+        // --- true-DRAM regime (footprint >> 16 MB L2) -----------------------
+        // The regime where ZA's 1R+1W traffic saving *should* pay if it ever
+        // does.  Measured verdict (Sprint 3 addendum): it does not — ZA stays
+        // ~10 GiB/s (mova-bound) at every footprint while V6 delivers ~22-25,
+        // because V6's 4-row-block reuse distance keeps pass-2's re-read
+        // L1/L2-resident even at 64 MB, so the DRAM read ZA "saves" never
+        // existed.  ZA fast path (N=64, huge M) and fallback (N=2048) both.
+        {131072, 64},   // 32 MB, ZA fast path, true DRAM
+        {262144, 64},   // 64 MB, ZA fast path, deep DRAM
+        {  4096, 2048}, // 32 MB, fallback, true DRAM
+        {  8192, 2048}, // 64 MB, fallback, deep DRAM
     };
 
     for (const auto& s : za_shapes) {
