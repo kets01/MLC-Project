@@ -1784,3 +1784,106 @@ Sprint 4 status
 - Harness corrections: ``cpu_supports_sme()`` syscall caching (with the
   Sprint-2a t0 restatement) and the bench/print loop separation.
 - ``ctest`` discovery fixed repo-wide (``enable_testing()`` ordering).
+
+Sprint 4 addendum — a benchmark shape that is unambiguously true-DRAM
+-----------------------------------------------------------------------
+
+**Goal:** every "true-DRAM" kernel number so far (the 2b/2c/4 tables' 64 MB
+``M=4096, N=2048`` row) rests on one argument — the footprint exceeds the
+M4's 16 MB L2. That argument does not rule out a **larger shared SLC**
+sitting between L2 and DRAM on M-series absorbing part of the 50 reps
+``bench()`` runs back-to-back on the same buffer. The roofline probes
+(Sprint 2a) already use a footprint proven to sit beyond *any* plausible
+M-series cache — 128 MiB per array — because that is what makes ``peak_ssve``
+trustworthy as a ceiling. No kernel had ever been measured at that same
+scale, so every "% of roofline" number to date compares a possibly
+cache-assisted numerator against a guaranteed-DRAM denominator.
+
+What was added
+~~~~~~~~~~~~~~~
+
+A new benchmark section in ``apps/main_norm.cpp`` (``main_norm``, Section 7)
+uses shape ``M=4096, N=8192``, chosen so ``M×N`` equals ``PROBE_N`` exactly —
+the identical 128 MiB-per-array footprint as ``measure_peak_ssve_1core``.
+Kernel and probe now sit in the same, unambiguously-DRAM regime, so the
+ratio between them is finally an honest one. It benchmarks the scalar
+reference, hand-written V6, ZA residency, and the JIT-emitted kernel, for
+both norms, at 10 reps instead of 50 (each call already moves 256 MiB, so
+more reps buys no extra precision at real time cost).
+
+Findings (Apple M4, 59.5 GiB/s single-core SSVE roofline)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table:: True-DRAM shape (M=4096, N=8192, 256 MiB total) vs the 64 MB shape
+   :header-rows: 1
+   :widths: 22 16 16 16
+
+   * - variant
+     - 64 MB (M=4096,N=2048)
+     - 256 MiB (M=4096,N=8192)
+     - drop
+   * - RMS V6 hand-written
+     - 25.84 (43.7 %)
+     - 20.22 (34.1 %)
+     - **−22 %**
+   * - RMS V6 JIT-emitted
+     - 26.21 (44.3 %)
+     - 20.26 (34.2 %)
+     - **−23 %**
+   * - LN V6 hand-written
+     - 14.42 (24.4 %)
+     - 13.12 (22.2 %)
+     - **−9 %**
+   * - LN V6 JIT-emitted
+     - 14.44 (24.4 %)
+     - 13.13 (22.2 %)
+     - **−9 %**
+
+The **64 MB shape was still partially cache-assisted** — a real, measurable
+gap, not noise. RMSNorm drops further than LayerNorm (−22 % vs −9 %): RMSNorm
+is the more bandwidth-sensitive kernel (2R+1W, less FP work per byte), so it
+is more exposed when cache assistance is removed; LayerNorm's extra
+arithmetic per byte already keeps it closer to compute-bound, so losing the
+cache assist costs it less.
+
+ZA residency and JIT parity both replicate at the new scale:
+
+.. list-table:: ZA vs V6, true-DRAM shape (M=4096, N=8192)
+   :header-rows: 1
+
+   * - norm
+     - V6 GiB/s
+     - ZA GiB/s
+     - ZA vs V6
+   * - RMSNorm
+     - 20.22
+     - 10.06
+     - **−50 %**
+   * - LayerNorm
+     - 13.12
+     - 7.41
+     - **−44 %**
+
+Both are ``N=8192 > 4·SVL=64``, so ZA runs its streaming fallback (no
+ZA-resident fast path) — this extends the Sprint-3 fallback-vs-V6 comparison
+(previously only measured up to N=2048, where the loss was 28–35 % for
+RMSNorm and 11–12 % for LayerNorm) to a much larger N deeper in the DRAM
+regime, where the gap widens further for both norms. The JIT ties
+hand-written within noise (RMS +0.2 %, LN +0.1 %) — parity holds at this
+scale too, as expected from the encoding-diff guarantee (Sprint 4).
+
+Sprint 4 addendum status
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- **Benchmark:** ``main_norm`` Section 7 added; shape matches ``PROBE_N``
+  exactly (128 MiB/array); scalar reference, V6, ZA, and JIT all measured
+  for both norms.
+- **Finding:** the 64 MB shape used throughout Sprints 2b/2c/4 understated
+  the true-DRAM cost by 9–23 % (LayerNorm/RMSNorm respectively) — recorded
+  here as a correction to the existing tables' "true-DRAM" framing, in the
+  same spirit as the Sprint-2b residency correction and the Sprint-4 syscall
+  correction above.
+- **No kernel or build changes** — measurement-only addition; all existing
+  ablation tables and their conclusions stand as the correct comparison
+  *among variants at that shape*, only the "is 64 MB really DRAM" premise is
+  revised.
