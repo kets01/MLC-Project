@@ -876,5 +876,78 @@ int main() {
         std::cout << "\n";
     }
 
+    // -----------------------------------------------------------------------
+    // Section 7: true DRAM regime.
+    //
+    // Every shape above tops out at 64 MiB total footprint ({4096, 2048}):
+    // "beyond the 16 MB L2" does not rule out a larger shared SLC on
+    // M-series absorbing repeated bench() reps, so those numbers are only
+    // PROBABLY DRAM-bound. This shape is sized to match PROBE_N exactly —
+    // the same 128 MiB-per-array footprint already used for the roofline
+    // ceiling probes at the top of this program — so these kernel numbers
+    // sit in the identical, unambiguously-DRAM regime as peak_ssve, and the
+    // "% of peak" column here is a directly honest DRAM-efficiency figure
+    // (not inflated by cache residency, as it is for the smaller shapes
+    // above).
+    // -----------------------------------------------------------------------
+    std::cout << "\n--- True DRAM regime (128 MiB/array, matches roofline probe footprint) ---\n";
+    std::cout << std::left << std::setw(24) << "variant"
+              << "  rows   feat    GiB/s  (% of 1-core SSVE peak)\n";
+    std::cout << std::string(70, '-') << "\n";
+
+    {
+        // dm * dn == PROBE_N, so each of a/b is exactly the 128 MiB used above.
+        const int64_t dm = 4096, dn = 8192;
+        const int64_t ld = dm;
+        std::vector<float> a(ld * dn), b(ld * dn, 0.0f);
+        std::vector<float> gamma(dn, 1.0f), beta(dn, 0.0f);
+        for (int64_t i = 0; i < ld * dn; ++i)
+            a[i] = static_cast<float>((i % 17) - 8) * 0.1f;
+
+        // Fewer reps than the smaller-shape sections: each call already
+        // moves 256 MiB of useful traffic, so 50 reps of e.g. the scalar
+        // reference would move many GiB for no extra precision.
+        const int dram_reps = 10;
+
+        volatile double rms_ref_sec = bench([&]() {
+            rms_norm_ref(a.data(), b.data(), gamma.data(), dm, dn, ld, ld, 1e-5f);
+        }, dram_reps);
+        volatile double rms_v6_sec  = bench([&]() {
+            rms_norm_ssve_v6(a.data(), b.data(), gamma.data(), dm, dn, ld, ld, 1e-5f);
+        }, dram_reps);
+        volatile double rms_za_sec  = bench([&]() {
+            rms_norm_za(a.data(), b.data(), gamma.data(), dm, dn, ld, ld, 1e-5f);
+        }, dram_reps);
+        volatile double rms_jit_sec = bench([&]() {
+            krms(a.data(), b.data(), gamma.data(), dm, dn, ld, ld, 1e-5f);
+        }, dram_reps);
+
+        volatile double ln_ref_sec = bench([&]() {
+            layer_norm_ref(a.data(), b.data(), gamma.data(), beta.data(), dm, dn, ld, ld, 1e-5f);
+        }, dram_reps);
+        volatile double ln_v6_sec  = bench([&]() {
+            layer_norm_ssve_v6(a.data(), b.data(), gamma.data(), beta.data(), dm, dn, ld, ld, 1e-5f);
+        }, dram_reps);
+        volatile double ln_za_sec  = bench([&]() {
+            layer_norm_za(a.data(), b.data(), gamma.data(), beta.data(), dm, dn, ld, ld, 1e-5f);
+        }, dram_reps);
+        volatile double ln_jit_sec = bench([&]() {
+            kln(a.data(), b.data(), gamma.data(), beta.data(), dm, dn, ld, ld, 1e-5f);
+        }, dram_reps);
+
+        volatile double vbytes = norm_bytes(dm, dn);
+
+        print_row("rms_norm_ref  ",     dm, dn, to_gibs((double)vbytes, (double)rms_ref_sec), (double)vpeak);
+        print_row("rms_norm_ssve_v6",   dm, dn, to_gibs((double)vbytes, (double)rms_v6_sec),  (double)vpeak);
+        print_row("rms_norm_za",        dm, dn, to_gibs((double)vbytes, (double)rms_za_sec),  (double)vpeak);
+        print_row("rms_norm_jit",       dm, dn, to_gibs((double)vbytes, (double)rms_jit_sec), (double)vpeak);
+        std::cout << "\n";
+        print_row("layer_norm_ref  ",   dm, dn, to_gibs((double)vbytes, (double)ln_ref_sec), (double)vpeak);
+        print_row("layer_norm_ssve_v6", dm, dn, to_gibs((double)vbytes, (double)ln_v6_sec),  (double)vpeak);
+        print_row("layer_norm_za",      dm, dn, to_gibs((double)vbytes, (double)ln_za_sec),  (double)vpeak);
+        print_row("layer_norm_jit",     dm, dn, to_gibs((double)vbytes, (double)ln_jit_sec), (double)vpeak);
+        std::cout << "\n";
+    }
+
     return 0;
 }
