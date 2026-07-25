@@ -39,14 +39,23 @@ inline int32_t back( const std::vector<uint32_t>& ops, size_t label ) {
 void Norm::emit_rms_v6() {
     std::vector<uint32_t>& ops = m_ops;
 
-    // Prologue: callee-saved regs + the dedicated eps stash slot [sp,#64]
-    // (eps must live in MEMORY across smstart — no fp register survives
-    // the streaming-mode transition; the Sprint-3 eps bugfix).
-    ops.push_back( I::base_stp_pre_x( I::x19, I::x20, I::sp, -80 ) );
+    // Prologue: callee-saved regs (FULL d8-d15, AAPCS64 — Sprint-5
+    // prerequisite fix, see rms_norm_ssve_v6.S) + the dedicated eps stash
+    // slot [sp,#120] (eps must live in MEMORY across smstart — no fp
+    // register survives the streaming-mode transition; the Sprint-3 eps
+    // bugfix).
+    ops.push_back( I::base_stp_pre_x( I::x19, I::x20, I::sp, -128 ) );
     ops.push_back( I::base_stp_off_x( I::x21, I::x22, I::sp,  16 ) );
     ops.push_back( I::base_stp_off_x( I::x23, I::x24, I::sp,  32 ) );
     ops.push_back( I::base_str_imm_x( I::x25, I::sp, 48 ) );
     ops.push_back( I::simd_str_imm_d( I::v8,  I::sp, 56 ) );
+    ops.push_back( I::simd_str_imm_d( I::v9,  I::sp, 64 ) );
+    ops.push_back( I::simd_str_imm_d( I::v10, I::sp, 72 ) );
+    ops.push_back( I::simd_str_imm_d( I::v11, I::sp, 80 ) );
+    ops.push_back( I::simd_str_imm_d( I::v12, I::sp, 88 ) );
+    ops.push_back( I::simd_str_imm_d( I::v13, I::sp, 96 ) );
+    ops.push_back( I::simd_str_imm_d( I::v14, I::sp, 104 ) );
+    ops.push_back( I::simd_str_imm_d( I::v15, I::sp, 112 ) );
 
     ops.push_back( I::base_mov_reg_x( I::x19, I::x0 ) );   // a
     ops.push_back( I::base_mov_reg_x( I::x20, I::x1 ) );   // b
@@ -56,7 +65,7 @@ void Norm::emit_rms_v6() {
     ops.push_back( I::base_lsl_x( I::x24, I::x5, 2 ) );    // stride_a bytes
     ops.push_back( I::base_lsl_x( I::x25, I::x6, 2 ) );    // stride_b bytes
     ops.push_back( I::fp_fmov_s( I::v8, I::v0 ) );
-    ops.push_back( I::simd_str_imm_s( I::v0, I::sp, 64 ) ); // eps stash
+    ops.push_back( I::simd_str_imm_s( I::v0, I::sp, 120 ) ); // eps stash
 
     size_t fix_cbz = ops.size();                            // cbz m, row_done
     ops.push_back( 0 );                                     // backpatched
@@ -64,7 +73,7 @@ void Norm::emit_rms_v6() {
     ops.push_back( I::sme_smstart_sm_only() );
     ops.push_back( I::sve_ptrue_all( I::p0, I::dtype_t::fp32 ) );
 
-    ops.push_back( I::simd_ldr_imm_s( I::v0, I::sp, 64 ) ); // eps reload
+    ops.push_back( I::simd_ldr_imm_s( I::v0, I::sp, 120 ) ); // eps reload
     ops.push_back( I::sve_dup_elem_s( I::z8, I::z0, 0 ) );  // z8 = {eps,...}
 
     ops.push_back( I::fp_fmov_imm_s( I::v0, 0x70 ) );       // s0 = 1.0
@@ -221,10 +230,17 @@ void Norm::emit_rms_v6() {
                                      (int32_t)row_done - (int32_t)fix_cbz );
 
     ops.push_back( I::simd_ldr_imm_d( I::v8,  I::sp, 56 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v9,  I::sp, 64 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v10, I::sp, 72 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v11, I::sp, 80 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v12, I::sp, 88 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v13, I::sp, 96 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v14, I::sp, 104 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v15, I::sp, 112 ) );
     ops.push_back( I::base_ldr_imm_x( I::x25, I::sp, 48 ) );
     ops.push_back( I::base_ldp_off_x( I::x23, I::x24, I::sp, 32 ) );
     ops.push_back( I::base_ldp_off_x( I::x21, I::x22, I::sp, 16 ) );
-    ops.push_back( I::base_ldp_post_x( I::x19, I::x20, I::sp, 80 ) );
+    ops.push_back( I::base_ldp_post_x( I::x19, I::x20, I::sp, 128 ) );
     ops.push_back( I::base_br_ret() );
 }
 
@@ -235,11 +251,18 @@ void Norm::emit_rms_v6() {
 void Norm::emit_layer_v6() {
     std::vector<uint32_t>& ops = m_ops;
 
-    ops.push_back( I::base_stp_pre_x( I::x19, I::x20, I::sp, -80 ) );
+    ops.push_back( I::base_stp_pre_x( I::x19, I::x20, I::sp, -144 ) );
     ops.push_back( I::base_stp_off_x( I::x21, I::x22, I::sp, 16 ) );
     ops.push_back( I::base_stp_off_x( I::x23, I::x24, I::sp, 32 ) );
     ops.push_back( I::base_stp_off_x( I::x25, I::x26, I::sp, 48 ) );
-    ops.push_back( I::simd_str_imm_d( I::v8, I::sp, 64 ) );
+    ops.push_back( I::simd_str_imm_d( I::v8,  I::sp, 64 ) );
+    ops.push_back( I::simd_str_imm_d( I::v9,  I::sp, 72 ) );
+    ops.push_back( I::simd_str_imm_d( I::v10, I::sp, 80 ) );
+    ops.push_back( I::simd_str_imm_d( I::v11, I::sp, 88 ) );
+    ops.push_back( I::simd_str_imm_d( I::v12, I::sp, 96 ) );
+    ops.push_back( I::simd_str_imm_d( I::v13, I::sp, 104 ) );
+    ops.push_back( I::simd_str_imm_d( I::v14, I::sp, 112 ) );
+    ops.push_back( I::simd_str_imm_d( I::v15, I::sp, 120 ) );
 
     ops.push_back( I::base_mov_reg_x( I::x19, I::x0 ) );   // a
     ops.push_back( I::base_mov_reg_x( I::x20, I::x1 ) );   // b
@@ -250,7 +273,7 @@ void Norm::emit_layer_v6() {
     ops.push_back( I::base_lsl_x( I::x25, I::x6, 2 ) );    // stride_a bytes
     ops.push_back( I::base_lsl_x( I::x26, I::x7, 2 ) );    // stride_b bytes
     ops.push_back( I::fp_fmov_s( I::v8, I::v0 ) );
-    ops.push_back( I::simd_str_imm_s( I::v0, I::sp, 72 ) ); // eps stash
+    ops.push_back( I::simd_str_imm_s( I::v0, I::sp, 128 ) ); // eps stash
 
     size_t fix_cbz = ops.size();
     ops.push_back( 0 );                                     // cbz m, done
@@ -258,7 +281,7 @@ void Norm::emit_layer_v6() {
     ops.push_back( I::sme_smstart_sm_only() );
     ops.push_back( I::sve_ptrue_all( I::p0, I::dtype_t::fp32 ) );
 
-    ops.push_back( I::simd_ldr_imm_s( I::v0, I::sp, 72 ) );
+    ops.push_back( I::simd_ldr_imm_s( I::v0, I::sp, 128 ) );
     ops.push_back( I::sve_dup_elem_s( I::z7, I::z0, 0 ) );  // z7 = {eps,...}
 
     ops.push_back( I::fp_fmov_imm_s( I::v0, 0x70 ) );       // s0 = 1.0
@@ -464,11 +487,18 @@ void Norm::emit_layer_v6() {
                                      (int32_t)done - (int32_t)fix_cbz );
 
     ops.push_back( I::sme_smstop_sm_only() );
-    ops.push_back( I::simd_ldr_imm_d( I::v8, I::sp, 64 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v8,  I::sp, 64 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v9,  I::sp, 72 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v10, I::sp, 80 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v11, I::sp, 88 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v12, I::sp, 96 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v13, I::sp, 104 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v14, I::sp, 112 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v15, I::sp, 120 ) );
     ops.push_back( I::base_ldp_off_x( I::x25, I::x26, I::sp, 48 ) );
     ops.push_back( I::base_ldp_off_x( I::x23, I::x24, I::sp, 32 ) );
     ops.push_back( I::base_ldp_off_x( I::x21, I::x22, I::sp, 16 ) );
-    ops.push_back( I::base_ldp_post_x( I::x19, I::x20, I::sp, 80 ) );
+    ops.push_back( I::base_ldp_post_x( I::x19, I::x20, I::sp, 144 ) );
     ops.push_back( I::base_br_ret() );
 }
 
