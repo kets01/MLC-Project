@@ -254,8 +254,8 @@ prediction's *premise* was regime-specific, not its arithmetic.
 LayerNorm stays roughly 1.7× behind RMSNorm throughout, consistent with the
 structural 3R+1W vs 2R+1W traffic difference established in Sprint 2c.
 
-Unrelated defect found: ``test_week3`` hangs on SME hardware
--------------------------------------------------------------
+Defect 4: ``test_week3`` hung on SME hardware
+-----------------------------------------------
 
 While measuring, ``test_week3`` was observed pinning a core at 100 % for over
 40 minutes. Bisecting by section: every GEMM section and the ReLU/Zero unary
@@ -271,10 +271,28 @@ documented in our own ``rms_norm_ssve.S`` and the reason the norm kernels use
 ``LD1W``/``LD1RW``/``ST1W`` with scalar bases throughout.
 
 CI never catches this because the CI runners have no SME, so the whole test
-case is skipped. This is pre-existing week-3 code, untouched by this sprint,
-and is recorded here as a finding rather than fixed — the correct fix is the
-same ZA-staged transpose now implemented in ``Unary``'s ``trans_b=1`` path.
-Note it blocks a full ``ctest`` run from completing on the M4.
+case is skipped — it reports green without executing a single instruction of
+that kernel. It also blocked a full ``ctest`` run from completing on the M4.
+
+Fixed with the same ZA-staged transpose used in ``Unary``'s ``trans_b=1``
+path: load A's 16 columns (each contiguous) into ZA *horizontal* slices, so
+``za0[j][i] = a[i + j*ld_a]``; then vertical slice ``i`` is
+``{ za0[j][i] for j }`` = row ``i`` of A, which is exactly the 16 contiguous
+floats row ``i`` of B needs. ``smstart``/``smstop`` are now the bare forms so
+PSTATE.ZA is enabled alongside PSTATE.SM and disabled again before return.
+Verified against ``identity_16_16_cpp``; the section completes in well under a
+second instead of spinning indefinitely.
+
+This stays within the assignment: the SME chapter's Task 1 is "SSVE unary
+kernels for **permutation**, zero and ReLU" — the permutation kernel is the
+``trans_b=1`` case — and that chapter teaches the ZA array, tiles and tile
+slices. No implementation technique is prescribed, and with scatter
+unavailable there is no pure-vector alternative short of element-at-a-time
+stores.
+
+Also registered ``Week7Tests`` with CTest: every other week calls
+``add_test(...)``, week7 never did, so the TEIR tests had been invisible to
+``ctest`` and to CI.
 
 Status
 ------
@@ -282,9 +300,14 @@ Status
 Done: the ``d8–d15`` prerequisite; a real ``.teir`` parser driving all five
 files; the norm registered as a TEIR primitive and verified through the full
 path against the C++ reference; OpenMP row-parallel execution with measured
-scaling against a re-validated chip ceiling; the week-6 GEMM and ``Unary``
-defects fixed with tests that can actually detect them.
+scaling against a re-validated chip ceiling; the week-6 GEMM, week-6
+``Unary`` and week-3 transpose defects fixed with tests that can actually
+detect them.
 
-Open: the ``test_week3`` hang above; and ``bench_week7``'s matmul now runs a
-genuine 8192³ contraction, so its timing is not comparable to the numbers it
-printed while the generator was producing wrong results.
+**A full ``ctest`` now completes on the M4 for the first time — 7/7 suites
+green.** It previously never finished, which is why the roofline probes were
+being distorted by a spinning core.
+
+Open: ``bench_week7``'s matmul now runs a genuine 8192³ contraction, so its
+timing is not comparable to the numbers it printed while the generator was
+producing wrong results.
