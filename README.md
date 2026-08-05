@@ -18,7 +18,7 @@ This repository contains the implementation for the Machine Learning Compiler La
 * **Compiler:** GCC/Clang with AArch64 support.
 * **Build System:** CMake 3.10+
 * **Testing Framework:** Catch2 (integrated via FetchContent).
-* **Documentation:** Sphinx with `sphinx-rtd-theme`.
+* **Documentation:** Sphinx with `furo`.
 
 ## Building the Project
 To build the project and tests, run the following commands:
