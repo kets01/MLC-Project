@@ -448,6 +448,42 @@ class mini_jit::InstGen {
 
     //! SEL Z<zd>.S, P<pg>, Z<zn>.S, Z<zm>.S
     static uint32_t sve_sel_s( sve_t zd, pred_t pg, sve_t zn, sve_t zm );
+
+    // -----------------------------------------------------------------------
+    // Sprint 6 — SME2 multi-vector encoders (for the V7 norm kernels).
+    //
+    // These use a predicate-as-counter (PN8-PN15), a different register class
+    // from the P0-P15 governing predicates the SVE encoders above take: the
+    // pred_t value here is the PN number, so only p8..p15 are meaningful.
+    // Field layouts were derived from toolchain golden words (objdump of
+    // -march=armv9-a+sme2 assembly) and cross-checked across register, base
+    // and predicate variations — the Sprint-4 methodology, which is what
+    // makes the encoding diff meaningful rather than circular.
+    // -----------------------------------------------------------------------
+
+    /**
+     * @brief PTRUE PN<pn>.S — all-true predicate-as-counter (SME2).
+     * @param pn  counter predicate; must be p8..p15.
+     */
+    static uint32_t sme2_ptrue_pn_s( pred_t pn );
+
+    /**
+     * @brief LD1W { Z<zt>.S - Z<zt+3>.S }, PN<pn>/Z, [X<rn>]
+     *        Contiguous 4-vector load (SME2).
+     * @param zt  FIRST register of the group; must be a multiple of 4
+     *            (z0/z4/.../z28) — the architecture encodes the group, not an
+     *            arbitrary register, so a non-aligned zt silently denotes a
+     *            different group.
+     * @param pn  counter predicate (p8..p15).
+     * @param rn  base address register.
+     */
+    static uint32_t sme2_ld1w_x4( sve_t zt, pred_t pn, gpr_t rn );
+
+    /**
+     * @brief ST1W { Z<zt>.S - Z<zt+3>.S }, PN<pn>, [X<rn>]  (SME2)
+     *        Same register-group constraint as sme2_ld1w_x4.
+     */
+    static uint32_t sme2_st1w_x4( sve_t zt, pred_t pn, gpr_t rn );
 };
 
 #endif
