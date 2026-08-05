@@ -62,9 +62,10 @@ Sprint status
        the hand-written SSVE winners via an encoding diff
      - Done
    * - 5
-     - TEIR integration — registering the norms as primitives the runtime
-       can place in a loop nest
-     - In progress
+     - TEIR integration — the norms registered as primitives the runtime
+       places in a loop nest, driven from real ``.teir`` files, with
+       OpenMP row-parallel scaling measured against the chip ceiling
+     - Done
 
 The best kernel per architecture (SSVE **V6**, 4-row-block contiguity
 grouping, for both norms) is frozen as the incumbent that Sprint 4's JIT
