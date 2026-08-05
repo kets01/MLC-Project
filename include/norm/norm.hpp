@@ -215,6 +215,21 @@ void rms_norm_ssve_v6(const float* a,
                       int64_t      ld_b,
                       float        epsilon);
 
+// V7: V6 with SME2 multi-vector loads/stores — the group loop's four
+// consecutive VL-row block accesses become ONE 4-vector LD1W (and one
+// 4-vector ST1W in pass 2).  Same traffic, same arithmetic, fewer
+// instructions: a single-variable test of whether V6 is instruction-issue
+// bound or memory bound (Sprint 6).  Requires FEAT_SME2; the wrapper
+// dispatches to V6 when it is absent, so this is safe to call anywhere.
+void rms_norm_ssve_v7(const float* a,
+                      float*       b,
+                      const float* gamma,
+                      int64_t      m,
+                      int64_t      n,
+                      int64_t      ld_a,
+                      int64_t      ld_b,
+                      float        epsilon);
+
 // RMSNorm — hand-written SME/ZA kernel (Sprint 3).  Uses the ZA tiles as an
 // on-core residency buffer so pass 2 reads x from ZA instead of re-reading it
 // from memory (1R+1W vs the SSVE winner's 2R+1W) whenever a row fits in ZA
