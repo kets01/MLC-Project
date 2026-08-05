@@ -1,0 +1,84 @@
+/* MLC-Norm report — small readability tweaks on top of the furo theme.
+   Kept intentionally minimal: this is a lab report, not a product site. */
+
+/* furo caps the article column at a fixed 46em, which is comfortable for
+   prose but forces every wide benchmark/ablation table into its own scroll
+   box even when the browser window has plenty of room.
+   width:100% (instead of a fixed/vw-based width) lets the flex layout keep
+   shrinking .content to fit alongside the sidebar and the right-hand TOC
+   column at every breakpoint; max-width just raises the ceiling on wide
+   screens instead of overriding furo's own responsive width rules (which
+   is what caused the page to overflow off the right edge). */
+.content {
+    width: 100%;
+    max-width: 62em;
+}
+
+/* furo's default heading scale (h1 ~2.5em, h2 ~1.75em) reads oversized for
+   a dense technical report where most pages are mostly tables/code. Bring
+   the whole scale down a step. */
+.content h1 {
+    font-size: 1.9em;
+}
+
+.content h2 {
+    font-size: 1.4em;
+}
+
+.content h3 {
+    font-size: 1.15em;
+}
+
+.content h4 {
+    font-size: 1.05em;
+}
+
+/* furo renders every heading at font-weight:700 in pure black
+   (--color-foreground-primary:#000), which reads very heavy at these large
+   sizes. Semi-bold and a soft charcoal (instead of true black) keep them
+   clearly headings without shouting. */
+.content h1,
+.content h2,
+.content h3,
+.content h4,
+.content h5,
+.content h6 {
+    font-weight: 600;
+    color: var(--color-heading-text);
+}
+
+/* Same story for inline bold text (b/strong default to font-weight:bolder,
+   i.e. 700 on black) — most of this report's bold text is a label like
+   "Goal:" or "Verdict:", not something that needs to shout either. */
+.content strong,
+.content b {
+    font-weight: 600;
+}
+
+/* furo already wraps tables in a scrollable .table-wrapper; just make sure
+   the header row is visually distinct so dense multi-column result tables
+   stay scannable. */
+table.docutils thead th {
+    background: var(--color-table-header-background, #eef3f3);
+}
+
+/* Bold the first column of list-tables (shape/variant labels) so ablation
+   and benchmark rows are scannable at a glance without reading every cell. */
+table.docutils td:first-child {
+    font-weight: 600;
+    white-space: normal;
+}
+
+/* Slightly tighter code blocks so kernel/assembly snippets don't dominate
+   the page next to their prose explanation. */
+.highlight pre {
+    font-size: 0.82em;
+    line-height: 1.5;
+}
+
+/* Bold cells inside result tables (the "winning" variant/row) get the brand
+   accent color instead of plain black, so they pop against the rest of the
+   row without needing a separate callout. */
+table.docutils td strong {
+    color: var(--color-brand-content);
+}
