@@ -77,7 +77,9 @@ SYM(layer_norm_ssve_v6):
                                     // just D9-D15 — memory survives smstart, no
                                     // register does; verified empirically)
 
-    cbz   x23, .Ldone_v6
+    cbz   x23, .Lret_v6            // m == 0: never enter the streaming region,
+                                    // so skip the smstop as well (rms_norm_ssve_v6.S
+                                    // already lands past its own smstop here)
 
     smstart sm
     ptrue p0.s, all
@@ -306,6 +308,7 @@ SYM(layer_norm_ssve_v6):
 .Ldone_v6:
     smstop sm
 
+.Lret_v6:
     ldr  d8,       [sp, #64]
     ldr  d9,       [sp, #72]
     ldr  d10,      [sp, #80]
