@@ -79,9 +79,24 @@ SYM(layer_norm_ssve):
 //   [sp+16] x19 (callee-saved: a_chunk_base)
 //   [sp+24] x20 (callee-saved: b_chunk_base)
 //   [sp+32] epsilon (float, saved here before smstart)
-    stp  x29, x30, [sp, #-48]!
+// Frame grown 48 -> 112 bytes to save the FULL d8-d15 callee-saved range
+// (AAPCS64).  smstart/smstop zero all of d8-d15 -- they alias the low bits of
+// z8-z15, and this kernel additionally uses z8/z9 as its mean/variance
+// accumulators -- so a caller holding live values there had them silently
+// destroyed.  Sprint 5 fixed this in the two V6 winners; Sprint 6 extends it
+// to every kernel, which is what lets the benchmark harness stop relying on
+// caller-side `volatile` to get trustworthy numbers.
+    stp  x29, x30, [sp, #-112]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
+    str  d8,  [sp, #48]
+    str  d9,  [sp, #56]
+    str  d10, [sp, #64]
+    str  d11, [sp, #72]
+    str  d12, [sp, #80]
+    str  d13, [sp, #88]
+    str  d14, [sp, #96]
+    str  d15, [sp, #104]
 
 // Save epsilon BEFORE smstart — entering streaming mode can alter FP state.
     str  s0, [sp, #32]
@@ -273,6 +288,14 @@ Louter_done:
 // ── Epilogue ──────────────────────────────────────────────────────────────────
     smstop sm
 
+    ldr  d8,  [sp, #48]
+    ldr  d9,  [sp, #56]
+    ldr  d10, [sp, #64]
+    ldr  d11, [sp, #72]
+    ldr  d12, [sp, #80]
+    ldr  d13, [sp, #88]
+    ldr  d14, [sp, #96]
+    ldr  d15, [sp, #104]
     ldp  x19, x20, [sp, #16]
-    ldp  x29, x30, [sp], #48
+    ldp  x29, x30, [sp], #112
     ret
