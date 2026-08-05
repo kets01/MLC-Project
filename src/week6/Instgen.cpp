@@ -523,3 +523,47 @@ uint32_t mini_jit::InstGen::sve_sel_s( sve_t zd, pred_t pg, sve_t zn, sve_t zm )
   return 0x05a0c000u | (((uint32_t)zm & 0x1fu) << 16) | ((uint32_t)pg << 10)
          | (((uint32_t)zn & 0x1fu) << 5) | (uint32_t)zd;
 }
+
+// ===========================================================================
+// Sprint 6 — SME2 multi-vector encoders.
+//
+// Golden words (clang -march=armv9-a+sme2, objdump), the full set the field
+// layouts below were derived from and are pinned to by the encoder tests:
+//   ptrue pn8.s                            -> 0x25a07810
+//   ptrue pn9.s                            -> 0x25a07811
+//   ptrue pn15.s                           -> 0x25a07817
+//   ld1w {z0.s-z3.s},   pn8/z,  [x8]       -> 0xa040c100
+//   ld1w {z0.s-z3.s},   pn8/z,  [x9]       -> 0xa040c120
+//   ld1w {z4.s-z7.s},   pn8/z,  [x8]       -> 0xa040c104
+//   ld1w {z28.s-z31.s}, pn8/z,  [x8]       -> 0xa040c11c
+//   ld1w {z0.s-z3.s},   pn9/z,  [x8]       -> 0xa040c500
+//   ld1w {z0.s-z3.s},   pn15/z, [x19]      -> 0xa040de60
+//   st1w {z0.s-z3.s},   pn8,    [x9]       -> 0xa060c120
+//   st1w {z4.s-z7.s},   pn8,    [x9]       -> 0xa060c124
+//   st1w {z28.s-z31.s}, pn15,   [x20]      -> 0xa060de9c
+//
+// Fields, consistent across every word above:
+//   PN counter predicate: (pn - 8) << 10
+//   base register Xn:     rn << 5
+//   first Z of the group: zt (raw register number, low 5 bits)
+// ===========================================================================
+
+uint32_t mini_jit::InstGen::sme2_ptrue_pn_s( pred_t pn ) {
+  // PN8-PN15 are encoded as 0-7; anything else is a caller error and would
+  // silently name a different predicate, so it is masked to the valid range.
+  return 0x25a07810u | (((uint32_t)pn - 8u) & 0x7u);
+}
+
+uint32_t mini_jit::InstGen::sme2_ld1w_x4( sve_t zt, pred_t pn, gpr_t rn ) {
+  return 0xa040c000u
+         | ((((uint32_t)pn - 8u) & 0x7u) << 10)
+         | (reg_id(rn) << 5)
+         | ((uint32_t)zt & 0x1fu);
+}
+
+uint32_t mini_jit::InstGen::sme2_st1w_x4( sve_t zt, pred_t pn, gpr_t rn ) {
+  return 0xa060c000u
+         | ((((uint32_t)pn - 8u) & 0x7u) << 10)
+         | (reg_id(rn) << 5)
+         | ((uint32_t)zt & 0x1fu);
+}
