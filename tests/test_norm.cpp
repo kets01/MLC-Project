@@ -1503,6 +1503,114 @@ TEST_CASE("Sprint4 JIT kernels: all-constant row is finite (eps regression)",
 // caller like TEIR would see.
 // ===========================================================================
 
+// ---------------------------------------------------------------------------
+// Sprint 6 — the same guarantee, for EVERY kernel.
+//
+// Sprint 5 fixed and tested only the two V6 winners, because those are what
+// TEIR calls.  The other 15 entry points kept saving just d8, and a Sprint-6
+// hardware probe found all 15 destroying the caller's d9-d15.  That is what
+// made whole benchmark tables read 0.00 GiB/s: main_norm's `volatile`
+// discipline is a caller-side workaround, and it only holds as long as
+// register allocation cooperates.
+//
+// Two tests below pin the property for every kernel at once, so a new variant
+// cannot ship without it.  The helper is the same construct as the V6 tests:
+// local register variables pin the pattern to the physical registers, and the
+// asm barriers force a real materialise/re-read rather than a compiler-tracked
+// copy (a plain C++ local would survive regardless of what the callee does,
+// and would therefore prove nothing).
+// ---------------------------------------------------------------------------
+
+template <typename F>
+static void require_preserves_d9_d15(F&& call) {
+    register double r9  asm("d9");
+    register double r10 asm("d10");
+    register double r11 asm("d11");
+    register double r12 asm("d12");
+    register double r13 asm("d13");
+    register double r14 asm("d14");
+    register double r15 asm("d15");
+
+    asm volatile("fmov d9,  #2.0\n\t"
+                 "fmov d10, #3.0\n\t"
+                 "fmov d11, #4.0\n\t"
+                 "fmov d12, #5.0\n\t"
+                 "fmov d13, #6.0\n\t"
+                 "fmov d14, #7.0\n\t"
+                 "fmov d15, #8.0\n\t"
+                 : "=w"(r9), "=w"(r10), "=w"(r11), "=w"(r12), "=w"(r13),
+                   "=w"(r14), "=w"(r15));
+
+    call();
+
+    asm volatile("" : "+w"(r9), "+w"(r10), "+w"(r11), "+w"(r12), "+w"(r13),
+                       "+w"(r14), "+w"(r15));
+
+    REQUIRE(r9  == 2.0);
+    REQUIRE(r10 == 3.0);
+    REQUIRE(r11 == 4.0);
+    REQUIRE(r12 == 5.0);
+    REQUIRE(r13 == 6.0);
+    REQUIRE(r14 == 7.0);
+    REQUIRE(r15 == 8.0);
+}
+
+TEST_CASE("Sprint6 AAPCS64: every RMSNorm kernel preserves d9-d15",
+          "[norm][sprint6][abi]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 64, N = 64, ld = M;
+    std::vector<float> a(ld * N), b(ld * N, 0.0f), gamma(N, 1.0f);
+    for (int64_t i = 0; i < ld * N; ++i) a[i] = 0.01f * float(i % 97);
+
+    auto check = [&](KernelFn k) {
+        require_preserves_d9_d15([&] {
+            k(a.data(), b.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+        });
+    };
+    check(rms_norm_ssve);
+    check(rms_norm_ssve_v1);
+    check(rms_norm_ssve_v2);
+    check(rms_norm_ssve_v3);
+    check(rms_norm_ssve_v4);
+    check(rms_norm_ssve_v5);
+    // Qualified: the encoding-diff section below also declares a raw
+    // extern "C" rms_norm_ssve_v6, so the bare name is ambiguous here.
+    // The namespaced wrapper is what real callers (TEIR, the bench) use.
+    check(mini_jit::norm::rms_norm_ssve_v6);
+    check(rms_norm_za);
+
+    // The roofline probe is not a norm kernel, but every "% of peak" in the
+    // report is divided by a number it produced, so it gets the same gate.
+    require_preserves_d9_d15([&] {
+        bw_probe_ssve(b.data(), a.data(), ld * N);
+    });
+}
+
+TEST_CASE("Sprint6 AAPCS64: every LayerNorm kernel preserves d9-d15",
+          "[norm][sprint6][abi]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 64, N = 64, ld = M;
+    std::vector<float> a(ld * N), b(ld * N, 0.0f);
+    std::vector<float> gamma(N, 1.0f), beta(N, 0.0f);
+    for (int64_t i = 0; i < ld * N; ++i) a[i] = 0.01f * float(i % 97);
+
+    auto check = [&](LNKernelFn k) {
+        require_preserves_d9_d15([&] {
+            k(a.data(), b.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+        });
+    };
+    check(layer_norm_ssve);
+    check(layer_norm_ssve_v1);
+    check(layer_norm_ssve_v2);
+    check(layer_norm_ssve_v4);
+    check(layer_norm_ssve_v5);
+    check(mini_jit::norm::layer_norm_ssve_v6);   // qualified — see RMSNorm note
+    check(layer_norm_ssve_welford);
+    check(layer_norm_za);
+}
+
 TEST_CASE("Sprint5 AAPCS64: d9-d15 survive the RMSNorm V6 kernel call",
           "[norm][sprint5][abi]") {
     if (!cpu_supports_sme()) SKIP("SME required");
