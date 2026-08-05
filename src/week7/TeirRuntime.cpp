@@ -38,6 +38,7 @@ mini_jit::Unary::kernel_t TeirRuntime::get_unary_kernel(uint32_t m, uint32_t n,
                                                         mini_jit::Unary::ptype_t ptype,
                                                         uint32_t trans_b) {
     auto key = std::make_tuple(m, n, static_cast<uint32_t>(ptype), trans_b);
+    std::lock_guard<std::mutex> lock(m_cache_mutex);
     auto it = m_unary_cache.find(key);
     if (it != m_unary_cache.end()) return it->second;
 
@@ -52,6 +53,7 @@ mini_jit::Gemm::kernel_t TeirRuntime::get_gemm_kernel(uint32_t m, uint32_t n, ui
                                                       uint32_t trans_a, uint32_t trans_b,
                                                       uint32_t trans_c) {
     auto key = std::make_tuple(m, n, k, trans_a | (trans_b << 1) | (trans_c << 2));
+    std::lock_guard<std::mutex> lock(m_cache_mutex);
     auto it = m_gemm_cache.find(key);
     if (it != m_gemm_cache.end()) return it->second;
 

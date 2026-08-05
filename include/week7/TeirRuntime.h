@@ -7,6 +7,7 @@
 #include "norm/jit_norm.hpp"
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <tuple>
 
@@ -52,6 +53,9 @@ private:
 
     std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, mini_jit::Unary::kernel_t> m_unary_cache;
     std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, mini_jit::Gemm::kernel_t> m_gemm_cache;
+    // The lazy getters run inside OpenMP-parallel traverse() calls — the
+    // one-time generation + map insert must not race across threads.
+    std::mutex m_cache_mutex;
 
     mini_jit::Norm norm_rms_gen;
     mini_jit::Norm norm_layer_gen;
