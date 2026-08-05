@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -610,6 +611,207 @@ static void teir_threading_section(double peak_ssve, double peak_chip) {
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// Sprint 6 — the consolidated ablation (the evaluation deliverable).
+//
+// Sprints 2-5 each produced their own table with its own shapes and its own
+// baseline, which makes "what did each optimisation actually buy" a
+// cross-referencing exercise.  This section answers it in ONE table: every
+// rung of the ladder, from the scalar reference to the TEIR+OpenMP integrated
+// path, on the SAME shapes through the SAME harness.
+//
+// Three rules it enforces, one per design decision:
+//   B — every row is verified against the C++ reference BEFORE its GiB/s is
+//       printed; the measured max deviation is printed alongside, so the
+//       accuracy each variant actually meets is visible rather than asserted.
+//   C — LayerNorm (two-pass) and Welford and RMSNorm (single-pass) all appear
+//       in the same table on the same shapes, so the comparison is direct.
+//   E — every number is stated against BOTH validated ceilings, with the byte
+//       convention restated in the header.
+//
+// Written deliberately WITHOUT the `volatile` discipline the older sections
+// use.  That was a caller-side workaround for kernels that clobbered d8-d15;
+// as of this sprint every kernel preserves them ([sprint6][abi] tests), so
+// the workaround is no longer load-bearing.  If the ABI fix ever regresses,
+// this section is where it shows up first — as 0.00 rows, exactly the
+// signature that exposed the bug in the first place.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Ladder position -> what changed at that rung. Kept next to the numbers so a
+// reader never has to reconstruct the story from variant names.
+struct Rung {
+    const char* name;
+    const char* lever;
+};
+
+// The canonical signatures (decision A) — the scalar reference, every
+// hand-written variant and the JIT-emitted kernel all share them, which is
+// what lets one loop drive the whole ladder.
+using KernelFnBench   = void (*)(const float*, float*, const float*,
+                                 int64_t, int64_t, int64_t, int64_t, float);
+using LNKernelFnBench = void (*)(const float*, float*, const float*, const float*,
+                                 int64_t, int64_t, int64_t, int64_t, float);
+
+double max_abs_dev(const std::vector<float>& got, const std::vector<float>& ref) {
+    double worst = 0.0;
+    for (size_t i = 0; i < got.size(); ++i)
+        worst = std::max(worst, static_cast<double>(std::fabs(got[i] - ref[i])));
+    return worst;
+}
+
+void print_abl_header(int64_t m, int64_t n, double footprint_mib,
+                      double peak_ssve, double peak_chip) {
+    std::cout << "\nShape M=" << m << " N=" << n
+              << "  (" << std::fixed << std::setprecision(1) << footprint_mib
+              << " MiB working set)\n"
+              << std::left
+              << std::setw(22) << "stage"
+              << std::setw(30) << "lever"
+              << std::right
+              << std::setw(9)  << "GiB/s"
+              << std::setw(9)  << "%1core"
+              << std::setw(8)  << "%chip"
+              << std::setw(11) << "vs scalar"
+              << std::setw(12) << "max|dev|"
+              << std::setw(5)  << "ok" << "\n"
+              << std::string(106, '-') << "\n";
+    (void)peak_ssve; (void)peak_chip;
+}
+
+void print_abl_row(const Rung& r, double gibs, double peak_ssve, double peak_chip,
+                   double scalar_gibs, double dev, bool ok) {
+    std::cout << std::left
+              << std::setw(22) << r.name
+              << std::setw(30) << r.lever
+              << std::right << std::fixed
+              << std::setw(9)  << std::setprecision(2) << gibs
+              << std::setw(8)  << std::setprecision(1) << (100.0 * gibs / peak_ssve) << "%"
+              << std::setw(7)  << std::setprecision(1) << (100.0 * gibs / peak_chip) << "%"
+              << std::setw(10) << std::setprecision(1) << (gibs / scalar_gibs) << "x"
+              << std::setw(12) << std::setprecision(2) << std::scientific << dev
+              << std::fixed
+              << std::setw(5)  << (ok ? "yes" : "NO") << "\n";
+}
+
+} // namespace
+
+static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
+    std::cout << "\n" << std::string(106, '=') << "\n"
+              << "SPRINT 6 - CONSOLIDATED ABLATION (scalar -> SSVE levers -> ZA -> JIT -> TEIR+OpenMP)\n"
+              << std::string(106, '=') << "\n"
+              << "Bytes: USEFUL (1 read + 1 write per element) for every row, kernels and probes alike.\n"
+              << "Ceilings: 1-core SSVE " << std::fixed << std::setprecision(2) << peak_ssve
+              << " GiB/s (single-thread roofline), chip-wide " << peak_chip
+              << " GiB/s (threading target).\n"
+              << "Every row is verified against the C++ reference before its GiB/s is reported;\n"
+              << "max|dev| is the largest absolute deviation observed on that row's output.\n";
+
+    struct Shape { int64_t m, n; const char* regime; };
+    const Shape shapes[] = {
+        {  128,    64, "small / per-call-overhead regime" },
+        { 1024,  2048, "16 MiB, cache-assisted"           },
+        { 4096,  8192, "256 MiB, true DRAM (probe-matched)" },
+    };
+
+    // Emission is one-time and host-portable; generate once, reuse everywhere.
+    mini_jit::Norm jit_rms, jit_ln;
+    jit_rms.generate(mini_jit::Norm::ntype_t::rms);
+    jit_ln.generate(mini_jit::Norm::ntype_t::layer);
+    auto krms = jit_rms.get_rms_kernel();
+    auto kln  = jit_ln.get_layer_kernel();
+
+    // Accuracy gate: FRSQRTE+NR costs ~5e-6 relative in inv_rms/inv_std, and
+    // the multi-accumulator variants reassociate the reduction. 1e-3 absolute
+    // is loose enough for both on this data and tight enough that a real
+    // addressing or ABI bug (which produces garbage or zeros) fails loudly.
+    const double kGate = 1e-3;
+
+    for (const auto& s : shapes) {
+        const int64_t ld = s.m;
+        const size_t  sz = static_cast<size_t>(ld) * static_cast<size_t>(s.n);
+        const double  bytes = norm_bytes(s.m, s.n);
+        // Constant work per row, not constant rep count: a ~1 us small-shape
+        // call needs many samples for best-of-N to actually find the minimum,
+        // while a 256 MiB call already moves enough data that 5 is plenty.
+        // (Measured the flaw first: at 20 reps the small shape reported the
+        // hand-written V6 10% below its own word-identical JIT twin, which is
+        // impossible for identical code and so was sampling noise, not signal.)
+        const int     reps  = std::max(5, std::min(500,
+                                  static_cast<int>(50.0e6 / static_cast<double>(sz))));
+
+        std::vector<float> a(sz), b(sz, 0.0f), expect(sz, 0.0f);
+        std::vector<float> gamma(s.n), beta(s.n);
+        for (size_t i = 0; i < sz; ++i) a[i] = 0.01f * float(i % 97);
+        for (int64_t j = 0; j < s.n; ++j) {
+            gamma[j] = 1.0f + 0.001f * float(j % 13);
+            beta[j]  = 0.01f * float(j % 7);
+        }
+
+        print_abl_header(s.m, s.n, 2.0 * bytes / 2.0 / (1 << 20), peak_ssve, peak_chip);
+        std::cout << "  regime: " << s.regime << "\n";
+
+        // ---- RMSNorm ladder -------------------------------------------------
+        rms_norm_ref(a.data(), expect.data(), gamma.data(), s.m, s.n, ld, ld, 1e-5f);
+
+        double scalar_rms = 0.0;
+        auto rms_row = [&](const Rung& r, KernelFnBench fn) {
+            std::fill(b.begin(), b.end(), -1.0f);
+            fn(a.data(), b.data(), gamma.data(), s.m, s.n, ld, ld, 1e-5f);
+            double dev = max_abs_dev(b, expect);
+            double sec = bench([&] {
+                fn(a.data(), b.data(), gamma.data(), s.m, s.n, ld, ld, 1e-5f);
+            }, reps);
+            double gibs = to_gibs(bytes, sec);
+            if (scalar_rms == 0.0) scalar_rms = gibs;
+            print_abl_row(r, gibs, peak_ssve, peak_chip, scalar_rms, dev, dev <= kGate);
+        };
+
+        std::cout << "RMSNorm (single-pass, 2R+1W)\n";
+        rms_row({"scalar reference", "C++ oracle, double accum"}, rms_norm_ref);
+        rms_row({"V0 SSVE", "VLA streaming, 1 accumulator"},      rms_norm_ssve);
+        rms_row({"V1", "FRSQRTE+NR replaces FSQRT/FDIV"},         rms_norm_ssve_v1);
+        rms_row({"V2", "+ pre-computed 1/N"},                     rms_norm_ssve_v2);
+        rms_row({"V3", "+ 2x column unroll"},                     rms_norm_ssve_v3);
+        rms_row({"V4", "+ 4 accumulator chains (ILP)"},           rms_norm_ssve_v4);
+        rms_row({"V5", "+ software-pipelined loads"},             rms_norm_ssve_v5);
+        rms_row({"V6 (incumbent)", "4-row-block contiguity"},     rms_norm_ssve_v6);
+        rms_row({"ZA residency", "ZA staging, 1R+1W"},            rms_norm_za);
+        rms_row({"JIT V6", "runtime-emitted, word-identical"},    krms);
+
+        // ---- LayerNorm ladder ----------------------------------------------
+        layer_norm_ref(a.data(), expect.data(), gamma.data(), beta.data(),
+                       s.m, s.n, ld, ld, 1e-5f);
+
+        double scalar_ln = 0.0;
+        auto ln_row = [&](const Rung& r, LNKernelFnBench fn) {
+            std::fill(b.begin(), b.end(), -1.0f);
+            fn(a.data(), b.data(), gamma.data(), beta.data(), s.m, s.n, ld, ld, 1e-5f);
+            double dev = max_abs_dev(b, expect);
+            double sec = bench([&] {
+                fn(a.data(), b.data(), gamma.data(), beta.data(),
+                   s.m, s.n, ld, ld, 1e-5f);
+            }, reps);
+            double gibs = to_gibs(bytes, sec);
+            if (scalar_ln == 0.0) scalar_ln = gibs;
+            print_abl_row(r, gibs, peak_ssve, peak_chip, scalar_ln, dev, dev <= kGate);
+        };
+
+        std::cout << "LayerNorm (two-pass, 3R+1W)\n";
+        ln_row({"scalar reference", "C++ oracle, double accum"},  layer_norm_ref);
+        ln_row({"V0 SSVE", "VLA streaming, 1 accumulator"},       layer_norm_ssve);
+        ln_row({"V1", "FRSQRTE+NR replaces FSQRT/FDIV"},          layer_norm_ssve_v1);
+        ln_row({"V2", "+ pre-computed 1/N (2 FDIVs)"},           layer_norm_ssve_v2);
+        ln_row({"V4", "+ 4 accumulator chains (ILP)"},            layer_norm_ssve_v4);
+        ln_row({"V5", "+ software-pipelined loads"},              layer_norm_ssve_v5);
+        ln_row({"V6 (incumbent)", "4-row-block contiguity"},      layer_norm_ssve_v6);
+        ln_row({"Welford", "online single-pass, 2R+1W"},          layer_norm_ssve_welford);
+        ln_row({"ZA residency", "ZA staging, 1R+1W"},             layer_norm_za);
+        ln_row({"JIT V6", "runtime-emitted, word-identical"},     kln);
+    }
+}
+
 int main() {
     request_p_core();
 
@@ -643,6 +845,14 @@ int main() {
         << std::setw(7) << peak_ssve << " GiB/s  <- kernel roofline\n"
         << "  chip-wide         (" << nthreads << " threads, NEON)              : "
         << std::setw(7) << peak_chip << " GiB/s  <- Sprint-5 threading target\n\n";
+
+    // Sprint 6's consolidated ablation runs FIRST: it is the evaluation
+    // deliverable, and the per-sprint sections below are the detail behind it.
+    // Guarded on SME because the kernels are no-ops without it, which would
+    // make every verification column read "NO" for the wrong reason.
+    if (have_sme)
+        sprint6_consolidated_ablation(static_cast<double>(peak_ssve),
+                                      static_cast<double>(peak_chip));
 
     // The single-core SSVE streaming ceiling judges kernel quality: it is the
     // same execution mode, instruction mix, and access pattern as the kernels.
