@@ -807,6 +807,7 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
         ln_row({"V4", "+ 4 accumulator chains (ILP)"},            layer_norm_ssve_v4);
         ln_row({"V5", "+ software-pipelined loads"},              layer_norm_ssve_v5);
         ln_row({"V6 (incumbent)", "4-row-block contiguity"},      layer_norm_ssve_v6);
+        ln_row({"V7 (SME2)", "4-vector LD1W/ST1W, same traffic"}, layer_norm_ssve_v7);
         ln_row({"Welford", "online single-pass, 2R+1W"},          layer_norm_ssve_welford);
         ln_row({"ZA residency", "ZA staging, 1R+1W"},             layer_norm_za);
         ln_row({"JIT V6", "runtime-emitted, word-identical"},     kln);
