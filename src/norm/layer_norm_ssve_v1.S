@@ -71,9 +71,20 @@
 SYM(layer_norm_ssve_v1):
 
 // ── Prologue ──────────────────────────────────────────────────────────────────
-    stp  x29, x30, [sp, #-48]!
+// Frame grown 48 -> 112 bytes to save the FULL d8-d15 callee-saved range
+// (AAPCS64) — see layer_norm_ssve.S for the full rationale: smstart/smstop
+// zero all of d8-d15, and z8/z9 are this kernel's accumulators.
+    stp  x29, x30, [sp, #-112]!
     mov  x29, sp
     stp  x19, x20, [sp, #16]
+    str  d8,  [sp, #48]
+    str  d9,  [sp, #56]
+    str  d10, [sp, #64]
+    str  d11, [sp, #72]
+    str  d12, [sp, #80]
+    str  d13, [sp, #88]
+    str  d14, [sp, #96]
+    str  d15, [sp, #104]
     str  s0,  [sp, #32]            // save epsilon before smstart
 
     smstart sm
@@ -203,6 +214,14 @@ Louter_done_v1:
 // ── Epilogue ──────────────────────────────────────────────────────────────────
     smstop sm
 
+    ldr  d8,  [sp, #48]
+    ldr  d9,  [sp, #56]
+    ldr  d10, [sp, #64]
+    ldr  d11, [sp, #72]
+    ldr  d12, [sp, #80]
+    ldr  d13, [sp, #88]
+    ldr  d14, [sp, #96]
+    ldr  d15, [sp, #104]
     ldp  x19, x20, [sp, #16]
-    ldp  x29, x30, [sp], #48
+    ldp  x29, x30, [sp], #112
     ret
