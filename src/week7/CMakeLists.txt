@@ -22,3 +22,7 @@ target_link_libraries(bench_week7 PRIVATE week7_lib)
 
 add_executable(test_week7 ../../tests/test_week7.cpp)
 target_link_libraries(test_week7 PRIVATE week7_lib Catch2::Catch2WithMain)
+
+# Every other week registers its tests with CTest; week7 never did, so the
+# TEIR tests were invisible to `ctest` (and therefore to CI).
+add_test(NAME Week7Tests COMMAND test_week7)
