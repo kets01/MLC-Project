@@ -719,6 +719,10 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
     mini_jit::Norm jit_rms, jit_ln;
     jit_rms.generate(mini_jit::Norm::ntype_t::rms);
     jit_ln.generate(mini_jit::Norm::ntype_t::layer);
+    std::cout << "JIT emission on this host: "
+              << (jit_rms.emitted_isa() == mini_jit::Norm::isa_t::sme2
+                      ? "SME2 (V7 multi-vector)" : "SME1 (V6)")
+              << " — the feature-dependent emission decision, made at generate() time.\n";
     auto krms = jit_rms.get_rms_kernel();
     auto kln  = jit_ln.get_layer_kernel();
 
@@ -779,7 +783,7 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
         rms_row({"V6 (incumbent)", "4-row-block contiguity"},     rms_norm_ssve_v6);
         rms_row({"V7 (SME2)", "4-vector LD1W/ST1W, same traffic"}, rms_norm_ssve_v7);
         rms_row({"ZA residency", "ZA staging, 1R+1W"},            rms_norm_za);
-        rms_row({"JIT V6", "runtime-emitted, word-identical"},    krms);
+        rms_row({"JIT (auto ISA)", "emitted: V7 on SME2, else V6"},  krms);
 
         // ---- LayerNorm ladder ----------------------------------------------
         layer_norm_ref(a.data(), expect.data(), gamma.data(), beta.data(),
@@ -810,7 +814,7 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
         ln_row({"V7 (SME2)", "4-vector LD1W/ST1W, same traffic"}, layer_norm_ssve_v7);
         ln_row({"Welford", "online single-pass, 2R+1W"},          layer_norm_ssve_welford);
         ln_row({"ZA residency", "ZA staging, 1R+1W"},             layer_norm_za);
-        ln_row({"JIT V6", "runtime-emitted, word-identical"},     kln);
+        ln_row({"JIT (auto ISA)", "emitted: V7 on SME2, else V6"},   kln);
     }
 }
 
