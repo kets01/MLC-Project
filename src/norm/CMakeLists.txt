@@ -62,7 +62,14 @@ target_link_libraries(norm_lib PRIVATE week6_lib)
 add_executable(test_norm ../../tests/test_norm.cpp)
 target_link_libraries(test_norm PRIVATE norm_lib week3_lib Catch2::Catch2WithMain)
 
+# main_norm also drives the Sprint-5 TEIR path (week7_lib) and sets the
+# OpenMP thread count for the row-parallel scaling study.
 add_executable(main_norm ../../apps/main_norm.cpp)
-target_link_libraries(main_norm PRIVATE norm_lib)
+# week7_lib already carries norm_lib as a static-library link dependency;
+# listing norm_lib again here makes Apple's ld warn about a duplicate.
+target_link_libraries(main_norm PRIVATE week7_lib)
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(main_norm PRIVATE OpenMP::OpenMP_CXX)
+endif()
 
 add_test(NAME NormTests COMMAND test_norm)

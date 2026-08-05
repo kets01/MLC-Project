@@ -275,6 +275,46 @@ uint32_t mini_jit::InstGen::sme_mova_tile_to_vec_h_s( sve_t    zt,
 }
 
 // ---------------------------------------------------------------------------
+// MOVA: write SVE register into a ZA tile slice (the reverse of the above).
+//
+// MOV ZA<n>H.S[W<ws>, <off>], P<pg>/M, Z<zn>.S  (horizontal)
+//   golden words (clang -march=armv9-a+sme, objdump):
+//     mova za0h.s[w12, 0], p0/m, z0.s   -> 0xc0800000
+//     mova za0h.s[w12, 3], p0/m, z5.s   -> 0xc08000a3
+//     mova za1h.s[w13, 1], p1/m, z2.s   -> 0xc0802445
+//     mova za3h.s[w15, 3], p0/m, z31.s  -> 0xc08063ef
+//   fields: base 0xc0800000 | V<<15 | (ws-12)<<13 | pg<<10 | zn<<5
+//           | za_idx<<2 | offset  (fp32: offset is 2 bits, 0-3)
+//
+// MOV ZA<n>V.S[...] (vertical): same with V (bit 15) set:
+//     mova za0v.s[w12, 0], p0/m, z0.s   -> 0xc0808000
+//     mova za2v.s[w14, 2], p2/m, z9.s   -> 0xc080c92a
+//     mova za3v.s[w12, 3], p0/m, z1.s   -> 0xc080802f
+// ---------------------------------------------------------------------------
+
+uint32_t mini_jit::InstGen::sme_mova_vec_to_tile_h_s( uint32_t za_idx,
+                                                       uint32_t ws,
+                                                       uint32_t offset,
+                                                       pred_t   pg,
+                                                       sve_t    zn ) {
+  uint32_t ws_enc = (ws >= 12u) ? (ws - 12u) : ws;
+  return 0xc0800000u
+         | ((ws_enc & 0x3u) << 13)
+         | ((uint32_t)pg << 10)
+         | ((uint32_t)zn << 5)
+         | ((za_idx & 0x3u) << 2)
+         | (offset & 0x3u);
+}
+
+uint32_t mini_jit::InstGen::sme_mova_vec_to_tile_v_s( uint32_t za_idx,
+                                                       uint32_t ws,
+                                                       uint32_t offset,
+                                                       pred_t   pg,
+                                                       sve_t    zn ) {
+  return sme_mova_vec_to_tile_h_s( za_idx, ws, offset, pg, zn ) | 0x8000u;
+}
+
+// ---------------------------------------------------------------------------
 // FMAX Z<zd>.S, P<pg>/M, Z<zd>.S, Z<zm>.S
 //   base encoding (verified with LLVM): 0x65868000
 //   bits: opc=FMAX, size=10 (.S), Pg<<10, Zm<<5, Zdn

@@ -9,6 +9,14 @@
 #include "norm/norm.hpp"
 #include "norm/jit_norm.hpp"  // Sprint 4: mini_jit::Norm
 #include "week3/utility.hpp"  // cpu_supports_sme()
+#include "week7/TeirRuntime.h" // Sprint 5: TEIR-invoked, OpenMP row-parallel
+
+#if __has_include(<omp.h>)
+#include <omp.h>
+#define BENCH_HAS_OMP 1
+#else
+#define BENCH_HAS_OMP 0
+#endif
 
 #ifdef __APPLE__
 #include <pthread.h>
@@ -124,28 +132,75 @@ static double measure_peak_ssve_1core() {
     return to_gibs(BYTES, best);
 }
 
-// Ceiling 3: chip-wide — T threads, each scale-adding its own slice R times
-// back-to-back (reps inside the threads amortize spawn/join overhead to <1%).
+// Ceiling 3: chip-wide — T threads scale-adding the whole array R times.
 // This is the target for TEIR/OpenMP row-parallel scaling in Sprint 5, NOT
 // for the single-threaded kernel.
+//
+// Sprint-5 CORRECTION (work distribution, not bandwidth): this probe used to
+// hand each thread ONE equal-sized slice. On the M4 the cores are
+// heterogeneous (4 P + 6 E), so wall time was set by the slowest E-core while
+// the P-cores sat idle after finishing early — it measured
+// slowest-core-times-T, not the memory system, and reported ~44 GiB/s. The
+// bug was caught by the ceiling being EXCEEDED: the TEIR row-parallel RMSNorm
+// sustained 53 GiB/s against a "ceiling" of 44 (decision B in reverse — a
+// measurement that says something impossible is wrong, not a discovery).
+//
+// The fix is to distribute work the same way the workload under test does:
+// many small chunks handed out dynamically, so a fast core simply takes more
+// of them. Same probe kernel, same bytes, same reps — only the scheduling
+// changes, so the number stays comparable to the other two ceilings.
 static double measure_peak_chip(unsigned threads) {
     const int R = 10;
     std::vector<float> src(PROBE_N), dst(PROBE_N);
     for (size_t i = 0; i < PROBE_N; ++i) src[i] = static_cast<float>(i & 0xFF) + 1.0f;
     for (size_t i = 0; i < PROBE_N; ++i) dst[i] = 0.0f;  // faults dst pages too
 
-    const size_t slice = PROBE_N / threads;
+    // ~8 chunks per thread: fine enough to balance P vs E cores, coarse
+    // enough that each chunk is still a long streaming run.
+    //
+    // The R repetitions run as R separate PASSES separated by a barrier,
+    // not as one flat pool of n_chunks*R work items. Two reasons, both
+    // measurement-correctness rather than style: (a) within a pass every
+    // chunk has exactly one owner, so threads never write the same cache
+    // lines concurrently (a flat pool lets thread A run chunk 5 of rep 0
+    // while B runs chunk 5 of rep 1 — coherence ping-pong, and a data
+    // race); (b) a pass touches all 128 MiB before any chunk is revisited,
+    // so no chunk is still cache-resident on its next rep, which would
+    // measure cache instead of DRAM.
+    const size_t n_chunks = static_cast<size_t>(threads) * 8;
+    const size_t chunk    = PROBE_N / n_chunks;
+
+    std::atomic<size_t>   next{0};
+    std::atomic<unsigned> arrived{0};
+    std::atomic<int>      generation{0};
 
     auto t0 = Clock::now();
     std::vector<std::thread> workers;
     workers.reserve(threads);
     for (unsigned t = 0; t < threads; ++t) {
-        workers.emplace_back([&, t]() {
+        workers.emplace_back([&]() {
             request_p_core();
-            float*       d = dst.data() + t * slice;
-            const float* s = src.data() + t * slice;
-            size_t n = (t == threads - 1) ? PROBE_N - t * slice : slice;
-            for (int r = 0; r < R; ++r) bw_scale_add(d, s, n);
+            for (int r = 0; r < R; ++r) {
+                for (;;) {
+                    size_t idx = next.fetch_add(1, std::memory_order_relaxed);
+                    if (idx >= n_chunks) break;
+                    float*       d = dst.data() + idx * chunk;
+                    const float* s = src.data() + idx * chunk;
+                    size_t n = (idx == n_chunks - 1) ? PROBE_N - idx * chunk : chunk;
+                    bw_scale_add(d, s, n);
+                }
+                // Barrier: last thread of the pass resets the work counter
+                // and releases the rest into the next pass.
+                int gen = generation.load(std::memory_order_acquire);
+                if (arrived.fetch_add(1, std::memory_order_acq_rel) == threads - 1) {
+                    next.store(0, std::memory_order_relaxed);
+                    arrived.store(0, std::memory_order_relaxed);
+                    generation.store(gen + 1, std::memory_order_release);
+                } else {
+                    while (generation.load(std::memory_order_acquire) == gen)
+                        std::this_thread::yield();
+                }
+            }
         });
     }
     for (auto& w : workers) w.join();
@@ -420,6 +475,140 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Sprint 5 — the norm invoked THROUGH TEIR, row-parallel via OpenMP.
+//
+// Correctness first (decision B): the threaded result is verified against the
+// C++ reference before any GiB/s is printed.
+//
+// The trees are built here rather than parsed from data/rmsnorm.teir because
+// each file pins ONE shape and ONE chunk count; a scaling study needs to vary
+// both. The structure is identical to what the parser produces for those
+// files (verified in test_week7) — one parallel row axis over M/chunk_rows
+// chunks, each invoking the JIT kernel on a chunk_rows x N column-major tile.
+//
+// Note the kernel is called here from OpenMP worker threads with no `volatile`
+// workaround anywhere: that is only safe because of this sprint's d8-d15
+// AAPCS64 prerequisite fix.
+// ---------------------------------------------------------------------------
+
+using namespace mini_jit::teir;
+
+// Only referenced from teir_threading_section()'s BENCH_HAS_OMP branch below;
+// on CI (no OpenMP, see week7 report) that branch is preprocessed out,
+// leaving this otherwise unreferenced and tripping -Werror,-Wunused-function.
+#if BENCH_HAS_OMP
+static std::shared_ptr<Node> build_norm_tree(bool layer, int64_t m, int64_t n,
+                                             int64_t chunk_rows,
+                                             std::vector<Axis*>& owned) {
+    // Column-major: a chunk of `chunk_rows` rows is chunk_rows elements
+    // along the row axis; gamma/beta are per-feature, so they do not move.
+    Axis* row = new Axis{"row0", static_cast<uint32_t>(m / chunk_rows),
+                         static_cast<uint64_t>(chunk_rows),
+                         static_cast<uint64_t>(chunk_rows), 0, 0};
+    owned.push_back(row);
+
+    auto inv = std::make_shared<Invocation>();
+    inv->kernel_name = layer ? "layernorm" : "rmsnorm";
+    inv->m = chunk_rows; inv->n = n; inv->ld_a = m; inv->ld_b = m;
+    inv->eps = 1e-5f;
+
+    auto it = std::make_shared<Iteration>();
+    it->axis = row; it->body = inv; it->is_parallel = true;
+    return it;
+}
+#endif  // BENCH_HAS_OMP
+
+static void teir_threading_section(double peak_ssve, double peak_chip) {
+    std::cout << "\n" << std::string(78, '=') << "\n"
+              << "SPRINT 5 - TEIR-INVOKED NORM, OpenMP ROW-PARALLEL\n"
+              << std::string(78, '=') << "\n";
+#if !BENCH_HAS_OMP
+    (void)peak_ssve; 
+    (void)peak_chip; 
+    std::cout << "OpenMP not available in this build - threaded scaling skipped.\n";
+    return;
+#else
+    // Shape matched to the chip probe's regime (128 MiB per array, well past
+    // the ~16 MB L2), so "% of chip" is apples-to-apples. An earlier run of
+    // this study used M=N=2048 (16 MiB/array): partly L2-resident and reused
+    // across timing reps, it reported 54 GiB/s against a 47 GiB/s DRAM
+    // ceiling — comparing a cache-assisted kernel to a DRAM-only probe, not
+    // a real result. Same trap Sprint 2a hit with "peak of WHAT".
+    const int64_t M = 4096, N = 8192, ld = M;
+    const double  bytes = norm_bytes(M, N);
+
+    std::vector<float> a(static_cast<size_t>(ld) * N), b(static_cast<size_t>(ld) * N);
+    std::vector<float> gamma(N), beta(N), expected(static_cast<size_t>(ld) * N);
+    for (size_t i = 0; i < a.size(); ++i) a[i] = 0.01f * float(i % 97);
+    for (int64_t j = 0; j < N; ++j) {
+        gamma[j] = 1.0f + 0.001f * float(j % 13);
+        beta[j]  = 0.01f * float(j % 7);
+    }
+
+    TeirRuntime runtime;
+    std::vector<Axis*> owned;
+
+    std::cout << "Shape M=" << M << " N=" << N
+              << "   working set " << (2.0 * bytes / (1 << 20)) / 2.0 << " MiB"
+              << "   bytes counted: useful (1R+1W)\n"
+              << "Ceilings: 1-core SSVE " << std::fixed << std::setprecision(1)
+              << peak_ssve << " GiB/s, chip-wide " << peak_chip << " GiB/s\n\n";
+
+    for (int layer = 0; layer <= 1; ++layer) {
+        const char* name = layer ? "LayerNorm" : "RMSNorm";
+
+        if (layer) layer_norm_ref(a.data(), expected.data(), gamma.data(), beta.data(),
+                                  M, N, ld, ld, 1e-5f);
+        else       rms_norm_ref(a.data(), expected.data(), gamma.data(),
+                                M, N, ld, ld, 1e-5f);
+
+        std::cout << name << "\n"
+                  << std::left << std::setw(9) << "threads"
+                  << std::setw(12) << "chunk rows"
+                  << std::setw(12) << "GiB/s"
+                  << std::setw(12) << "speedup"
+                  << std::setw(12) << "% of chip"
+                  << "correct\n"
+                  << std::string(70, '-') << "\n";
+
+        double base = 0.0;
+        for (int64_t threads : {1, 2, 4, 8, 16}) {
+            const int64_t chunk_rows = M / threads;
+            omp_set_num_threads(static_cast<int>(threads));
+            auto tree = build_norm_tree(layer != 0, M, N, chunk_rows, owned);
+
+            std::fill(b.begin(), b.end(), -1.0f);
+            if (layer) runtime.execute(tree.get(), a.data(), b.data(), gamma.data(), beta.data());
+            else       runtime.execute(tree.get(), a.data(), b.data(), gamma.data());
+
+            size_t bad = 0;
+            for (size_t i = 0; i < b.size(); ++i)
+                if (std::fabs(b[i] - expected[i]) > 1e-4f) ++bad;
+
+            double sec = bench([&]() {
+                if (layer) runtime.execute(tree.get(), a.data(), b.data(), gamma.data(), beta.data());
+                else       runtime.execute(tree.get(), a.data(), b.data(), gamma.data());
+            }, 5);
+
+            double gibs = to_gibs(bytes, sec);
+            if (threads == 1) base = gibs;
+
+            std::cout << std::left << std::setw(9) << threads
+                      << std::setw(12) << chunk_rows
+                      << std::setw(12) << std::fixed << std::setprecision(2) << gibs
+                      << std::setw(12) << (std::to_string(gibs / base).substr(0, 4) + "x")
+                      << std::setw(12) << (std::to_string(100.0 * gibs / peak_chip).substr(0, 4) + "%")
+                      << (bad == 0 ? "yes" : ("NO (" + std::to_string(bad) + " bad)"))
+                      << "\n";
+        }
+        std::cout << "\n";
+    }
+
+    for (Axis* ax : owned) delete ax;
+#endif
+}
 
 int main() {
     request_p_core();
@@ -948,6 +1137,8 @@ int main() {
         print_row("layer_norm_jit",     dm, dn, to_gibs((double)vbytes, (double)ln_jit_sec), (double)vpeak);
         std::cout << "\n";
     }
+
+    teir_threading_section((double)peak_ssve, (double)peak_chip);
 
     return 0;
 }

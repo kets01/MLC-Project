@@ -1,4 +1,5 @@
 #include "week7/TeirRuntime.h"
+#include "week7/TeirParser.h"
 #include <iostream>
 
 #if __has_include(<omp.h>)
@@ -8,33 +9,76 @@
 #define HAS_OMP 0
 #endif
 
+#ifndef MLC_PROJECT_DATA_DIR
+#define MLC_PROJECT_DATA_DIR "."
+#endif
+
 namespace mini_jit::teir {
 
 TeirRuntime::TeirRuntime() {
-    // Inner tile size is 16x16
-    unary_gen.generate(16, 16, 0, Unary::dtype_t::fp32, Unary::ptype_t::identity);
-    identity_kernel = unary_gen.get_kernel();
-
-    gemm_gen.generate(16, 16, 16, 0, 0, 0, Gemm::dtype_t::fp32);
-    gemm_kernel = gemm_gen.get_kernel();
+    // Emission is host-portable (only EXECUTING the emitted kernel needs
+    // SME), so no SME guard is needed here. Unary/Gemm kernels are no
+    // longer pre-generated at a fixed 16x16(x16) shape — the real .teir
+    // files each need their own shape (48x32, 32x64x512, ...), so those
+    // are generated lazily and cached by get_unary_kernel/get_gemm_kernel
+    // the first time a parsed Invocation asks for them.
+    if (norm_rms_gen.generate(mini_jit::Norm::ntype_t::rms) == mini_jit::Norm::error_t::success)
+        rmsnorm_kernel = norm_rms_gen.get_rms_kernel();
+    if (norm_layer_gen.generate(mini_jit::Norm::ntype_t::layer) == mini_jit::Norm::error_t::success)
+        layernorm_kernel = norm_layer_gen.get_layer_kernel();
 }
 
 mini_jit::teir::CompiledKernel TeirRuntime::compile(std::shared_ptr<Node> root) {
-    return [this, root](float* a, float* b, float* c) {
-        this->execute(root.get(), a, b, c);
+    return [this, root](float* a, float* b, float* c, float* d) {
+        this->execute(root.get(), a, b, c, d);
     };
 }
 
-std::shared_ptr<Node> TeirRuntime::load_teir(const std::string& filename) {
-    if (filename.find("transposition") != std::string::npos) return build_transposition_tree();
-    if (filename.find("matmul") != std::string::npos) return build_matmul_tree();
-    if (filename.find("contraction") != std::string::npos) return build_contraction_tree();
-    throw std::runtime_error("Unknown TEIR file");
+mini_jit::Unary::kernel_t TeirRuntime::get_unary_kernel(uint32_t m, uint32_t n,
+                                                        mini_jit::Unary::ptype_t ptype,
+                                                        uint32_t trans_b) {
+    auto key = std::make_tuple(m, n, static_cast<uint32_t>(ptype), trans_b);
+    std::lock_guard<std::mutex> lock(m_cache_mutex);
+    auto it = m_unary_cache.find(key);
+    if (it != m_unary_cache.end()) return it->second;
+
+    mini_jit::Unary gen;
+    gen.generate(m, n, trans_b, mini_jit::Unary::dtype_t::fp32, ptype);
+    mini_jit::Unary::kernel_t kernel = gen.get_kernel();
+    m_unary_cache[key] = kernel;
+    return kernel;
 }
 
-void TeirRuntime::execute(Node* root, float* a, float* b, float* c) {
+mini_jit::Gemm::kernel_t TeirRuntime::get_gemm_kernel(uint32_t m, uint32_t n, uint32_t k,
+                                                      uint32_t trans_a, uint32_t trans_b,
+                                                      uint32_t trans_c) {
+    auto key = std::make_tuple(m, n, k, trans_a | (trans_b << 1) | (trans_c << 2));
+    std::lock_guard<std::mutex> lock(m_cache_mutex);
+    auto it = m_gemm_cache.find(key);
+    if (it != m_gemm_cache.end()) return it->second;
+
+    mini_jit::Gemm gen;
+    if (gen.generate(m, n, k, trans_a, trans_b, trans_c,
+                     mini_jit::Gemm::dtype_t::fp32) != mini_jit::Gemm::error_t::success)
+        throw std::runtime_error("teir: Gemm generation failed (shape/layout unsupported)");
+    mini_jit::Gemm::kernel_t kernel = gen.get_kernel();
+    m_gemm_cache[key] = kernel;
+    return kernel;
+}
+
+std::shared_ptr<Node> TeirRuntime::load_teir(const std::string& filename) {
+    // A bare filename (no path separator) resolves against the project's
+    // data/ directory, so callers don't need to know where the build
+    // places the test/bench binary's working directory.
+    std::string path = filename;
+    if (path.find('/') == std::string::npos)
+        path = std::string(MLC_PROJECT_DATA_DIR) + "/" + path;
+    return parse_teir_file(path);
+}
+
+void TeirRuntime::execute(Node* root, float* a, float* b, float* c, float* d) {
     RuntimeContext ctx;
-    ctx.data_a = a; ctx.data_b = b; ctx.data_c = c;
+    ctx.data_a = a; ctx.data_b = b; ctx.data_c = c; ctx.data_d = d;
     traverse(root, ctx);
 }
 
@@ -52,74 +96,108 @@ void TeirRuntime::traverse(Node* node, RuntimeContext& ctx) {
                 if (local_ctx.data_a) local_ctx.data_a += i * ax->stride_a;
                 if (local_ctx.data_b) local_ctx.data_b += i * ax->stride_b;
                 if (local_ctx.data_c) local_ctx.data_c += i * ax->stride_c;
+                if (local_ctx.data_d) local_ctx.data_d += i * ax->stride_d;
+                local_ctx.axis_index[ax] = i;
                 traverse(iter->body.get(), local_ctx);
             }
         } else {
             for (uint32_t i = 0; i < ax->range; ++i) {
-                float* old_a = ctx.data_a; float* old_b = ctx.data_b; float* old_c = ctx.data_c;
-                
+                float* old_a = ctx.data_a; float* old_b = ctx.data_b;
+                float* old_c = ctx.data_c; float* old_d = ctx.data_d;
+
                 if (ctx.data_a) ctx.data_a += i * ax->stride_a;
                 if (ctx.data_b) ctx.data_b += i * ax->stride_b;
                 if (ctx.data_c) ctx.data_c += i * ax->stride_c;
-                
+                if (ctx.data_d) ctx.data_d += i * ax->stride_d;
+                ctx.axis_index[ax] = i;
+
                 traverse(iter->body.get(), ctx);
-                
+
                 // Restore pointers for next iteration
-                ctx.data_a = old_a; ctx.data_b = old_b; ctx.data_c = old_c;
+                ctx.data_a = old_a; ctx.data_b = old_b;
+                ctx.data_c = old_c; ctx.data_d = old_d;
             }
         }
-    } 
+    }
+    else if (auto* seq = dynamic_cast<Sequence*>(node)) {
+        for (auto& child : seq->children) traverse(child.get(), ctx);
+    }
     else if (auto* call = dynamic_cast<Invocation*>(node)) {
-        if (call->kernel_name == "identity" && identity_kernel) {
-            identity_kernel(ctx.data_a, ctx.data_b, 16, 16);
-        } else if (call->kernel_name == "gemm" && gemm_kernel) {
-            gemm_kernel(ctx.data_a, ctx.data_b, ctx.data_c, 16, 16, 16);
+        // `guard first(@axis)`: skip unless this is that axis's first step
+        // (e.g. contraction.teir zeros the accumulator only once, before
+        // the K-reduction loop accumulates into it).
+        if (call->guard_axis) {
+            auto idx_it = ctx.axis_index.find(call->guard_axis);
+            if (idx_it != ctx.axis_index.end() && idx_it->second != 0) return;
+        }
+
+        if (call->kernel_name == "identity") {
+            // trans_b=1 is the course-spec transposing copy (A col-major in,
+            // B row-major out) — the Copy primitive's layout flags are
+            // derived from the .teir strides by the parser.
+            auto kernel = get_unary_kernel(static_cast<uint32_t>(call->m),
+                                           static_cast<uint32_t>(call->n),
+                                           mini_jit::Unary::ptype_t::identity,
+                                           call->trans_b);
+            if (kernel) kernel(ctx.data_a, ctx.data_b, call->ld_a, call->ld_b);
+        } else if (call->kernel_name == "zero") {
+            // Zero writes the output tile ("out" -> pointer slot c). The
+            // parser normalized the tile to m runs of n contiguous floats,
+            // ld_b apart. Dense tiles (ld == run length, matmul.teir) are
+            // one kernel call; interleaved tiles (contraction.teir's q x s
+            // tile, where other axes sit between consecutive runs) are
+            // zeroed run by run.
+            if (call->ld_b == call->n) {
+                auto kernel = get_unary_kernel(static_cast<uint32_t>(call->m),
+                                               static_cast<uint32_t>(call->n),
+                                               mini_jit::Unary::ptype_t::zero, 0u);
+                if (kernel) kernel(nullptr, ctx.data_c, call->ld_a, call->ld_b);
+            } else {
+                auto kernel = get_unary_kernel(1u, static_cast<uint32_t>(call->n),
+                                               mini_jit::Unary::ptype_t::zero, 0u);
+                if (kernel)
+                    for (int64_t r = 0; r < call->m; ++r)
+                        kernel(nullptr, ctx.data_c + r * call->ld_b, call->ld_a, call->ld_b);
+            }
+        } else if (call->kernel_name == "gemm") {
+            auto kernel = get_gemm_kernel(static_cast<uint32_t>(call->m),
+                                          static_cast<uint32_t>(call->n),
+                                          static_cast<uint32_t>(call->k),
+                                          call->trans_a, call->trans_b, call->trans_c);
+            if (kernel) kernel(ctx.data_a, ctx.data_b, ctx.data_c,
+                               call->ld_a, call->ld_b, call->ld_c);
+        } else if (call->kernel_name == "rmsnorm" && rmsnorm_kernel) {
+            rmsnorm_kernel(ctx.data_a, ctx.data_b, ctx.data_c,
+                           call->m, call->n, call->ld_a, call->ld_b, call->eps);
+        } else if (call->kernel_name == "layernorm" && layernorm_kernel) {
+            layernorm_kernel(ctx.data_a, ctx.data_b, ctx.data_c, ctx.data_d,
+                             call->m, call->n, call->ld_a, call->ld_b, call->eps);
         }
     }
 }
 
-// Tensor (96, 128, 48, 32): outer loop slices at 16*128*48*32 = 3,145,728 elements.
-// Inner loop covers the rest of each slice in 256-element (16×16) kernel steps.
+// The five task builders are now thin wrappers around the real .teir
+// files in data/ — load_teir() parses each file's own tensors, axes,
+// primitives and schedule (including contraction.teir's `guard first`)
+// into the Node tree, rather than reproducing it by hand here.
 std::shared_ptr<Node> TeirRuntime::build_transposition_tree() {
-    const uint32_t tile = 16 * 16;  // elements per identity-kernel call
-    auto a = new Axis{"a", 96/16, 16*128*48*32, 16*128*48*32};
-    auto b = new Axis{"b", 128*48*32/16, tile, tile};
-    auto inv = std::make_shared<Invocation>(); inv->kernel_name = "identity";
-    auto lb = std::make_shared<Iteration>(); lb->axis = b; lb->body = inv;
-    auto la = std::make_shared<Iteration>(); la->axis = a; la->body = lb;
-    la->is_parallel = true;
-    return la;
+    return load_teir("transposition.teir");
 }
 
-// 512×512 matmul tiled by 16, row-major tile order.
-// A[m_tile, k_tile] at A + (m_tile*32 + k_tile)*256
-// B[k_tile, n_tile] at B + (k_tile*32 + n_tile)*256
-// C[m_tile, n_tile] at C + (m_tile*32 + n_tile)*256
 std::shared_ptr<Node> TeirRuntime::build_matmul_tree() {
-    const uint32_t N_tiles = 512/16;   // 32 tiles per dimension
-    const uint32_t tile    = 16 * 16;  // floats per tile
-    auto m = new Axis{"m", N_tiles, N_tiles*tile, 0,         N_tiles*tile};
-    auto n = new Axis{"n", N_tiles, 0,            tile,      tile};
-    auto k = new Axis{"k", N_tiles, tile,         N_tiles*tile, 0};
-    auto inv = std::make_shared<Invocation>(); inv->kernel_name = "gemm";
-    auto lk = std::make_shared<Iteration>(); lk->axis = k; lk->body = inv;
-    auto ln = std::make_shared<Iteration>(); ln->axis = n; ln->body = lk;
-    auto lm = std::make_shared<Iteration>(); lm->axis = m; lm->body = ln;
-    lm->is_parallel = true;
-    return lm;
+    return load_teir("matmul.teir");
 }
 
-// Small contraction — 16×16 p/q tile loops, all offsets well within the
-// 256*256*16 = 1,048,576-float test buffers.
 std::shared_ptr<Node> TeirRuntime::build_contraction_tree() {
-    const uint32_t tile = 16 * 16;
-    auto p = new Axis{"p", 16, tile, 0,    tile};
-    auto q = new Axis{"q", 16, 0,   tile,  tile};
-    auto inv = std::make_shared<Invocation>(); inv->kernel_name = "gemm";
-    auto lq = std::make_shared<Iteration>(); lq->axis = q; lq->body = inv;
-    auto lp = std::make_shared<Iteration>(); lp->axis = p; lp->body = lq;
-    lp->is_parallel = true;
-    return lp;
+    return load_teir("contraction.teir");
+}
+
+std::shared_ptr<Node> TeirRuntime::build_rmsnorm_tree() {
+    return load_teir("rmsnorm.teir");
+}
+
+std::shared_ptr<Node> TeirRuntime::build_layernorm_tree() {
+    return load_teir("layernorm.teir");
 }
 
 }

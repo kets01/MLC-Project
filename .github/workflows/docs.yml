@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Sphinx
-        run: pip install sphinx sphinx-rtd-theme
+        run: pip install sphinx furo
       - name: Build Documentation
         run: |
           cd docs

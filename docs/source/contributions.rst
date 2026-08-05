@@ -5,15 +5,15 @@ We share responsibilities to ensure both members understand the full stack of th
 
 Week 1
 ------
-   * **Mariza Yamdjeu**: 
-    * Implemented ``inner_product_asm`` .
+* **Mariza Yamdjeu**:
+    * Implemented ``inner_product_asm``.
     * Set up the CMake build system and Catch2 integration.
     * Performed debugging verification via LLDB/GDB.
 
-* **Ketsia Kemkuini**: 
+* **Ketsia Kemkuini**:
     * Implemented ``outer_product_asm`` with pointer-increment optimization.
     * Configured the GitHub Actions CI pipeline.
-    * Sphinx documentation .
+    * Sphinx documentation.
 
 
 Week 2
@@ -71,16 +71,14 @@ Week 5
 Week 6
 ------
 * **Ketsia Kemkuini**
-  * Implemented the JIT code generation logic for the gemm kernel.
-  * Testesd the generated code for correctness and performance for gemm
-  * Conducted benchmarking for the 27 settings and reported performance metrics.
- 
-
+    * Implemented the JIT code generation logic for the gemm kernel.
+    * Tested the generated code for correctness and performance for gemm.
+    * Conducted benchmarking for the 27 settings and reported performance metrics.
 
 * **Mariza Yamdjeu**
-  * Implemented the JIT code generation logic for the unary kernel.
-  * Testesd the generated code for correctness and performance for each unary primitive (identity, zero, relu).
-  * Conducted benchmarking for the 9 Unary kernel (primitive identity) settings and reported performance metrics in GiB/s.
+    * Implemented the JIT code generation logic for the unary kernel.
+    * Tested the generated code for correctness and performance for each unary primitive (identity, zero, relu).
+    * Conducted benchmarking for the 9 Unary kernel (primitive identity) settings and reported performance metrics in GiB/s.
 
 Week 7
 ------

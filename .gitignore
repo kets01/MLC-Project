@@ -45,6 +45,11 @@ mlc_env/
 
 #build files
 build/
+# Sphinx output: docs/Makefile and docs/make.bat both set BUILDDIR=build (and
+# docs.yml publishes docs/build/html), so docs/build/ is what a local
+# `make html` actually produces; docs/_build/ is sphinx-quickstart's default,
+# kept in case anyone builds with it.
+docs/build/
 docs/_build/
 
 .vscode/

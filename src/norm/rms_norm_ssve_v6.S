@@ -50,13 +50,25 @@
 
 SYMBOL(rms_norm_ssve_v6):
 
-    // Prologue — frame extended to 80 bytes (was 64) to fit a dedicated eps
-    // stash slot at [sp,#64] alongside the original layout.
-    stp  x19, x20, [sp, #-80]!
+    // Prologue — frame extended to 128 bytes (was 80) to save the FULL
+    // d8-d15 callee-saved range (AAPCS64), not just d8.  smstart/smstop
+    // clobber all of d8-d15 (they alias the low bits of z8-z15), so a
+    // caller holding live values in d9-d15 across this call would
+    // otherwise have them silently zeroed (Sprint-5 prerequisite fix —
+    // this was previously masked by a caller-side `volatile` workaround
+    // in the bench harness, which a real TEIR caller will not have).
+    stp  x19, x20, [sp, #-128]!
     stp  x21, x22, [sp, #16]
     stp  x23, x24, [sp, #32]
     str  x25,      [sp, #48]
     str  d8,       [sp, #56]
+    str  d9,       [sp, #64]
+    str  d10,      [sp, #72]
+    str  d11,      [sp, #80]
+    str  d12,      [sp, #88]
+    str  d13,      [sp, #96]
+    str  d14,      [sp, #104]
+    str  d15,      [sp, #112]
 
     mov   x19, x0
     mov   x20, x1
@@ -66,7 +78,7 @@ SYMBOL(rms_norm_ssve_v6):
     lsl   x24, x5, #2          // stride_a in bytes
     lsl   x25, x6, #2          // stride_b in bytes
     fmov  s8,  s0
-    str   s0,  [sp, #64]       // dedicated eps stash, stored BEFORE smstart
+    str   s0,  [sp, #120]      // dedicated eps stash, stored BEFORE smstart
                                 // (streaming-mode entry clobbers D8 too, not
                                 // just D9-D15 — memory survives smstart, no
                                 // register does; verified empirically)
@@ -76,7 +88,7 @@ SYMBOL(rms_norm_ssve_v6):
     smstart sm
     ptrue  p0.s, all
 
-    ldr    s0, [sp, #64]       // eps reloaded from the dedicated stack slot
+    ldr    s0, [sp, #120]      // eps reloaded from the dedicated stack slot
     dup    z8.s, z0.s[0]       // z8 = {eps, ...}
 
     fmov  s0, #1.0
@@ -237,8 +249,15 @@ SYMBOL(rms_norm_ssve_v6):
 
 .Lrow_done_v6:
     ldr  d8,       [sp, #56]
+    ldr  d9,       [sp, #64]
+    ldr  d10,      [sp, #72]
+    ldr  d11,      [sp, #80]
+    ldr  d12,      [sp, #88]
+    ldr  d13,      [sp, #96]
+    ldr  d14,      [sp, #104]
+    ldr  d15,      [sp, #112]
     ldr  x25,      [sp, #48]
     ldp  x23, x24, [sp, #32]
     ldp  x21, x22, [sp, #16]
-    ldp  x19, x20, [sp], #80
+    ldp  x19, x20, [sp], #128
     ret

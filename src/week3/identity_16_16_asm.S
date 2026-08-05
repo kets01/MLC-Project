@@ -10,22 +10,81 @@
 .align 2
 SYMBOL(identity_16_16_asm):
 // x0: a (src), x1: b (dst), x2: ld_a, x3: ld_b, w4: trans_b
-    smstart  sm            // Enter SSVE Mode
-    ptrue   p0.s, vl16            // Governing Predicate 
-    
+//
+// Bare SMSTART/SMSTOP (not "smstart sm"): the trans_b == 1 path stages the
+// transpose through a ZA tile, so PSTATE.ZA must be enabled too.  SMSTOP
+// disables both again before returning, so no ZA state is live across the
+// call (AAPCS64 lazy-save hazard avoided).
+    smstart                        // Enter SSVE mode + enable ZA
+    ptrue   p0.s, vl16             // Governing Predicate (16 fp32 lanes)
+
     cbz     w4, 2f          // If trans_b == 0, jump to col_major
-    // CASE: trans_b == 1 (Row-Major store)
-    index   z31.s, #0 , #1    // Create offsets:  // z1 = [0, 1, 2, 3, ... 15] 
-    dup     z30.s, w3                // Broadcast ld_b (w3) into every lane of z2
-    mul     z31.s, p0/m, z31.s, z30.s  // z1 = z1 * z2 = [0, ld_b, 2*ld_b, ...]
-    mov     x5, #16         // 16 columns
+    // -----------------------------------------------------------------
+    // CASE: trans_b == 1 — A column-major in, B row-major out, i.e.
+    //   b[i*ld_b + j] = a[i + j*ld_a]   (row i of B == row i of A)
+    //
+    // This is a real memory transpose: the 16 values of one A column are
+    // contiguous, but they belong to 16 DIFFERENT rows of B, 16 addresses
+    // ld_b apart.  A scatter store (ST1W with a vector of offsets) would
+    // express that directly, and this kernel used to do exactly that --
+    // but scatter/gather with vector offsets is NOT available inside
+    // streaming mode without FEAT_SME_FA64, which Apple has not
+    // implemented.  (Same constraint documented in src/norm/rms_norm_ssve.S,
+    // and the reason every norm kernel uses scalar-base LD1W/ST1W.)  The
+    // old version therefore never completed on M4; CI never caught it
+    // because the CI runners have no SME and skip the whole test case.
+    //
+    // The fix uses the ZA array for what context.md 5 sanctions it for --
+    // 2-D data movement.  Load A's columns into ZA HORIZONTAL slices, then
+    // read VERTICAL slices back out: slice j holds A column j, so
+    // za0[j][i] = a[i + j*ld_a], and vertical slice i is
+    // { za0[j][i] for j } = row i of A -- exactly the 16 contiguous floats
+    // row i of B needs.  Every slice is written before it is read, so no
+    // "zero {za}" is required.
+    //
+    // The fp32 MOVA slice-offset immediate is only 2 bits (0-3); the full
+    // 0-15 slice index is W12 (which must be W12-W15) plus that offset,
+    // hence 4 groups of 4 with W12 stepping by 4.
+    // -----------------------------------------------------------------
+    mov     x6, x0          // running A pointer (walks columns)
+    mov     w12, #0         // ZA slice base
+    mov     x5, #4          // 4 groups x 4 slices = 16 columns
 1:
-    ld1w    {z0.s}, p0/z, [x0]               // Load contiguous col from A 
-    st1w    {z0.s}, p0, [x1, z31.s, uxtw #2] // Scatter Store into rows of B 
-    add     x0, x0, x2, lsl #2             // A += ld_a * 4
-    add     x1, x1, #4                     // B += 1 float (move to next col in row)
+    ld1w    {z0.s}, p0/z, [x6]              // A column j (contiguous)
+    mova    za0h.s[w12, 0], p0/m, z0.s      // -> horizontal slice j
+    add     x6, x6, x2, lsl #2              // A += ld_a * 4 (next column)
+    ld1w    {z0.s}, p0/z, [x6]
+    mova    za0h.s[w12, 1], p0/m, z0.s
+    add     x6, x6, x2, lsl #2
+    ld1w    {z0.s}, p0/z, [x6]
+    mova    za0h.s[w12, 2], p0/m, z0.s
+    add     x6, x6, x2, lsl #2
+    ld1w    {z0.s}, p0/z, [x6]
+    mova    za0h.s[w12, 3], p0/m, z0.s
+    add     x6, x6, x2, lsl #2
+    add     w12, w12, #4
     subs    x5, x5, #1
     b.ne    1b
+
+    mov     x7, x1          // running B pointer (walks rows)
+    mov     w12, #0
+    mov     x5, #4
+5:
+    mova    z0.s, p0/m, za0v.s[w12, 0]      // vertical slice i = row i of A
+    st1w    {z0.s}, p0, [x7]                // -> row i of B (contiguous)
+    add     x7, x7, x3, lsl #2              // B += ld_b * 4 (next row)
+    mova    z0.s, p0/m, za0v.s[w12, 1]
+    st1w    {z0.s}, p0, [x7]
+    add     x7, x7, x3, lsl #2
+    mova    z0.s, p0/m, za0v.s[w12, 2]
+    st1w    {z0.s}, p0, [x7]
+    add     x7, x7, x3, lsl #2
+    mova    z0.s, p0/m, za0v.s[w12, 3]
+    st1w    {z0.s}, p0, [x7]
+    add     x7, x7, x3, lsl #2
+    add     w12, w12, #4
+    subs    x5, x5, #1
+    b.ne    5b
     b       3f
 
     // CASE: trans_b == 0 (Col-Major store)
@@ -56,6 +115,6 @@ SYMBOL(identity_16_16_asm):
     b.ne    4b
 
 3:
-    smstop  sm           // Exit SSVE
+    smstop               // Exit SSVE and disable ZA
     ret
 

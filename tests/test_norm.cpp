@@ -1413,7 +1413,7 @@ TEST_CASE("Sprint4 encoding diff: JIT RMSNorm == assembled rms_norm_ssve_v6",
           "[norm][sprint4][encoding-diff]") {
     Norm gen;
     REQUIRE(gen.generate(Norm::ntype_t::rms) == Norm::error_t::success);
-    REQUIRE(gen.words().size() == 143);        // instruction count of the .S
+    REQUIRE(gen.words().size() == 157);        // instruction count of the .S
     encoding_diff(gen.words(), linked_words(&::rms_norm_ssve_v6));
 }
 
@@ -1421,7 +1421,7 @@ TEST_CASE("Sprint4 encoding diff: JIT LayerNorm == assembled layer_norm_ssve_v6"
           "[norm][sprint4][encoding-diff]") {
     Norm gen;
     REQUIRE(gen.generate(Norm::ntype_t::layer) == Norm::error_t::success);
-    REQUIRE(gen.words().size() == 194);
+    REQUIRE(gen.words().size() == 208);
     encoding_diff(gen.words(), linked_words(&::layer_norm_ssve_v6));
 }
 
@@ -1478,4 +1478,113 @@ TEST_CASE("Sprint4 JIT kernels: all-constant row is finite (eps regression)",
         REQUIRE(std::isfinite(bl[i]));
         REQUIRE(bl[i] == Approx(0.5f).margin(1e-6f));
     }
+}
+
+// ===========================================================================
+// Sprint 5 — AAPCS64 prerequisite: d8-d15 must survive the call
+//
+// The bug: rms_norm_ssve_v6 / layer_norm_ssve_v6 only saved/restored d8, not
+// the full d8-d15 range smstart/smstop clobber. Invisible to every other
+// test here because none of them hold a live value in d9-d15 across the
+// call — Catch2's own call sequence doesn't happen to. main_norm's bench
+// harness masked it caller-side with `volatile` doubles; a real TEIR caller
+// won't have that workaround, so this is a required fix, not cleanup.
+//
+// To actually observe the bug (or its fix) we need a value physically
+// resident in a specific d9-d15 register when the kernel is entered, then
+// re-read from that same physical register afterward — a plain C++ local
+// survives a call regardless of what the callee does, so it can't tell us
+// anything. GCC/Clang's local register variables (`register T x asm("dN")`)
+// pin a variable to an exact hardware register; combined with an `asm`
+// barrier before (to force materializing our test pattern into the
+// register, not just a compiler-tracked constant) and one after (to force
+// re-reading the register's actual contents instead of assuming the ABI
+// held), this reproduces exactly what a real callee-saved-register-holding
+// caller like TEIR would see.
+// ===========================================================================
+
+TEST_CASE("Sprint5 AAPCS64: d9-d15 survive the RMSNorm V6 kernel call",
+          "[norm][sprint5][abi]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 64, N = 64, ld = M;
+    std::vector<float> a(ld * N), b(ld * N, 0.0f), gamma(N, 1.0f);
+    for (int64_t i = 0; i < ld * N; ++i) a[i] = 0.01f * float(i % 97);
+
+    register double r9  asm("d9");
+    register double r10 asm("d10");
+    register double r11 asm("d11");
+    register double r12 asm("d12");
+    register double r13 asm("d13");
+    register double r14 asm("d14");
+    register double r15 asm("d15");
+
+    asm volatile("fmov d9,  #2.0\n\t"
+                 "fmov d10, #3.0\n\t"
+                 "fmov d11, #4.0\n\t"
+                 "fmov d12, #5.0\n\t"
+                 "fmov d13, #6.0\n\t"
+                 "fmov d14, #7.0\n\t"
+                 "fmov d15, #8.0\n\t"
+                 : "=w"(r9), "=w"(r10), "=w"(r11), "=w"(r12), "=w"(r13),
+                   "=w"(r14), "=w"(r15));
+
+    ::rms_norm_ssve_v6(a.data(), b.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+
+    asm volatile("" : "+w"(r9), "+w"(r10), "+w"(r11), "+w"(r12), "+w"(r13),
+                       "+w"(r14), "+w"(r15));
+
+    REQUIRE(r9  == 2.0);
+    REQUIRE(r10 == 3.0);
+    REQUIRE(r11 == 4.0);
+    REQUIRE(r12 == 5.0);
+    REQUIRE(r13 == 6.0);
+    REQUIRE(r14 == 7.0);
+    REQUIRE(r15 == 8.0);
+
+    for (int64_t i = 0; i < ld * N; ++i) REQUIRE(std::isfinite(b[i]));
+}
+
+TEST_CASE("Sprint5 AAPCS64: d9-d15 survive the LayerNorm V6 kernel call",
+          "[norm][sprint5][abi]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 64, N = 64, ld = M;
+    std::vector<float> a(ld * N), b(ld * N, 0.0f);
+    std::vector<float> gamma(N, 1.0f), beta(N, 0.0f);
+    for (int64_t i = 0; i < ld * N; ++i) a[i] = 0.01f * float(i % 97);
+
+    register double r9  asm("d9");
+    register double r10 asm("d10");
+    register double r11 asm("d11");
+    register double r12 asm("d12");
+    register double r13 asm("d13");
+    register double r14 asm("d14");
+    register double r15 asm("d15");
+
+    asm volatile("fmov d9,  #2.0\n\t"
+                 "fmov d10, #3.0\n\t"
+                 "fmov d11, #4.0\n\t"
+                 "fmov d12, #5.0\n\t"
+                 "fmov d13, #6.0\n\t"
+                 "fmov d14, #7.0\n\t"
+                 "fmov d15, #8.0\n\t"
+                 : "=w"(r9), "=w"(r10), "=w"(r11), "=w"(r12), "=w"(r13),
+                   "=w"(r14), "=w"(r15));
+
+    ::layer_norm_ssve_v6(a.data(), b.data(), gamma.data(), beta.data(),
+                       M, N, ld, ld, 1e-5f);
+
+    asm volatile("" : "+w"(r9), "+w"(r10), "+w"(r11), "+w"(r12), "+w"(r13),
+                       "+w"(r14), "+w"(r15));
+
+    REQUIRE(r9  == 2.0);
+    REQUIRE(r10 == 3.0);
+    REQUIRE(r11 == 4.0);
+    REQUIRE(r12 == 5.0);
+    REQUIRE(r13 == 6.0);
+    REQUIRE(r14 == 7.0);
+    REQUIRE(r15 == 8.0);
+
+    for (int64_t i = 0; i < ld * N; ++i) REQUIRE(std::isfinite(b[i]));
 }

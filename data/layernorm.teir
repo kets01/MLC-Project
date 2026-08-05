@@ -1,0 +1,19 @@
+teir @layernorm {
+  tensor %in    : f32
+  tensor %out   : f32
+  tensor %gamma : f32
+  tensor %beta  : f32
+
+  axis @row0 extent 4   strides { in: 512,  out: 512 }
+  axis @row1 extent 128 strides { in: 4,    out: 4 }
+  axis @feat extent 512 strides { in: 2048, out: 2048, gamma: 4, beta: 4 }
+
+  primitive @layernorm : LayerNorm axes { M: [@row1], N: [@feat] } metadata { data_type: f32, eps: 1e-5 }
+
+  schedule {
+    roots [@iter_row0]
+
+    iter @iter_row0 axis @row0 policy parallel children [@inv_layernorm]
+    invoke @inv_layernorm primitive @layernorm
+  }
+}

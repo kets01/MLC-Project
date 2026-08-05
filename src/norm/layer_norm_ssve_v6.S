@@ -43,11 +43,25 @@
 
 SYM(layer_norm_ssve_v6):
 
-    stp  x19, x20, [sp, #-80]!
+    // Prologue — frame extended to 144 bytes (was 80) to save the FULL
+    // d8-d15 callee-saved range (AAPCS64), not just d8.  smstart/smstop
+    // clobber all of d8-d15 (they alias the low bits of z8-z15), so a
+    // caller holding live values in d9-d15 across this call would
+    // otherwise have them silently zeroed (Sprint-5 prerequisite fix —
+    // this was previously masked by a caller-side `volatile` workaround
+    // in the bench harness, which a real TEIR caller will not have).
+    stp  x19, x20, [sp, #-144]!
     stp  x21, x22, [sp, #16]
     stp  x23, x24, [sp, #32]
     stp  x25, x26, [sp, #48]
     str  d8,       [sp, #64]
+    str  d9,       [sp, #72]
+    str  d10,      [sp, #80]
+    str  d11,      [sp, #88]
+    str  d12,      [sp, #96]
+    str  d13,      [sp, #104]
+    str  d14,      [sp, #112]
+    str  d15,      [sp, #120]
 
     mov   x19, x0
     mov   x20, x1
@@ -58,17 +72,19 @@ SYM(layer_norm_ssve_v6):
     lsl   x25, x6, #2
     lsl   x26, x7, #2
     fmov  s8, s0
-    str   s0, [sp, #72]            // dedicated eps stash, stored BEFORE smstart
+    str   s0, [sp, #128]           // dedicated eps stash, stored BEFORE smstart
                                     // (streaming-mode entry clobbers D8 too, not
                                     // just D9-D15 — memory survives smstart, no
                                     // register does; verified empirically)
 
-    cbz   x23, .Ldone_v6
+    cbz   x23, .Lret_v6            // m == 0: never enter the streaming region,
+                                    // so skip the smstop as well (rms_norm_ssve_v6.S
+                                    // already lands past its own smstop here)
 
     smstart sm
     ptrue p0.s, all
 
-    ldr   s0, [sp, #72]            // eps reloaded from the dedicated stack slot
+    ldr   s0, [sp, #128]           // eps reloaded from the dedicated stack slot
     dup   z7.s, z0.s[0]
 
     fmov  s0, #1.0
@@ -292,9 +308,17 @@ SYM(layer_norm_ssve_v6):
 .Ldone_v6:
     smstop sm
 
+.Lret_v6:
     ldr  d8,       [sp, #64]
+    ldr  d9,       [sp, #72]
+    ldr  d10,      [sp, #80]
+    ldr  d11,      [sp, #88]
+    ldr  d12,      [sp, #96]
+    ldr  d13,      [sp, #104]
+    ldr  d14,      [sp, #112]
+    ldr  d15,      [sp, #120]
     ldp  x25, x26, [sp, #48]
     ldp  x23, x24, [sp, #32]
     ldp  x21, x22, [sp, #16]
-    ldp  x19, x20, [sp], #80
+    ldp  x19, x20, [sp], #144
     ret

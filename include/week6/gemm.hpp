@@ -17,18 +17,39 @@ class mini_jit::Gemm {
 
     /// error codes
     enum class error_t : int32_t {
-      success = 0
+      success               = 0,
+      err_unsupported_dtype = 1,   // fp64 emission not implemented (no callers)
+      err_shape             = 2    // m, n: positive multiples of 16; k: positive
     };
 
     /**
-     * @brief Generate a kernel for matrix multiplication.
-     * @param m       Number of rows in A and C.
-     * @param n       Number of columns in B and C.
-     * @param k       Number of columns in A and rows in B.
-     * @param trans_a 0 if A is stored in column-major order, 1 if A is stored in row-major order.
-     * @param trans_b 0 if B is stored in column-major order, 1 if B is stored in row-major order.
-     * @param trans_c 0 if C is stored in column-major order, 1 if C is stored in row-major order.
-     * @param dtype   Data type of the matrices.
+     * @brief Generate a kernel computing C += A * B (accumulating — the
+     *        TEIR schedules zero C once via the guarded Zero primitive and
+     *        then invoke GEMM repeatedly over outer K chunks, so the kernel
+     *        must accumulate; this also matches the week3 hand-written
+     *        kernels, which load C into ZA before the FMOPA loop).
+     *
+     * Layout semantics (ld_* are element counts, passed at CALL time):
+     *   trans_a=0: A column-major (M contiguous), ld_a = distance between columns.
+     *   trans_a=1: A row-major (K contiguous),    ld_a = distance between rows.
+     *   trans_b=0: B column-major (K contiguous), ld_b = distance between columns.
+     *   trans_b=1: B row-major (N contiguous),    ld_b = distance between rows.
+     *   trans_c likewise for C.
+     *
+     * FMOPA needs A's M-direction and B's N-direction as vectors; layouts
+     * where that direction is not contiguous (trans_a=1, trans_b=0) are
+     * handled by staging 16x16 chunks through a ZA tile (contiguous loads
+     * into horizontal slices, transposed vectors read back from vertical
+     * slices) — streaming mode has no gather loads on this target.
+     *
+     * @param m       Number of rows in A and C (multiple of 16).
+     * @param n       Number of columns in B and C (multiple of 16).
+     * @param k       Number of columns in A and rows in B (arbitrary, > 0;
+     *                full 16-wide chunks plus a predicated remainder chunk).
+     * @param trans_a 0 if A is stored in column-major order, 1 if row-major.
+     * @param trans_b 0 if B is stored in column-major order, 1 if row-major.
+     * @param trans_c 0 if C is stored in column-major order, 1 if row-major.
+     * @param dtype   Data type of the matrices (fp32 only).
      * @return error_t::success on success, another error_t value otherwise.
      **/
     error_t generate( uint32_t m,

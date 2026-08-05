@@ -51,7 +51,7 @@ form.
 Use ``X5`` (``ld_a`` in elements, the original argument, still live in the
 register) and ``X6`` (``ld_b`` in elements) directly with the ``LSL #2`` shift:
 
-.. code-block:: asm
+.. code-block:: text
 
     // Before (wrong — X24 is bytes):
     ld1w {z6.s}, p1/z, [x8, x24]
@@ -83,7 +83,7 @@ V0 and V1 were unaffected.
 streaming mode.  In V2 and V3, the ``1/N`` pre-computation was performed before
 ``SMSTART``:
 
-.. code-block:: asm
+.. code-block:: text
 
     fmov  s0, #1.0
     scvtf s1, x23      // float(N)
@@ -102,7 +102,7 @@ Move the scalar ``FDIV`` and ``DUP`` to **after** ``SMSTART SM``.  Scalar NEON
 instructions (``FMOV``, ``SCVTF``, ``FDIV``) are legal in streaming SVE mode on
 SME1:
 
-.. code-block:: asm
+.. code-block:: text
 
     smstart sm
     ptrue  p0.s, all
@@ -137,7 +137,7 @@ The reference output for row 6 was ``0.0`` (that row's input was exactly zero).
 Same underlying cause as Error 3, but for ``eps``.  The V1/V2/V3 prologue saves
 ``eps`` into S8 (a scalar alias for the low 32 bits of Z8) with:
 
-.. code-block:: asm
+.. code-block:: text
 
     fmov  s8, s0     // save eps into callee-saved S8
     str   d8, [sp, #56]   // and spill D8 to the stack
@@ -157,7 +157,7 @@ zero-sum row.
 After every ``SMSTART SM`` in V1, V2, and V3, reload ``eps`` from the D8 stack
 slot (written by the prologue's ``STR D8, [SP, #56]``) and re-broadcast:
 
-.. code-block:: asm
+.. code-block:: text
 
     smstart sm
     ptrue  p0.s, all

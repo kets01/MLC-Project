@@ -54,31 +54,32 @@ executed successfully, confirming that:
 
 **Resolution of Encoding Issues**
 
-Initial attempts resulted in Illegal instruction: 4. This was resolved by reviewing our encoding process:
+Initial attempts resulted in ``Illegal instruction: 4``. This was resolved by reviewing our encoding process:
 
-```bash
-# 1. Compile with clang to handle #ifdefs and SME/SVE architecture flags
-clang -arch arm64 -march=armv9-a+sme+sve -c gemm_512_512_512.S -o temp.o
+.. code-block:: bash
 
-# 2. Extract opcodes and format into a C++ uint32_t array
-/opt/homebrew/opt/llvm/bin/llvm-objdump -d temp.o | ./formatter.o
+   # 1. Compile with clang to handle #ifdefs and SME/SVE architecture flags
+   clang -arch arm64 -march=armv9-a+sme+sve -c gemm_512_512_512.S -o temp.o
+
+   # 2. Extract opcodes and format into a C++ uint32_t array
+   /opt/homebrew/opt/llvm/bin/llvm-objdump -d temp.o | ./formatter.o
 
 Runtime Execution Results
 -------------------------
 
-The following table shows the performance for our differents kernels (Identity, ReLU, Zero, and GEMM).
+The following table shows the performance for our different kernels (Identity, ReLU, Zero, and GEMM).
 
-+--------------+--------------+
-| Kernel       | Performance  | 
-+==============+==============+
-| JIT Identity | 22.11 GiB/s  |
-+--------------+--------------+
-| JIT ReLU     |21.95 GiB/s   |
-+--------------+--------------+
-| JIT Zero     |16.46 GiB/s   |
-+--------------+--------------+
-| JIT GEMM	   |1516.56 GFLOPS|
-+--------------+--------------+
++--------------+----------------+
+| Kernel       | Performance    |
++==============+================+
+| JIT Identity | 22.11 GiB/s    |
++--------------+----------------+
+| JIT ReLU     | 21.95 GiB/s    |
++--------------+----------------+
+| JIT Zero     | 16.46 GiB/s    |
++--------------+----------------+
+| JIT GEMM     | 1516.56 GFLOPS |
++--------------+----------------+
 
-The overall performance looks similar to week3 implementation(without JIT), proving that the dynamic generation process introduces zero runtime overhead.
+The overall performance looks similar to the Week 3 implementation (without JIT), proving that the dynamic generation process introduces zero runtime overhead.
 

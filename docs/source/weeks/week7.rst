@@ -1,5 +1,5 @@
 Week 7: Tiled Execution Intermediate Representation (TEIR)
-=========================================================
+============================================================
 
 This week involved implementing a **TEIR Runtime** to orchestrate large-scale tensor operations. The system serves as a bridge between high-level tensor descriptions (TEIR trees) and the optimized SSVE/SME micro-kernels developed in previous weeks.
 
