@@ -720,6 +720,63 @@ TEST_CASE("LayerNorm SSVE V6: large-magnitude stress input", "[norm][sprint2c][s
     check_ln_variant_stress(layer_norm_ssve_v6);
 }
 
+
+// ---------------------------------------------------------------------------
+// Sprint 6 — LayerNorm V7: V6 with SME2 multi-vector LD1W/ST1W.
+//
+// Built to test whether RMSNorm V7's (surprising) DRAM win is norm-agnostic.
+// Like its RMSNorm twin this folds four accesses into one without changing a
+// single value, so the binding requirement is bit-identity with V6, and the
+// shape set walks the SME2 group path, the plain-SVE tail, and the boundary
+// between them.  Guarded on SME (not SME2) because the wrapper falls back to
+// V6, so the callable contract holds on any SME machine.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("LayerNorm SSVE V7 (SME2): group, group+tail, tail-only",
+          "[norm][sprint6][sme2][v7]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v7, 64,  32,  64,  64, 1e-5f);   // one full group
+    check_ln_variant(layer_norm_ssve_v7, 100, 50, 100, 100, 1e-5f);   // group + tail
+    check_ln_variant(layer_norm_ssve_v7, 8,   37,   8,   8, 1e-5f);   // tail only
+    check_ln_variant(layer_norm_ssve_v7, 192, 37, 200, 224, 1e-5f);   // groups, padded ld
+    check_ln_variant(layer_norm_ssve_v7, 128,  1, 128, 128, 1e-5f);   // N=1
+}
+
+TEST_CASE("LayerNorm SSVE V7 (SME2): large-magnitude stress input",
+          "[norm][sprint6][sme2][v7][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant_stress(layer_norm_ssve_v7);
+}
+
+TEST_CASE("LayerNorm SSVE V7 (SME2): bit-identical to V6",
+          "[norm][sprint6][sme2][v7]") {
+    if (!cpu_supports_sme())  SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required (V7 falls back to V6)");
+
+    for (auto shape : { std::pair<int64_t,int64_t>{64, 32},
+                        std::pair<int64_t,int64_t>{100, 50},
+                        std::pair<int64_t,int64_t>{192, 37} }) {
+        const int64_t M = shape.first, N = shape.second, ld = M;
+        std::vector<float> gamma(N), beta(N);
+        for (int64_t i = 0; i < N; ++i) {
+            gamma[i] = 0.5f + 0.05f * static_cast<float>(i % 17);
+            beta[i]  = 0.1f  * static_cast<float>(i % 13) - 0.3f;
+        }
+        auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+            return static_cast<float>((r * 11 + c * 7) % 19) - 9.0f;
+        });
+        std::vector<float> b6(ld * N, 0.0f), b7(ld * N, 0.0f);
+        layer_norm_ssve_v6(a.data(), b6.data(), gamma.data(), beta.data(),
+                           M, N, ld, ld, 1e-5f);
+        layer_norm_ssve_v7(a.data(), b7.data(), gamma.data(), beta.data(),
+                           M, N, ld, ld, 1e-5f);
+        for (int64_t i = 0; i < ld * N; ++i) {
+            INFO("M=" << M << " N=" << N << " index " << i);
+            REQUIRE(b7[i] == b6[i]);
+        }
+    }
+}
+
 TEST_CASE("LayerNorm SSVE Welford: large-magnitude stress input (the stability claim)", "[norm][sprint2c][ssve][layernorm][welford][stress]") {
     if (!cpu_supports_sme()) SKIP("SME required");
     check_ln_variant_stress(layer_norm_ssve_welford);
@@ -1359,6 +1416,7 @@ TEST_CASE("LayerNorm SSVE kernels: all-constant row is finite (eps regression)",
     check(layer_norm_ssve_v4,       "layer_norm_ssve_v4");
     check(layer_norm_ssve_v5,       "layer_norm_ssve_v5");
     check(layer_norm_ssve_v6,       "layer_norm_ssve_v6");
+    check(layer_norm_ssve_v7,       "layer_norm_ssve_v7");
     check(layer_norm_ssve_welford,  "layer_norm_ssve_welford");
 }
 
@@ -1690,6 +1748,7 @@ TEST_CASE("Sprint6 AAPCS64: every LayerNorm kernel preserves d9-d15",
     check(layer_norm_ssve_v4);
     check(layer_norm_ssve_v5);
     check(mini_jit::norm::layer_norm_ssve_v6);   // qualified — see RMSNorm note
+    check(layer_norm_ssve_v7);
     check(layer_norm_ssve_welford);
     check(layer_norm_za);
 }
