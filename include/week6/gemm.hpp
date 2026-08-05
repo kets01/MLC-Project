@@ -19,7 +19,7 @@ class mini_jit::Gemm {
     enum class error_t : int32_t {
       success               = 0,
       err_unsupported_dtype = 1,   // fp64 emission not implemented (no callers)
-      err_shape             = 2    // m, n, k must be positive multiples of 16
+      err_shape             = 2    // m, n: positive multiples of 16; k: positive
     };
 
     /**
@@ -44,7 +44,8 @@ class mini_jit::Gemm {
      *
      * @param m       Number of rows in A and C (multiple of 16).
      * @param n       Number of columns in B and C (multiple of 16).
-     * @param k       Number of columns in A and rows in B (multiple of 16).
+     * @param k       Number of columns in A and rows in B (arbitrary, > 0;
+     *                full 16-wide chunks plus a predicated remainder chunk).
      * @param trans_a 0 if A is stored in column-major order, 1 if row-major.
      * @param trans_b 0 if B is stored in column-major order, 1 if row-major.
      * @param trans_c 0 if C is stored in column-major order, 1 if row-major.

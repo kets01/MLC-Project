@@ -95,7 +95,7 @@ Gemm::error_t Gemm::generate(uint32_t m, uint32_t n, uint32_t k,
                               dtype_t dtype)
 {
     if (dtype != dtype_t::fp32) return error_t::err_unsupported_dtype;
-    if (m == 0 || n == 0 || k == 0 || m % 16u || n % 16u || k % 16u)
+    if (m == 0 || n == 0 || k == 0 || m % 16u || n % 16u)
         return error_t::err_shape;
 
     std::vector<uint32_t> ops;
@@ -115,6 +115,21 @@ Gemm::error_t Gemm::generate(uint32_t m, uint32_t n, uint32_t k,
     ops.push_back(I::base_lsl_x(I::x6,  I::x3, (uint32_t)lsl));   // ld_a bytes
     ops.push_back(I::base_lsl_x(I::x7,  I::x4, (uint32_t)lsl));   // ld_b bytes
     ops.push_back(I::base_lsl_x(I::x16, I::x5, (uint32_t)lsl));   // ld_c bytes
+
+    // Arbitrary K (course spec): full 16-wide chunks, then one remainder
+    // chunk of k%16 steps. The remainder only matters to the ZA-STAGED
+    // operand paths — their stage loads fetch 16 k-contiguous elements per
+    // slice and would read past the valid K region — so those loads use
+    // p1 (k%16 active lanes, built once here). The zeroed inactive lanes
+    // land in ZA columns the remainder's kk-loop never extracts. Direct
+    // load paths need nothing: each step addresses one valid k.
+    const uint32_t full_chunks = k / 16u;
+    const uint32_t k_rem       = k % 16u;
+    if (k_rem) {
+        emit_mov_imm32(ops, 17, 0);
+        emit_mov_imm32(ops, 15, k_rem);
+        ops.push_back(I::sve_whilelo_s_x(I::p1, I::x17, I::x15));
+    }
 
     // MOVZ W12 with the slice-group base (fp32 MOVA offsets are 2 bits, so
     // slice s = W12(=s&~3) + offset(s&3); emitted once per group of 4).
@@ -208,65 +223,73 @@ Gemm::error_t Gemm::generate(uint32_t m, uint32_t n, uint32_t k,
                 emit_add_lsl(ops, 10, 1, 17, lsl);
             }
 
-            emit_mov_imm32(ops, 8, k / 16u);       // K-chunk counter
-
-            uint32_t chunk_start = (uint32_t)ops.size();
-
-            if (trans_a == 1) {
-                // Stage A chunk: 16 rows (contiguous along K) into za0's
-                // horizontal slices; vertical slices then yield the
-                // M-direction vectors FMOPA needs. za0[r][kk] = A[mi+r, kc+kk].
-                ops.push_back(I::base_mov_reg_x(I::x17, I::x9));
-                for (uint32_t r = 0; r < step; ++r) {
-                    slice_group(r);
-                    ops.push_back(I::sve_ld1w_imm(I::z0, I::p0, I::x17, 0));
-                    ops.push_back(I::sme_mova_vec_to_tile_h_s(0, 12, r & 3u, I::p0, I::z0));
-                    emit_add_reg(ops, 17, 17, 6);
+            // One K-chunk of `steps` (<= 16) k-values. stage_pred governs
+            // only the STAGE LOADS: p0 in full chunks, p1 in the remainder
+            // (keeps the 16-element k-contiguous fetches inside the valid
+            // K region; the zeroed lanes fill ZA columns the kk-loop below
+            // never reads, since kk < steps).
+            auto emit_k_chunk = [&](uint32_t steps, I::pred_t stage_pred) {
+                if (trans_a == 1) {
+                    // Stage A chunk: 16 rows (contiguous along K) into za0's
+                    // horizontal slices; vertical slices then yield the
+                    // M-direction vectors FMOPA needs. za0[r][kk] = A[mi+r, kc+kk].
+                    ops.push_back(I::base_mov_reg_x(I::x17, I::x9));
+                    for (uint32_t r = 0; r < step; ++r) {
+                        slice_group(r);
+                        ops.push_back(I::sve_ld1w_imm(I::z0, stage_pred, I::x17, 0));
+                        ops.push_back(I::sme_mova_vec_to_tile_h_s(0, 12, r & 3u, I::p0, I::z0));
+                        emit_add_reg(ops, 17, 17, 6);
+                    }
+                    emit_add_imm(ops, 9, 9, step * esize);   // next 16 k's
                 }
-                emit_add_imm(ops, 9, 9, step * esize);   // next 16 k's
-            }
-            if (trans_b == 0) {
-                // Stage B chunk: 16 columns (contiguous along K) into za1;
-                // vertical slice kk = B[kc+kk, nj..nj+15], the N-direction row.
-                ops.push_back(I::base_mov_reg_x(I::x17, I::x10));
-                for (uint32_t c = 0; c < step; ++c) {
-                    slice_group(c);
-                    ops.push_back(I::sve_ld1w_imm(I::z2, I::p0, I::x17, 0));
-                    ops.push_back(I::sme_mova_vec_to_tile_h_s(1, 12, c & 3u, I::p0, I::z2));
-                    emit_add_reg(ops, 17, 17, 7);
-                }
-                emit_add_imm(ops, 10, 10, step * esize);
-            }
-
-            for (uint32_t kk = 0; kk < step; ++kk) {
-                if (trans_a == 1 || trans_b == 0) slice_group(kk);
-
-                if (trans_a == 0) {
-                    ops.push_back(I::sve_ld1w_imm(I::z0, I::p0, I::x9, 0));
-                    emit_add_reg(ops, 9, 9, 6);
-                } else {
-                    ops.push_back(I::sme_mova_tile_to_vec_v_s(I::z0, I::p0, 0, 12, kk & 3u));
+                if (trans_b == 0) {
+                    // Stage B chunk: 16 columns (contiguous along K) into za1;
+                    // vertical slice kk = B[kc+kk, nj..nj+15], the N-direction row.
+                    ops.push_back(I::base_mov_reg_x(I::x17, I::x10));
+                    for (uint32_t c = 0; c < step; ++c) {
+                        slice_group(c);
+                        ops.push_back(I::sve_ld1w_imm(I::z2, stage_pred, I::x17, 0));
+                        ops.push_back(I::sme_mova_vec_to_tile_h_s(1, 12, c & 3u, I::p0, I::z2));
+                        emit_add_reg(ops, 17, 17, 7);
+                    }
+                    emit_add_imm(ops, 10, 10, step * esize);
                 }
 
-                if (trans_b == 1) {
-                    ops.push_back(I::sve_ld1w_imm(I::z2, I::p0, I::x10, 0));
+                for (uint32_t kk = 0; kk < steps; ++kk) {
+                    if (trans_a == 1 || trans_b == 0) slice_group(kk);
+
+                    if (trans_a == 0) {
+                        ops.push_back(I::sve_ld1w_imm(I::z0, I::p0, I::x9, 0));
+                        emit_add_reg(ops, 9, 9, 6);
+                    } else {
+                        ops.push_back(I::sme_mova_tile_to_vec_v_s(I::z0, I::p0, 0, 12, kk & 3u));
+                    }
+
+                    if (trans_b == 1) {
+                        ops.push_back(I::sve_ld1w_imm(I::z2, I::p0, I::x10, 0));
+                        if (nb == 2)
+                            ops.push_back(I::sve_ld1w_imm(I::z3, I::p0, I::x10, 1));
+                        emit_add_reg(ops, 10, 10, 7);
+                    } else {
+                        ops.push_back(I::sme_mova_tile_to_vec_v_s(I::z2, I::p0, 1, 12, kk & 3u));
+                    }
+
+                    ops.push_back(I::sme_fmopa_s(2, I::p0, I::p0, I::z0, I::z2));
                     if (nb == 2)
-                        ops.push_back(I::sve_ld1w_imm(I::z3, I::p0, I::x10, 1));
-                    emit_add_reg(ops, 10, 10, 7);
-                } else {
-                    ops.push_back(I::sme_mova_tile_to_vec_v_s(I::z2, I::p0, 1, 12, kk & 3u));
+                        ops.push_back(I::sme_fmopa_s(3, I::p0, I::p0, I::z0, I::z3));
                 }
+            };
 
-                ops.push_back(I::sme_fmopa_s(2, I::p0, I::p0, I::z0, I::z2));
-                if (nb == 2)
-                    ops.push_back(I::sme_fmopa_s(3, I::p0, I::p0, I::z0, I::z3));
-            }
-
-            ops.push_back(I::base_subs_imm_x(I::x8, I::x8, 1));
-            {
+            if (full_chunks > 0) {
+                emit_mov_imm32(ops, 8, full_chunks);
+                uint32_t chunk_start = (uint32_t)ops.size();
+                emit_k_chunk(step, I::p0);
+                ops.push_back(I::base_subs_imm_x(I::x8, I::x8, 1));
                 int32_t offset = (int32_t)chunk_start - (int32_t)ops.size();
                 ops.push_back(I::base_b_ne(offset));
             }
+            if (k_rem)
+                emit_k_chunk(k_rem, I::p1);
 
             emit_c_phase(mi, nj, nb, /*load=*/false);
 
