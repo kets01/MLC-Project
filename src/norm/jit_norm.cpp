@@ -1,6 +1,7 @@
 #include "norm/jit_norm.hpp"
 #include "week5/jit_engine.hpp"
 #include "week6/Instgen.hpp"
+#include "week3/utility.hpp"  // cpu_supports_sme2()
 
 // mini_jit::Norm — emits the Sprint-2 SSVE V6 winners at runtime.
 //
@@ -508,13 +509,436 @@ void Norm::emit_layer_v6() {
 }
 
 // ---------------------------------------------------------------------------
+// V7 emitters — 1:1 transcriptions of rms_norm_ssve_v7.S / layer_norm_ssve_v7.S
+// (same registers, same order), exactly as the V6 pair transcribes its own
+// kernels.  The only difference from V6 is that each group of four
+// single-vector accesses collapses into one SME2 multi-vector access, so these
+// stay word-comparable to their .S counterparts and the encoding diff carries
+// the same guarantee.
+// ---------------------------------------------------------------------------
 
-Norm::error_t Norm::generate( ntype_t ntype ) {
+void Norm::emit_rms_v7() {
+    std::vector<uint32_t>& ops = m_ops;
+
+    ops.push_back( I::base_stp_pre_x( I::x19, I::x20, I::sp, -128 ) );
+    ops.push_back( I::base_stp_off_x( I::x21, I::x22, I::sp,  16 ) );
+    ops.push_back( I::base_stp_off_x( I::x23, I::x24, I::sp,  32 ) );
+    ops.push_back( I::base_str_imm_x( I::x25, I::sp, 48 ) );
+    ops.push_back( I::simd_str_imm_d( I::v8,  I::sp, 56 ) );
+    ops.push_back( I::simd_str_imm_d( I::v9,  I::sp, 64 ) );
+    ops.push_back( I::simd_str_imm_d( I::v10, I::sp, 72 ) );
+    ops.push_back( I::simd_str_imm_d( I::v11, I::sp, 80 ) );
+    ops.push_back( I::simd_str_imm_d( I::v12, I::sp, 88 ) );
+    ops.push_back( I::simd_str_imm_d( I::v13, I::sp, 96 ) );
+    ops.push_back( I::simd_str_imm_d( I::v14, I::sp, 104 ) );
+    ops.push_back( I::simd_str_imm_d( I::v15, I::sp, 112 ) );
+
+    ops.push_back( I::base_mov_reg_x( I::x19, I::x0 ) );
+    ops.push_back( I::base_mov_reg_x( I::x20, I::x1 ) );
+    ops.push_back( I::base_mov_reg_x( I::x21, I::x2 ) );
+    ops.push_back( I::base_mov_reg_x( I::x22, I::x3 ) );
+    ops.push_back( I::base_mov_reg_x( I::x23, I::x4 ) );
+    ops.push_back( I::base_lsl_x( I::x24, I::x5, 2 ) );
+    ops.push_back( I::base_lsl_x( I::x25, I::x6, 2 ) );
+    ops.push_back( I::simd_str_imm_s( I::v0, I::sp, 120 ) );   // eps stash
+
+    size_t fix_cbz = ops.size();
+    ops.push_back( 0 );                                        // cbz m, row_done
+
+    ops.push_back( I::sme_smstart_sm_only() );
+    ops.push_back( I::sve_ptrue_all( I::p0, I::dtype_t::fp32 ) );
+    ops.push_back( I::sme2_ptrue_pn_s( I::p8 ) );              // counter predicate
+
+    ops.push_back( I::simd_ldr_imm_s( I::v0, I::sp, 120 ) );
+    ops.push_back( I::sve_dup_elem_s( I::z8, I::z0, 0 ) );     // z8 = {eps,...}
+
+    ops.push_back( I::fp_fmov_imm_s( I::v0, 0x70 ) );          // s0 = 1.0
+    ops.push_back( I::fp_scvtf_s_x( I::v1, I::x23 ) );
+    ops.push_back( I::fp_fdiv_s( I::v0, I::v0, I::v1 ) );
+    ops.push_back( I::sve_dup_elem_s( I::z17, I::z0, 0 ) );    // z17 = {1/N,...}
+
+    ops.push_back( I::sve_cntw_x( I::x14 ) );
+    ops.push_back( I::base_lsl_x( I::x14, I::x14, 2 ) );
+    ops.push_back( I::base_movz_x( I::x0, 0 ) );
+
+    // --- group loop ---
+    size_t group_loop = ops.size();
+    ops.push_back( I::base_add_reg_x( I::x6, I::x0, I::x14 ) );
+    ops.push_back( I::base_cmp_reg_x( I::x6, I::x22 ) );
+    size_t fix_bhi = ops.size();
+    ops.push_back( 0 );
+
+    const I::sve_t acc[4] = { I::z4, I::z5, I::z6, I::z7 };
+    for ( int i = 0; i < 4; ++i ) ops.push_back( I::sve_dup_imm_s( acc[i], 0 ) );
+    ops.push_back( I::base_mov_reg_x( I::x8, I::x19 ) );
+    ops.push_back( I::base_mov_reg_x( I::x9, I::x23 ) );
+
+    size_t red_col = ops.size();
+    ops.push_back( I::sme2_ld1w_x4( I::z0, I::p8, I::x8 ) );   // 4 blocks, 1 insn
+    ops.push_back( I::sve_fmla_s( I::z4, I::p0, I::z0, I::z0 ) );
+    ops.push_back( I::sve_fmla_s( I::z5, I::p0, I::z1, I::z1 ) );
+    ops.push_back( I::sve_fmla_s( I::z6, I::p0, I::z2, I::z2 ) );
+    ops.push_back( I::sve_fmla_s( I::z7, I::p0, I::z3, I::z3 ) );
+    ops.push_back( I::base_add_reg_x( I::x8, I::x8, I::x24 ) );
+    ops.push_back( I::base_subs_imm_x( I::x9, I::x9, 1 ) );
+    ops.push_back( I::base_b_ne( back( ops, red_col ) ) );
+
+    for ( int i = 0; i < 4; ++i )
+        ops.push_back( I::sve_fmul_p_s( acc[i], I::p0, I::z17 ) );
+    for ( int i = 0; i < 4; ++i )
+        ops.push_back( I::sve_fadd_p_s( acc[i], I::p0, I::z8 ) );
+
+    const I::sve_t inv[4] = { I::z20, I::z21, I::z22, I::z23 };
+    for ( int i = 0; i < 4; ++i ) {
+        ops.push_back( I::sve_frsqrte_s( inv[i], acc[i] ) );
+        ops.push_back( I::sve_fmul_s( I::z18, inv[i], acc[i] ) );
+        ops.push_back( I::sve_frsqrts_s( I::z18, inv[i], I::z18 ) );
+        ops.push_back( I::sve_fmul_s( inv[i], inv[i], I::z18 ) );
+    }
+
+    ops.push_back( I::base_mov_reg_x( I::x8,  I::x19 ) );
+    ops.push_back( I::base_mov_reg_x( I::x9,  I::x20 ) );
+    ops.push_back( I::base_mov_reg_x( I::x10, I::x21 ) );
+    ops.push_back( I::base_mov_reg_x( I::x11, I::x23 ) );
+
+    size_t nrm_col = ops.size();
+    ops.push_back( I::sve_ld1rw_s( I::z16, I::p0, I::x10 ) );
+    ops.push_back( I::sme2_ld1w_x4( I::z0, I::p8, I::x8 ) );
+    for ( int i = 0; i < 4; ++i )
+        ops.push_back( I::sve_fmul_p_s( (I::sve_t)(I::z0 + i), I::p0, I::z16 ) );
+    for ( int i = 0; i < 4; ++i )
+        ops.push_back( I::sve_fmul_p_s( (I::sve_t)(I::z0 + i), I::p0, inv[i] ) );
+    ops.push_back( I::sme2_st1w_x4( I::z0, I::p8, I::x9 ) );
+    ops.push_back( I::base_add_reg_x( I::x8, I::x8, I::x24 ) );
+    ops.push_back( I::base_add_reg_x( I::x9, I::x9, I::x25 ) );
+    ops.push_back( I::base_add_imm_x( I::x10, I::x10, 4 ) );
+    ops.push_back( I::base_subs_imm_x( I::x11, I::x11, 1 ) );
+    ops.push_back( I::base_b_ne( back( ops, nrm_col ) ) );
+
+    ops.push_back( I::sve_addvl( I::x19, I::x19, 4 ) );
+    ops.push_back( I::sve_addvl( I::x20, I::x20, 4 ) );
+    ops.push_back( I::base_mov_reg_x( I::x0, I::x6 ) );
+    ops.push_back( I::base_b( back( ops, group_loop ) ) );
+
+    // --- tail: plain SVE, identical in shape to V6's ---
+    size_t tail_blocks = ops.size();
+    ops[fix_bhi] = I::base_b_cond( I::cond_hi,
+                                   (int32_t)tail_blocks - (int32_t)fix_bhi );
+
+    ops.push_back( I::sve_whilelo_s_x( I::p1, I::x0, I::x22 ) );
+    size_t fix_bnone = ops.size();
+    ops.push_back( 0 );
+
+    ops.push_back( I::sve_dup_imm_s( I::z24, 0 ) );
+    ops.push_back( I::base_mov_reg_x( I::x8, I::x19 ) );
+    ops.push_back( I::base_mov_reg_x( I::x9, I::x23 ) );
+
+    size_t tail_red = ops.size();
+    ops.push_back( I::sve_ld1w_imm( I::z0, I::p1, I::x8, 0 ) );
+    ops.push_back( I::sve_fmla_s( I::z24, I::p1, I::z0, I::z0 ) );
+    ops.push_back( I::base_add_reg_x( I::x8, I::x8, I::x24 ) );
+    ops.push_back( I::base_subs_imm_x( I::x9, I::x9, 1 ) );
+    ops.push_back( I::base_b_ne( back( ops, tail_red ) ) );
+
+    ops.push_back( I::sve_fmul_p_s( I::z24, I::p1, I::z17 ) );
+    ops.push_back( I::sve_dup_elem_s( I::z25, I::z8, 0 ) );
+    ops.push_back( I::sve_fadd_p_s( I::z24, I::p1, I::z25 ) );
+    ops.push_back( I::sve_sel_s( I::z24, I::p1, I::z24, I::z25 ) );
+
+    ops.push_back( I::sve_frsqrte_s( I::z26, I::z24 ) );
+    ops.push_back( I::sve_fmul_s( I::z25, I::z26, I::z24 ) );
+    ops.push_back( I::sve_frsqrts_s( I::z25, I::z26, I::z25 ) );
+    ops.push_back( I::sve_fmul_p_s( I::z26, I::p1, I::z25 ) );
+
+    ops.push_back( I::base_mov_reg_x( I::x8,  I::x19 ) );
+    ops.push_back( I::base_mov_reg_x( I::x9,  I::x20 ) );
+    ops.push_back( I::base_mov_reg_x( I::x10, I::x21 ) );
+    ops.push_back( I::base_mov_reg_x( I::x11, I::x23 ) );
+
+    size_t tail_nrm = ops.size();
+    ops.push_back( I::sve_ld1w_imm( I::z0, I::p1, I::x8, 0 ) );
+    ops.push_back( I::sve_ld1rw_s( I::z16, I::p0, I::x10 ) );
+    ops.push_back( I::sve_fmul_p_s( I::z0, I::p1, I::z16 ) );
+    ops.push_back( I::sve_fmul_p_s( I::z0, I::p1, I::z26 ) );
+    ops.push_back( I::sve_st1w_imm( I::z0, I::p1, I::x9, 0 ) );
+    ops.push_back( I::base_add_reg_x( I::x8, I::x8, I::x24 ) );
+    ops.push_back( I::base_add_reg_x( I::x9, I::x9, I::x25 ) );
+    ops.push_back( I::base_add_imm_x( I::x10, I::x10, 4 ) );
+    ops.push_back( I::base_subs_imm_x( I::x11, I::x11, 1 ) );
+    ops.push_back( I::base_b_ne( back( ops, tail_nrm ) ) );
+
+    ops.push_back( I::sve_addvl( I::x19, I::x19, 1 ) );
+    ops.push_back( I::sve_addvl( I::x20, I::x20, 1 ) );
+    ops.push_back( I::sve_incw_x( I::x0 ) );
+    ops.push_back( I::base_b( back( ops, tail_blocks ) ) );
+
+    size_t block_done = ops.size();
+    ops[fix_bnone] = I::base_b_cond( I::cond_eq,
+                                     (int32_t)block_done - (int32_t)fix_bnone );
+    ops.push_back( I::sme_smstop_sm_only() );
+
+    size_t row_done = ops.size();
+    ops[fix_cbz] = I::base_br_cbz_x( I::x22,
+                                     (int32_t)row_done - (int32_t)fix_cbz );
+
+    ops.push_back( I::simd_ldr_imm_d( I::v8,  I::sp, 56 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v9,  I::sp, 64 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v10, I::sp, 72 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v11, I::sp, 80 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v12, I::sp, 88 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v13, I::sp, 96 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v14, I::sp, 104 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v15, I::sp, 112 ) );
+    ops.push_back( I::base_ldr_imm_x( I::x25, I::sp, 48 ) );
+    ops.push_back( I::base_ldp_off_x( I::x23, I::x24, I::sp, 32 ) );
+    ops.push_back( I::base_ldp_off_x( I::x21, I::x22, I::sp, 16 ) );
+    ops.push_back( I::base_ldp_post_x( I::x19, I::x20, I::sp, 128 ) );
+    ops.push_back( I::base_br_ret() );
+}
+
+void Norm::emit_layer_v7() {
+    std::vector<uint32_t>& ops = m_ops;
+
+    ops.push_back( I::base_stp_pre_x( I::x19, I::x20, I::sp, -144 ) );
+    ops.push_back( I::base_stp_off_x( I::x21, I::x22, I::sp, 16 ) );
+    ops.push_back( I::base_stp_off_x( I::x23, I::x24, I::sp, 32 ) );
+    ops.push_back( I::base_stp_off_x( I::x25, I::x26, I::sp, 48 ) );
+    ops.push_back( I::simd_str_imm_d( I::v8,  I::sp, 64 ) );
+    ops.push_back( I::simd_str_imm_d( I::v9,  I::sp, 72 ) );
+    ops.push_back( I::simd_str_imm_d( I::v10, I::sp, 80 ) );
+    ops.push_back( I::simd_str_imm_d( I::v11, I::sp, 88 ) );
+    ops.push_back( I::simd_str_imm_d( I::v12, I::sp, 96 ) );
+    ops.push_back( I::simd_str_imm_d( I::v13, I::sp, 104 ) );
+    ops.push_back( I::simd_str_imm_d( I::v14, I::sp, 112 ) );
+    ops.push_back( I::simd_str_imm_d( I::v15, I::sp, 120 ) );
+
+    ops.push_back( I::base_mov_reg_x( I::x19, I::x0 ) );
+    ops.push_back( I::base_mov_reg_x( I::x20, I::x1 ) );
+    ops.push_back( I::base_mov_reg_x( I::x21, I::x2 ) );
+    ops.push_back( I::base_mov_reg_x( I::x22, I::x3 ) );
+    ops.push_back( I::base_mov_reg_x( I::x23, I::x4 ) );
+    ops.push_back( I::base_mov_reg_x( I::x24, I::x5 ) );
+    ops.push_back( I::base_lsl_x( I::x25, I::x6, 2 ) );
+    ops.push_back( I::base_lsl_x( I::x26, I::x7, 2 ) );
+    ops.push_back( I::simd_str_imm_s( I::v0, I::sp, 128 ) );
+
+    size_t fix_cbz = ops.size();
+    ops.push_back( 0 );                                     // cbz m, ret
+
+    ops.push_back( I::sme_smstart_sm_only() );
+    ops.push_back( I::sve_ptrue_all( I::p0, I::dtype_t::fp32 ) );
+    ops.push_back( I::sme2_ptrue_pn_s( I::p8 ) );
+
+    ops.push_back( I::simd_ldr_imm_s( I::v0, I::sp, 128 ) );
+    ops.push_back( I::sve_dup_elem_s( I::z7, I::z0, 0 ) );  // z7 = {eps,...}
+
+    ops.push_back( I::fp_fmov_imm_s( I::v0, 0x70 ) );
+    ops.push_back( I::fp_scvtf_s_x( I::v1, I::x24 ) );
+    ops.push_back( I::fp_fdiv_s( I::v0, I::v0, I::v1 ) );
+    ops.push_back( I::sve_dup_elem_s( I::z4, I::z0, 0 ) );  // z4 = {1/N,...}
+
+    ops.push_back( I::sve_cntw_x( I::x14 ) );
+    ops.push_back( I::base_lsl_x( I::x14, I::x14, 2 ) );
+    ops.push_back( I::base_movz_x( I::x0, 0 ) );
+
+    size_t group = ops.size();
+    ops.push_back( I::base_add_reg_x( I::x15, I::x0, I::x14 ) );
+    ops.push_back( I::base_cmp_reg_x( I::x15, I::x23 ) );
+    size_t fix_bhi = ops.size();
+    ops.push_back( 0 );
+
+    // pass 1: mean
+    const I::sve_t mean[4] = { I::z8, I::z9, I::z10, I::z11 };
+    for ( int i = 0; i < 4; ++i ) ops.push_back( I::sve_dup_imm_s( mean[i], 0 ) );
+    ops.push_back( I::base_mov_reg_x( I::x8, I::x19 ) );
+    ops.push_back( I::base_mov_reg_x( I::x9, I::x24 ) );
+
+    size_t gp1col = ops.size();
+    ops.push_back( I::sme2_ld1w_x4( I::z0, I::p8, I::x8 ) );
+    for ( int i = 0; i < 4; ++i )
+        ops.push_back( I::sve_fadd_p_s( mean[i], I::p0, (I::sve_t)(I::z0 + i) ) );
+    ops.push_back( I::base_add_reg_x( I::x8, I::x8, I::x25 ) );
+    ops.push_back( I::base_subs_imm_x( I::x9, I::x9, 1 ) );
+    ops.push_back( I::base_b_ne( back( ops, gp1col ) ) );
+
+    for ( int i = 0; i < 4; ++i )
+        ops.push_back( I::sve_fmul_p_s( mean[i], I::p0, I::z4 ) );
+
+    // pass 2: centered variance
+    const I::sve_t var[4] = { I::z12, I::z13, I::z14, I::z15 };
+    for ( int i = 0; i < 4; ++i ) ops.push_back( I::sve_dup_imm_s( var[i], 0 ) );
+    ops.push_back( I::base_mov_reg_x( I::x8, I::x19 ) );
+    ops.push_back( I::base_mov_reg_x( I::x9, I::x24 ) );
+
+    size_t gp2col = ops.size();
+    ops.push_back( I::sme2_ld1w_x4( I::z0, I::p8, I::x8 ) );
+    for ( int i = 0; i < 4; ++i )
+        ops.push_back( I::sve_fsub_p_s( (I::sve_t)(I::z0 + i), I::p0, mean[i] ) );
+    for ( int i = 0; i < 4; ++i )
+        ops.push_back( I::sve_fmla_s( var[i], I::p0,
+                                      (I::sve_t)(I::z0 + i), (I::sve_t)(I::z0 + i) ) );
+    ops.push_back( I::base_add_reg_x( I::x8, I::x8, I::x25 ) );
+    ops.push_back( I::base_subs_imm_x( I::x9, I::x9, 1 ) );
+    ops.push_back( I::base_b_ne( back( ops, gp2col ) ) );
+
+    for ( int i = 0; i < 4; ++i ) {
+        ops.push_back( I::sve_fmul_p_s( var[i], I::p0, I::z4 ) );
+        ops.push_back( I::sve_fadd_p_s( var[i], I::p0, I::z7 ) );
+    }
+
+    const I::sve_t isd[4] = { I::z17, I::z18, I::z19, I::z20 };
+    for ( int i = 0; i < 4; ++i ) {
+        ops.push_back( I::sve_frsqrte_s( isd[i], var[i] ) );
+        ops.push_back( I::sve_fmul_s( I::z16, isd[i], var[i] ) );
+        ops.push_back( I::sve_frsqrts_s( I::z16, isd[i], I::z16 ) );
+        ops.push_back( I::sve_fmul_s( isd[i], isd[i], I::z16 ) );
+    }
+
+    // pass 3: normalize, scale, shift
+    ops.push_back( I::base_mov_reg_x( I::x8,  I::x19 ) );
+    ops.push_back( I::base_mov_reg_x( I::x9,  I::x20 ) );
+    ops.push_back( I::base_mov_reg_x( I::x10, I::x21 ) );
+    ops.push_back( I::base_mov_reg_x( I::x11, I::x22 ) );
+    ops.push_back( I::base_mov_reg_x( I::x12, I::x24 ) );
+
+    size_t gp3col = ops.size();
+    ops.push_back( I::sme2_ld1w_x4( I::z0, I::p8, I::x8 ) );
+    ops.push_back( I::sve_ld1rw_s( I::z5, I::p0, I::x10 ) );
+    ops.push_back( I::sve_ld1rw_s( I::z6, I::p0, I::x11 ) );
+    for ( int i = 0; i < 4; ++i )
+        ops.push_back( I::sve_fsub_p_s( (I::sve_t)(I::z0 + i), I::p0, mean[i] ) );
+    for ( int i = 0; i < 4; ++i )
+        ops.push_back( I::sve_fmul_p_s( (I::sve_t)(I::z0 + i), I::p0, isd[i] ) );
+    for ( int i = 0; i < 4; ++i )
+        ops.push_back( I::sve_fmul_p_s( (I::sve_t)(I::z0 + i), I::p0, I::z5 ) );
+    for ( int i = 0; i < 4; ++i )
+        ops.push_back( I::sve_fadd_p_s( (I::sve_t)(I::z0 + i), I::p0, I::z6 ) );
+    ops.push_back( I::sme2_st1w_x4( I::z0, I::p8, I::x9 ) );
+    ops.push_back( I::base_add_reg_x( I::x8, I::x8, I::x25 ) );
+    ops.push_back( I::base_add_reg_x( I::x9, I::x9, I::x26 ) );
+    ops.push_back( I::base_add_imm_x( I::x10, I::x10, 4 ) );
+    ops.push_back( I::base_add_imm_x( I::x11, I::x11, 4 ) );
+    ops.push_back( I::base_subs_imm_x( I::x12, I::x12, 1 ) );
+    ops.push_back( I::base_b_ne( back( ops, gp3col ) ) );
+
+    ops.push_back( I::sve_addvl( I::x19, I::x19, 4 ) );
+    ops.push_back( I::sve_addvl( I::x20, I::x20, 4 ) );
+    ops.push_back( I::base_add_reg_x( I::x0, I::x0, I::x14 ) );
+    ops.push_back( I::base_b( back( ops, group ) ) );
+
+    // --- tail (plain SVE, same as V6) ---
+    size_t tail = ops.size();
+    ops[fix_bhi] = I::base_b_cond( I::cond_hi,
+                                   (int32_t)tail - (int32_t)fix_bhi );
+
+    ops.push_back( I::sve_whilelo_s_x( I::p1, I::x0, I::x23 ) );
+    size_t fix_bnone = ops.size();
+    ops.push_back( 0 );
+
+    ops.push_back( I::sve_dup_imm_s( I::z8, 0 ) );
+    ops.push_back( I::base_mov_reg_x( I::x8, I::x19 ) );
+    ops.push_back( I::base_mov_reg_x( I::x9, I::x24 ) );
+
+    size_t tp1 = ops.size();
+    ops.push_back( I::sve_ld1w_imm( I::z0, I::p1, I::x8, 0 ) );
+    ops.push_back( I::sve_fadd_p_s( I::z8, I::p1, I::z0 ) );
+    ops.push_back( I::base_add_reg_x( I::x8, I::x8, I::x25 ) );
+    ops.push_back( I::base_subs_imm_x( I::x9, I::x9, 1 ) );
+    ops.push_back( I::base_b_ne( back( ops, tp1 ) ) );
+
+    ops.push_back( I::sve_fmul_p_s( I::z8, I::p1, I::z4 ) );
+    ops.push_back( I::sve_dup_imm_s( I::z9, 0 ) );
+    ops.push_back( I::base_mov_reg_x( I::x8, I::x19 ) );
+    ops.push_back( I::base_mov_reg_x( I::x9, I::x24 ) );
+
+    size_t tp2 = ops.size();
+    ops.push_back( I::sve_ld1w_imm( I::z0, I::p1, I::x8, 0 ) );
+    ops.push_back( I::sve_fsub_p_s( I::z0, I::p1, I::z8 ) );
+    ops.push_back( I::sve_fmla_s( I::z9, I::p1, I::z0, I::z0 ) );
+    ops.push_back( I::base_add_reg_x( I::x8, I::x8, I::x25 ) );
+    ops.push_back( I::base_subs_imm_x( I::x9, I::x9, 1 ) );
+    ops.push_back( I::base_b_ne( back( ops, tp2 ) ) );
+
+    ops.push_back( I::sve_fmul_p_s( I::z9, I::p1, I::z4 ) );
+    ops.push_back( I::sve_fadd_p_s( I::z9, I::p1, I::z7 ) );
+    ops.push_back( I::sve_sel_s( I::z9, I::p1, I::z9, I::z7 ) );
+
+    ops.push_back( I::sve_frsqrte_s( I::z5, I::z9 ) );
+    ops.push_back( I::sve_fmul_s( I::z3, I::z5, I::z9 ) );
+    ops.push_back( I::sve_frsqrts_s( I::z3, I::z5, I::z3 ) );
+    ops.push_back( I::sve_fmul_p_s( I::z5, I::p1, I::z3 ) );
+
+    ops.push_back( I::base_mov_reg_x( I::x8,  I::x19 ) );
+    ops.push_back( I::base_mov_reg_x( I::x9,  I::x20 ) );
+    ops.push_back( I::base_mov_reg_x( I::x10, I::x21 ) );
+    ops.push_back( I::base_mov_reg_x( I::x11, I::x22 ) );
+    ops.push_back( I::base_mov_reg_x( I::x12, I::x24 ) );
+
+    size_t tp3 = ops.size();
+    ops.push_back( I::sve_ld1w_imm( I::z0, I::p1, I::x8, 0 ) );
+    ops.push_back( I::sve_ld1rw_s( I::z1, I::p1, I::x10 ) );
+    ops.push_back( I::sve_ld1rw_s( I::z2, I::p1, I::x11 ) );
+    ops.push_back( I::sve_fsub_p_s( I::z0, I::p1, I::z8 ) );
+    ops.push_back( I::sve_fmul_p_s( I::z0, I::p1, I::z5 ) );
+    ops.push_back( I::sve_fmul_p_s( I::z0, I::p1, I::z1 ) );
+    ops.push_back( I::sve_fadd_p_s( I::z0, I::p1, I::z2 ) );
+    ops.push_back( I::sve_st1w_imm( I::z0, I::p1, I::x9, 0 ) );
+    ops.push_back( I::base_add_reg_x( I::x8, I::x8, I::x25 ) );
+    ops.push_back( I::base_add_reg_x( I::x9, I::x9, I::x26 ) );
+    ops.push_back( I::base_add_imm_x( I::x10, I::x10, 4 ) );
+    ops.push_back( I::base_add_imm_x( I::x11, I::x11, 4 ) );
+    ops.push_back( I::base_subs_imm_x( I::x12, I::x12, 1 ) );
+    ops.push_back( I::base_b_ne( back( ops, tp3 ) ) );
+
+    ops.push_back( I::sve_addvl( I::x19, I::x19, 1 ) );
+    ops.push_back( I::sve_addvl( I::x20, I::x20, 1 ) );
+    ops.push_back( I::sve_incw_x( I::x0 ) );
+    ops.push_back( I::base_b( back( ops, tail ) ) );
+
+    size_t done = ops.size();
+    ops[fix_bnone] = I::base_b_cond( I::cond_eq,
+                                     (int32_t)done - (int32_t)fix_bnone );
+
+    ops.push_back( I::sme_smstop_sm_only() );
+
+    size_t ret_label = ops.size();
+    ops[fix_cbz] = I::base_br_cbz_x( I::x23,
+                                     (int32_t)ret_label - (int32_t)fix_cbz );
+
+    ops.push_back( I::simd_ldr_imm_d( I::v8,  I::sp, 64 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v9,  I::sp, 72 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v10, I::sp, 80 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v11, I::sp, 88 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v12, I::sp, 96 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v13, I::sp, 104 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v14, I::sp, 112 ) );
+    ops.push_back( I::simd_ldr_imm_d( I::v15, I::sp, 120 ) );
+    ops.push_back( I::base_ldp_off_x( I::x25, I::x26, I::sp, 48 ) );
+    ops.push_back( I::base_ldp_off_x( I::x23, I::x24, I::sp, 32 ) );
+    ops.push_back( I::base_ldp_off_x( I::x21, I::x22, I::sp, 16 ) );
+    ops.push_back( I::base_ldp_post_x( I::x19, I::x20, I::sp, 144 ) );
+    ops.push_back( I::base_br_ret() );
+}
+
+// ---------------------------------------------------------------------------
+
+Norm::error_t Norm::generate( ntype_t ntype, isa_t isa ) {
     m_ops.clear();
     m_ntype = ntype;
 
-    if ( ntype == ntype_t::rms ) emit_rms_v6();
-    else                         emit_layer_v6();
+    // The feature-dependent emission decision (Sprint 4 left this open because
+    // no shape selected the ZA path; Sprint 6 measured one that does pay).
+    if ( isa == isa_t::automatic )
+        isa = cpu_supports_sme2() ? isa_t::sme2 : isa_t::sme1;
+    m_isa = isa;
+
+    if ( isa == isa_t::sme2 ) {
+        if ( ntype == ntype_t::rms ) emit_rms_v7();
+        else                         emit_layer_v7();
+    } else {
+        if ( ntype == ntype_t::rms ) emit_rms_v6();
+        else                         emit_layer_v6();
+    }
 
     m_kernel = (void*)JitEngine::generate<void*>( m_ops );
     return ( m_kernel != nullptr ) ? error_t::success : error_t::err_alloc;
