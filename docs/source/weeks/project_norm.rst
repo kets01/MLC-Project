@@ -66,6 +66,11 @@ Sprint status
        places in a loop nest, driven from real ``.teir`` files, with
        OpenMP row-parallel scaling measured against the chip ceiling
      - Done
+   * - 6
+     - Consolidated ablation against both ceilings; the ``d8-d15`` ABI fix
+       completed across every kernel; SME2 multi-vector V7 (+17 % RMSNorm in
+       DRAM) promoted into the JIT and TEIR
+     - Done
 
 The best kernel per architecture (SSVE **V6**, 4-row-block contiguity
 grouping, for both norms) is frozen as the incumbent that Sprint 4's JIT
@@ -88,4 +93,5 @@ ablation treatment there.
    norm_sprint3
    norm_sprint4
    norm_sprint5
+   norm_sprint6
    sprint2_debug_log
