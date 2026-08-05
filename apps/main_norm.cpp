@@ -495,6 +495,10 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
 
 using namespace mini_jit::teir;
 
+// Only referenced from teir_threading_section()'s BENCH_HAS_OMP branch below;
+// on CI (no OpenMP, see week7 report) that branch is preprocessed out,
+// leaving this otherwise unreferenced and tripping -Werror,-Wunused-function.
+#if BENCH_HAS_OMP
 static std::shared_ptr<Node> build_norm_tree(bool layer, int64_t m, int64_t n,
                                              int64_t chunk_rows,
                                              std::vector<Axis*>& owned) {
@@ -514,6 +518,7 @@ static std::shared_ptr<Node> build_norm_tree(bool layer, int64_t m, int64_t n,
     it->axis = row; it->body = inv; it->is_parallel = true;
     return it;
 }
+#endif  // BENCH_HAS_OMP
 
 static void teir_threading_section(double peak_ssve, double peak_chip) {
     std::cout << "\n" << std::string(78, '=') << "\n"
