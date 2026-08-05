@@ -122,6 +122,22 @@ void layer_norm_ssve_welford(const float* a,
                              int64_t      ld_b,
                              float        epsilon);
 
+// V7: V6 with SME2 multi-vector loads/stores — all three passes fold their
+// four consecutive VL-row block accesses into one 4-vector LD1W (and pass 3's
+// four stores into one 4-vector ST1W).  Same traffic and same summation order
+// as V6, so it must be bit-identical to it; built to test whether the RMSNorm
+// V7 result is norm-agnostic (Sprint 6).  Requires FEAT_SME2; the wrapper
+// dispatches to V6 when it is absent.
+void layer_norm_ssve_v7(const float* a,
+                        float*       b,
+                        const float* gamma,
+                        const float* beta,
+                        int64_t      m,
+                        int64_t      n,
+                        int64_t      ld_a,
+                        int64_t      ld_b,
+                        float        epsilon);
+
 // LayerNorm — hand-written SME/ZA kernel (Sprint 3, gated).  Full 3-pass ZA
 // residency: x is staged in ZA during the mean pass and reused from ZA for
 // BOTH the variance pass and the normalize pass (3R+1W -> 1R+1W, vs the SSVE
