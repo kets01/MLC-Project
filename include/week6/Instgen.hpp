@@ -287,6 +287,28 @@ class mini_jit::InstGen {
                                               uint32_t offset = 0 );
 
     /**
+     * @brief MOV ZA<za_idx>H.S[W<ws>, <offset>], P<pg>/M, Z<zn>.S
+     *        (write SVE register into a horizontal tile slice, fp32).
+     *        NOTE: the fp32 slice-offset immediate is 2 bits (0-3); the full
+     *        0-15 slice index is W<ws> (must be W12-W15) plus this offset.
+     */
+    static uint32_t sme_mova_vec_to_tile_h_s( uint32_t za_idx,
+                                              uint32_t ws,
+                                              uint32_t offset,
+                                              pred_t   pg,
+                                              sve_t    zn );
+
+    /**
+     * @brief MOV ZA<za_idx>V.S[W<ws>, <offset>], P<pg>/M, Z<zn>.S
+     *        (write SVE register into a vertical tile slice, fp32)
+     */
+    static uint32_t sme_mova_vec_to_tile_v_s( uint32_t za_idx,
+                                              uint32_t ws,
+                                              uint32_t offset,
+                                              pred_t   pg,
+                                              sve_t    zn );
+
+    /**
      * @brief FMAX Z<zd>.S, P<pg>/M, Z<zd>.S, Z<zm>.S  (element-wise max, fp32)
      *        Used for ReLU: max(z, 0).
      */
