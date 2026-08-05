@@ -777,6 +777,7 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
         rms_row({"V4", "+ 4 accumulator chains (ILP)"},           rms_norm_ssve_v4);
         rms_row({"V5", "+ software-pipelined loads"},             rms_norm_ssve_v5);
         rms_row({"V6 (incumbent)", "4-row-block contiguity"},     rms_norm_ssve_v6);
+        rms_row({"V7 (SME2)", "4-vector LD1W/ST1W, same traffic"}, rms_norm_ssve_v7);
         rms_row({"ZA residency", "ZA staging, 1R+1W"},            rms_norm_za);
         rms_row({"JIT V6", "runtime-emitted, word-identical"},    krms);
 
