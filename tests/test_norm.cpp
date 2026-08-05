@@ -1452,6 +1452,10 @@ extern "C" void rms_norm_ssve_v6(const float*, float*, const float*,
                                  int64_t, int64_t, int64_t, int64_t, float);
 extern "C" void layer_norm_ssve_v6(const float*, float*, const float*, const float*,
                                    int64_t, int64_t, int64_t, int64_t, float);
+extern "C" void rms_norm_ssve_v7(const float*, float*, const float*,
+                                 int64_t, int64_t, int64_t, int64_t, float);
+extern "C" void layer_norm_ssve_v7(const float*, float*, const float*, const float*,
+                                   int64_t, int64_t, int64_t, int64_t, float);
 
 using IG = mini_jit::InstGen;
 using mini_jit::Norm;
@@ -1552,7 +1556,7 @@ static void encoding_diff(const std::vector<uint32_t>& jit,
 TEST_CASE("Sprint4 encoding diff: JIT RMSNorm == assembled rms_norm_ssve_v6",
           "[norm][sprint4][encoding-diff]") {
     Norm gen;
-    REQUIRE(gen.generate(Norm::ntype_t::rms) == Norm::error_t::success);
+    REQUIRE(gen.generate(Norm::ntype_t::rms, Norm::isa_t::sme1) == Norm::error_t::success);
     REQUIRE(gen.words().size() == 157);        // instruction count of the .S
     encoding_diff(gen.words(), linked_words(&::rms_norm_ssve_v6));
 }
@@ -1560,9 +1564,65 @@ TEST_CASE("Sprint4 encoding diff: JIT RMSNorm == assembled rms_norm_ssve_v6",
 TEST_CASE("Sprint4 encoding diff: JIT LayerNorm == assembled layer_norm_ssve_v6",
           "[norm][sprint4][encoding-diff]") {
     Norm gen;
-    REQUIRE(gen.generate(Norm::ntype_t::layer) == Norm::error_t::success);
+    REQUIRE(gen.generate(Norm::ntype_t::layer, Norm::isa_t::sme1) == Norm::error_t::success);
     REQUIRE(gen.words().size() == 208);
     encoding_diff(gen.words(), linked_words(&::layer_norm_ssve_v6));
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 6 — the same guarantee for the SME2 path.
+//
+// Emission is host-portable, so these run even where FEAT_SME2 is absent:
+// the generator is asked for isa_t::sme2 explicitly rather than letting
+// `automatic` pick, which is exactly why generate() takes the parameter. A
+// green diff means the SME2 kernels the JIT emits are the same instruction
+// words as the hand-written V7 kernels that already passed the bit-identity
+// and reference tests above — the JIT inherits that trust instead of
+// re-earning it.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Sprint6 encoding diff: JIT RMSNorm SME2 == assembled rms_norm_ssve_v7",
+          "[norm][sprint6][sme2][encoding-diff]") {
+    Norm gen;
+    REQUIRE(gen.generate(Norm::ntype_t::rms, Norm::isa_t::sme2) == Norm::error_t::success);
+    REQUIRE(gen.emitted_isa() == Norm::isa_t::sme2);
+    encoding_diff(gen.words(), linked_words(&::rms_norm_ssve_v7));
+}
+
+TEST_CASE("Sprint6 encoding diff: JIT LayerNorm SME2 == assembled layer_norm_ssve_v7",
+          "[norm][sprint6][sme2][encoding-diff]") {
+    Norm gen;
+    REQUIRE(gen.generate(Norm::ntype_t::layer, Norm::isa_t::sme2) == Norm::error_t::success);
+    REQUIRE(gen.emitted_isa() == Norm::isa_t::sme2);
+    encoding_diff(gen.words(), linked_words(&::layer_norm_ssve_v7));
+}
+
+// The emission DECISION itself, not just the encodings: on this machine
+// `automatic` must select the variant the hardware can actually run.
+TEST_CASE("Sprint6 JIT: automatic emission follows FEAT_SME2",
+          "[norm][sprint6][sme2]") {
+    Norm gen;
+    REQUIRE(gen.generate(Norm::ntype_t::rms) == Norm::error_t::success);
+    REQUIRE(gen.emitted_isa() ==
+            (cpu_supports_sme2() ? Norm::isa_t::sme2 : Norm::isa_t::sme1));
+}
+
+TEST_CASE("Sprint6 InstGen: SME2 multi-vector encoders match golden words",
+          "[norm][sprint6][sme2][encoders]") {
+    // golden words: objdump of clang -march=armv9-a+sme2 assembly
+    REQUIRE(IG::sme2_ptrue_pn_s(IG::p8)  == 0x25a07810u);   // ptrue pn8.s
+    REQUIRE(IG::sme2_ptrue_pn_s(IG::p9)  == 0x25a07811u);   // ptrue pn9.s
+    REQUIRE(IG::sme2_ptrue_pn_s(IG::p15) == 0x25a07817u);   // ptrue pn15.s
+    REQUIRE(IG::sme2_ld1w_x4(IG::z0,  IG::p8,  IG::x8)  == 0xa040c100u);
+    REQUIRE(IG::sme2_ld1w_x4(IG::z0,  IG::p8,  IG::x9)  == 0xa040c120u);
+    REQUIRE(IG::sme2_ld1w_x4(IG::z4,  IG::p8,  IG::x8)  == 0xa040c104u);
+    REQUIRE(IG::sme2_ld1w_x4(IG::z28, IG::p8,  IG::x8)  == 0xa040c11cu);
+    REQUIRE(IG::sme2_ld1w_x4(IG::z0,  IG::p9,  IG::x8)  == 0xa040c500u);
+    REQUIRE(IG::sme2_ld1w_x4(IG::z0,  IG::p15, IG::x19) == 0xa040de60u);
+    REQUIRE(IG::sme2_st1w_x4(IG::z0,  IG::p8,  IG::x9)  == 0xa060c120u);
+    REQUIRE(IG::sme2_st1w_x4(IG::z0,  IG::p8,  IG::x8)  == 0xa060c100u);
+    REQUIRE(IG::sme2_st1w_x4(IG::z4,  IG::p8,  IG::x9)  == 0xa060c124u);
+    REQUIRE(IG::sme2_st1w_x4(IG::z28, IG::p15, IG::x20) == 0xa060de9cu);
 }
 
 // --- execution: JIT kernel vs C++ reference (same cases as the V6 tests) ----
@@ -1718,7 +1778,7 @@ TEST_CASE("Sprint6 AAPCS64: every RMSNorm kernel preserves d9-d15",
     // extern "C" rms_norm_ssve_v6, so the bare name is ambiguous here.
     // The namespaced wrapper is what real callers (TEIR, the bench) use.
     check(mini_jit::norm::rms_norm_ssve_v6);
-    check(rms_norm_ssve_v7);
+    check(mini_jit::norm::rms_norm_ssve_v7);   // qualified — raw extern "C" twin exists
     check(rms_norm_za);
 
     // The roofline probe is not a norm kernel, but every "% of peak" in the
@@ -1748,7 +1808,7 @@ TEST_CASE("Sprint6 AAPCS64: every LayerNorm kernel preserves d9-d15",
     check(layer_norm_ssve_v4);
     check(layer_norm_ssve_v5);
     check(mini_jit::norm::layer_norm_ssve_v6);   // qualified — see RMSNorm note
-    check(layer_norm_ssve_v7);
+    check(mini_jit::norm::layer_norm_ssve_v7); // qualified — raw extern "C" twin exists
     check(layer_norm_ssve_welford);
     check(layer_norm_za);
 }
