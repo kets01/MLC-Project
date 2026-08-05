@@ -520,6 +520,8 @@ static void teir_threading_section(double peak_ssve, double peak_chip) {
               << "SPRINT 5 - TEIR-INVOKED NORM, OpenMP ROW-PARALLEL\n"
               << std::string(78, '=') << "\n";
 #if !BENCH_HAS_OMP
+    (void)peak_ssve; 
+    (void)peak_chip; 
     std::cout << "OpenMP not available in this build - threaded scaling skipped.\n";
     return;
 #else
