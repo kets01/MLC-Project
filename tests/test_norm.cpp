@@ -1048,6 +1048,87 @@ TEST_CASE("RMSNorm SSVE V6: large-magnitude stress input", "[norm][sprint2][abla
 }
 
 
+// ---------------------------------------------------------------------------
+// Sprint 6 — V7: V6 with SME2 multi-vector LD1W/ST1W in the group path.
+//
+// V7 is V6 with four single-vector accesses folded into one 4-vector access,
+// so it must produce BIT-FOR-BIT what V6 produces: same memory, same order,
+// same arithmetic.  It therefore gets V6's shape set at V6's strict kTol (no
+// reassociation widening — the per-row-block accumulators still sum columns
+// sequentially), plus the two boundaries specific to this variant:
+//   - the SME2 group path vs the plain-SVE predicated tail (M < 4*VL), since
+//     only the group path uses multi-vector instructions;
+//   - the SME1 fallback, exercised implicitly whenever FEAT_SME2 is absent —
+//     on such a machine the wrapper runs V6 and these tests still pass, which
+//     is the point of the dispatch.
+//
+// Guarded on cpu_supports_sme() rather than sme2: the wrapper falls back to
+// V6, so the callable contract holds on any SME machine.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RMSNorm SSVE V7 (SME2): exactly one full group (M=4*VL)",
+          "[norm][sprint6][sme2][v7]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v7, 64, 32, 64, 64, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V7 (SME2): group + full tail blocks + partial (M=100)",
+          "[norm][sprint6][sme2][v7]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v7, 100, 50, 100, 100, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V7 (SME2): tail-only path (M < 4*VL, no multi-vector)",
+          "[norm][sprint6][sme2][v7]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v7, 8, 50, 8, 8, 1e-5f);
+    check_variant(rms_norm_ssve_v7, 40, 37, 48, 40, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V7 (SME2): multiple groups, mismatched ld, N=1",
+          "[norm][sprint6][sme2][v7]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v7, 192, 37, 200, 224, 1e-5f);
+    check_variant(rms_norm_ssve_v7, 128,  1, 128, 128, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V7 (SME2): large-magnitude stress input",
+          "[norm][sprint6][sme2][v7][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant_stress(rms_norm_ssve_v7);
+}
+
+// The strongest statement available: V7 must agree with V6 EXACTLY. Folding
+// four loads into one multi-vector load changes no value, so any difference
+// at all — not merely one above a tolerance — means the operand mapping is
+// wrong (e.g. blocks transposed, or the counter predicate covering the wrong
+// element count). Skipped rather than trivially true without SME2, since the
+// wrapper would otherwise be comparing V6 against itself.
+TEST_CASE("RMSNorm SSVE V7 (SME2): bit-identical to V6",
+          "[norm][sprint6][sme2][v7]") {
+    if (!cpu_supports_sme())  SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required (V7 falls back to V6)");
+
+    for (auto shape : { std::pair<int64_t,int64_t>{64, 32},
+                        std::pair<int64_t,int64_t>{100, 50},
+                        std::pair<int64_t,int64_t>{192, 37} }) {
+        const int64_t M = shape.first, N = shape.second, ld = M;
+        std::vector<float> gamma(N);
+        for (int64_t i = 0; i < N; ++i) gamma[i] = 0.5f + 0.1f * float(i % 17);
+        auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+            return static_cast<float>((r * 11 + c * 7) % 19) - 9.0f;
+        });
+        std::vector<float> b6(ld * N, 0.0f), b7(ld * N, 0.0f);
+        rms_norm_ssve_v6(a.data(), b6.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+        rms_norm_ssve_v7(a.data(), b7.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+        for (int64_t i = 0; i < ld * N; ++i) {
+            INFO("M=" << M << " N=" << N << " index " << i);
+            REQUIRE(b7[i] == b6[i]);
+        }
+    }
+}
+
+
 // ===========================================================================
 // Sprint 3 — RMSNorm ZA-tile residency kernel (rms_norm_za)
 //
@@ -1252,6 +1333,7 @@ TEST_CASE("RMSNorm SSVE kernels: all-zero row is finite (eps regression)",
     check(rms_norm_ssve_v4, "rms_norm_ssve_v4");
     check(rms_norm_ssve_v5, "rms_norm_ssve_v5");
     check(rms_norm_ssve_v6, "rms_norm_ssve_v6");
+    check(rms_norm_ssve_v7, "rms_norm_ssve_v7");
     check(rms_norm_za,      "rms_norm_za");
 }
 
@@ -1578,6 +1660,7 @@ TEST_CASE("Sprint6 AAPCS64: every RMSNorm kernel preserves d9-d15",
     // extern "C" rms_norm_ssve_v6, so the bare name is ambiguous here.
     // The namespaced wrapper is what real callers (TEIR, the bench) use.
     check(mini_jit::norm::rms_norm_ssve_v6);
+    check(rms_norm_ssve_v7);
     check(rms_norm_za);
 
     // The roofline probe is not a norm kernel, but every "% of peak" in the
