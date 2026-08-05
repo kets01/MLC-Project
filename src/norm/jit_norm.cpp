@@ -483,10 +483,15 @@ void Norm::emit_layer_v6() {
     size_t done = ops.size();
     ops[fix_bnone] = I::base_b_cond( I::cond_eq,
                                      (int32_t)done - (int32_t)fix_bnone );
-    ops[fix_cbz] = I::base_br_cbz_x( I::x23,
-                                     (int32_t)done - (int32_t)fix_cbz );
 
     ops.push_back( I::sme_smstop_sm_only() );
+
+    // The m == 0 branch never reached smstart, so it must land AFTER the
+    // smstop, not on it (same shape as emit_rms_v6's row_done label).
+    size_t ret_label = ops.size();
+    ops[fix_cbz] = I::base_br_cbz_x( I::x23,
+                                     (int32_t)ret_label - (int32_t)fix_cbz );
+
     ops.push_back( I::simd_ldr_imm_d( I::v8,  I::sp, 64 ) );
     ops.push_back( I::simd_ldr_imm_d( I::v9,  I::sp, 72 ) );
     ops.push_back( I::simd_ldr_imm_d( I::v10, I::sp, 80 ) );
