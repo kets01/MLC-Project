@@ -235,11 +235,23 @@ TEST_CASE("Sprint5 GEMM: all layout combinations vs scalar reference",
 
     // 48x48 exercises multi-tile M, the 16-wide n-tail (48 = 32+16), and a
     // multi-chunk K; every (trans_a, trans_b, trans_c) combination covers
-    // both direct-load paths and both ZA-staged transpose paths.
+    // both direct-load paths and both ZA-staged transpose paths. K=40 adds
+    // the predicated remainder chunk (2 full chunks + 8) per combination.
     for (uint32_t ta = 0; ta <= 1; ++ta)
         for (uint32_t tb = 0; tb <= 1; ++tb)
-            for (uint32_t tc = 0; tc <= 1; ++tc)
+            for (uint32_t tc = 0; tc <= 1; ++tc) {
                 check_gemm_layout(48, 48, 32, ta, tb, tc);
+                check_gemm_layout(48, 48, 40, ta, tb, tc);
+            }
+}
+
+TEST_CASE("Sprint5 GEMM: arbitrary K (course spec) incl. remainder-only and K=1",
+          "[sprint5][gemm][arbitrary-k]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_gemm_layout(32, 32, 8, 1, 1, 1);    // remainder-only, staged A
+    check_gemm_layout(32, 32, 8, 0, 0, 0);    // remainder-only, staged B
+    check_gemm_layout(32, 32, 17, 1, 0, 1);   // 1 chunk + rem 1, both staged
+    check_gemm_layout(32, 32, 1, 0, 1, 0);    // K=1, direct paths
 }
 
 TEST_CASE("Sprint5 GEMM: .teir shapes (row-major, accumulating)",
