@@ -1,5 +1,5 @@
 
-find_package(OpenMP)
+# OpenMP is detected once in the root CMakeLists (see the note there).
 
 add_library(week7_lib TeirRuntime.cpp TeirParser.cpp)
 
