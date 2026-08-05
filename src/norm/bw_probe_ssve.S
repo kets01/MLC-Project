@@ -36,8 +36,19 @@
 
 SYMBOL(bw_probe_ssve):
 
-    // No callee-saved registers used (x0–x6, z0–z4, p0–p1 are all volatile),
-    // so no prologue is needed.  Skip streaming entry entirely for n == 0.
+    // No callee-saved GPRs are used (x0-x6, z0-z4, p0-p1 are all volatile),
+    // but a prologue IS still needed: smstart/smstop zero d8-d15 (they alias
+    // the low bits of z8-z15), and AAPCS64 makes those callee-saved.  This
+    // probe never names them, which is exactly why the omission went
+    // unnoticed — the hazard comes from the streaming-mode transition, not
+    // from the register allocation.  Measured on M4 before this fix: the
+    // probe destroyed 6 of the caller's 7 d9-d15 registers.  (Sprint 6,
+    // completing the Sprint-5 fix across every streaming kernel.)
+    stp  d8,  d9,  [sp, #-64]!
+    stp  d10, d11, [sp, #16]
+    stp  d12, d13, [sp, #32]
+    stp  d14, d15, [sp, #48]
+
     cbz   x2, .Lret
 
     smstart sm
@@ -98,4 +109,8 @@ SYMBOL(bw_probe_ssve):
     smstop sm
 
 .Lret:
+    ldp  d10, d11, [sp, #16]
+    ldp  d12, d13, [sp, #32]
+    ldp  d14, d15, [sp, #48]
+    ldp  d8,  d9,  [sp], #64
     ret

@@ -334,11 +334,46 @@ accumulator does and doesn't help a bandwidth-bound vector op.
 
 **Goal:** the proposal's evaluation deliverable — close on the roofline and attribute every gain.
 
-- [ ] Measure-driven optimization (decision E/F): identify the real bottleneck from the harness, then tune (resident rows, load/store scheduling, ZA tiling, fewer streaming transitions).
-- [ ] **Ablation study**: GiB/s for scalar reference → naive SSVE → VLA SSVE → V4–V6 memory levers → ZA-tiled (hand-written) → JIT (per path) → TEIR+OpenMP, and **LayerNorm two-pass vs Welford vs RMSNorm single-pass** on the same harness (decision C). Each row attributable, negatives explained.
-- [ ] Report GiB/s **vs both validated ceilings** (single-core and chip-wide) across shapes (small→large feature dims, varying row counts); state bytes counted and the convention used.
-- [ ] Verify every optimized configuration still matches the reference (decision B).
-- [ ] **SME2 exploration (new instruction-set lever — the M4 actually exposes it).** Hardware
+- [x] **PREREQUISITE the baseline exposed — the Sprint-5 ABI fix was only half-applied.** The first baseline run printed **65 rows of `0.00 GiB/s`** (the known `d8–d15` clobber, `sprint4_errors.md` #6/#8). Sprint 5 fixed only the two V6 winners — the ones TEIR calls — so a hardware probe found **15 of 17 entry points still destroying the caller's `d9–d15`**, including `bw_probe_ssve`, the probe every "% of peak" is divided by. `main_norm`'s caller-side `volatile` is a workaround, and it had stopped holding. Fixed across all 15 kernels + the probe; **65 zero rows → 0**, every table reproducing its documented values. Two lessons recorded: the scripted fix introduced a `d9`/eps stack-slot collision that **every functional test passed over** and only the register probe caught; and the old ABI test covered just the two V6 kernels, which is exactly how the other 15 drifted — there is now one pinning all 17 (`[sprint6][abi]`).
+- [x] Measure-driven optimization (decision E/F): the harness identified the real bottleneck, and the tuning that followed was **V7 = V6 + SME2 multi-vector accesses** (below). Levers left alone with reasons: ZA tiling (Sprint 3 measured it `mova`-bound at every footprint), streaming transitions (already one region per call), load scheduling (V5 ≈0).
+- [x] **Ablation study**: one consolidated table in `main_norm` — scalar reference → V0 → V1/V2/V3 → V4/V5 → V6 → V7 → ZA → JIT, both norms, three regimes (per-call-overhead / cache-assisted / true-DRAM), same harness and same shapes throughout, with **LayerNorm two-pass vs Welford vs RMSNorm single-pass** side by side (decision C). Each row prints its measured max deviation from the reference, so accuracy is shown rather than asserted. The harness also caught itself: 20 reps made the small shape report hand-written V6 10 % below its own word-identical JIT twin — reps now scale with working set, after which they agree exactly.
+- [x] Report GiB/s **vs both validated ceilings** (single-core SSVE and chip-wide) across shapes; byte convention (useful 1R+1W) restated in the section header.
+- [x] Verify every optimized configuration still matches the reference (decision B) — verification runs *before* each row's GiB/s is reported, and the JIT/TEIR paths are verified on top of that.
+- [x] **SME2 exploration — DONE, and the pre-registered expectation was WRONG (the sprint's headline result).**
+      `FEAT_SME2` confirmed by `sysctl`, and the multi-vector forms assembled **and executed** in a
+      streaming region on the M4 before any kernel was built on them. The lever taken was the one this
+      bullet called "the more promising angle": V6's group loop already touches four consecutive VL-row
+      blocks per column, which is exactly SME2's 4-vector operand shape, so **V7 = V6 with 4 accesses
+      folded into 1** — same addresses, same traffic, same arithmetic, so the correctness gate is
+      *bit-identity* with V6, not a tolerance. **RESULT: +17.2 % for RMSNorm in the true-DRAM regime**
+      (order-alternating A/B, 24 samples each way), ≈0 cache-resident — against a pre-registration of
+      "cannot help, SME2 does not raise the DRAM roofline". **LayerNorm V7 was then built as the
+      discriminating experiment**, because two mechanisms explain the RMSNorm win and predict opposite
+      LayerNorm outcomes: "fewer instructions retire faster" predicts a *bigger* gain (LayerNorm folds
+      more accesses per element — three passes, not two), while "relieved memory-level parallelism"
+      predicts a *smaller* one (LayerNorm does more FP work per byte and is less memory-starved).
+      **Measured +2.7 % — the instruction-count explanation is falsified, MLP survives.** The threading
+      data agrees: +17 % at one thread, +2.6 % at 16, where the memory system is already saturated.
+      This refines Sprint 2b rather than contradicting it — V6 made the *addresses* contiguous, V7 makes
+      the *request* singular; the roofline is unchanged, what changed is how much of it one core reaches.
+      Guarded behind `cpu_supports_sme2()`, falling back to V6 on M1/M2.
+- [x] **V7 promoted into the JIT and TEIR (the first feature-dependent emission decision).** Sprint 4
+      left emission choices collapsed because no shape selected ZA; SME2 provides one that pays.
+      `mini_jit::Norm::generate()` now takes an `isa_t` (`automatic` = V7 where `FEAT_SME2` is present,
+      else V6). Three new `InstGen` encoders (`PTRUE PNn.S`, 4-vector `LD1W`/`ST1W`), field layouts
+      derived from 13 toolchain golden words varying register/base/predicate independently and pinned by
+      unit test. **Encoding diff green for both SME2 kernels**; emitted size 157→148 (RMS) and 208→196
+      (LN) words, exactly the folded accesses. TEIR inherits it via the default: **single-thread RMSNorm
+      21.04 → 24.68 GiB/s (+17.3 %)**, every configuration verified.
+- [x] ~~SME2 multi-vector on the **ZA** path~~ — **reasoned skip, unchanged by this sprint's data.**
+      Sprint 3 measured ZA pinned at ~10 GiB/s at *every* footprint (`mova`-bound, not memory-bound), and
+      this bullet's own arithmetic still holds: even a 2x `mova` speed-up reaches ~20 GiB/s, a tie at best
+      with V6, and only in the N ≤ 64 window that is cache-resident anyway. Recorded as a skip with its
+      reason rather than an untried box.
+
+  <details><summary>Original pre-registration (kept verbatim — it is the thing the measurement overturned)</summary>
+
+- [x] **SME2 exploration — SUPERSEDED pre-registration, kept verbatim for the record.** Hardware
       correction: `sysctl` on the target M4 reports `hw.optional.arm.FEAT_SME2: 1` — the machine
       supports **SME2**, not only SME1 as the docs conservatively assumed. SME2 does **not** raise
       the DRAM roofline, so it cannot help the bandwidth-bound large-N shapes; the one lever worth
@@ -350,6 +385,8 @@ accumulator does and doesn't help a bandwidth-bound vector op.
       streaming path is the more promising angle but V6 is already ~95 % of moved-bytes single-core.
       Measure it, keep each result (positive or explained-negative) as an ablation row, and guard
       the SME2 path behind a `FEAT_SME2` runtime check so it degrades to the SME1 kernel on M1/M2.
+
+  </details>
 
 **Done when:** an ablation table shows each optimization's contribution and how close to peak the best kernel gets — at both the single-core and the threaded level.
 **Tooling:** none new (Arm ARM for the SME2 multi-vector encodings; verify against `FEAT_SME2`).

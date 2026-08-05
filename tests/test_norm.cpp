@@ -720,6 +720,63 @@ TEST_CASE("LayerNorm SSVE V6: large-magnitude stress input", "[norm][sprint2c][s
     check_ln_variant_stress(layer_norm_ssve_v6);
 }
 
+
+// ---------------------------------------------------------------------------
+// Sprint 6 — LayerNorm V7: V6 with SME2 multi-vector LD1W/ST1W.
+//
+// Built to test whether RMSNorm V7's (surprising) DRAM win is norm-agnostic.
+// Like its RMSNorm twin this folds four accesses into one without changing a
+// single value, so the binding requirement is bit-identity with V6, and the
+// shape set walks the SME2 group path, the plain-SVE tail, and the boundary
+// between them.  Guarded on SME (not SME2) because the wrapper falls back to
+// V6, so the callable contract holds on any SME machine.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("LayerNorm SSVE V7 (SME2): group, group+tail, tail-only",
+          "[norm][sprint6][sme2][v7]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant(layer_norm_ssve_v7, 64,  32,  64,  64, 1e-5f);   // one full group
+    check_ln_variant(layer_norm_ssve_v7, 100, 50, 100, 100, 1e-5f);   // group + tail
+    check_ln_variant(layer_norm_ssve_v7, 8,   37,   8,   8, 1e-5f);   // tail only
+    check_ln_variant(layer_norm_ssve_v7, 192, 37, 200, 224, 1e-5f);   // groups, padded ld
+    check_ln_variant(layer_norm_ssve_v7, 128,  1, 128, 128, 1e-5f);   // N=1
+}
+
+TEST_CASE("LayerNorm SSVE V7 (SME2): large-magnitude stress input",
+          "[norm][sprint6][sme2][v7][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant_stress(layer_norm_ssve_v7);
+}
+
+TEST_CASE("LayerNorm SSVE V7 (SME2): bit-identical to V6",
+          "[norm][sprint6][sme2][v7]") {
+    if (!cpu_supports_sme())  SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required (V7 falls back to V6)");
+
+    for (auto shape : { std::pair<int64_t,int64_t>{64, 32},
+                        std::pair<int64_t,int64_t>{100, 50},
+                        std::pair<int64_t,int64_t>{192, 37} }) {
+        const int64_t M = shape.first, N = shape.second, ld = M;
+        std::vector<float> gamma(N), beta(N);
+        for (int64_t i = 0; i < N; ++i) {
+            gamma[i] = 0.5f + 0.05f * static_cast<float>(i % 17);
+            beta[i]  = 0.1f  * static_cast<float>(i % 13) - 0.3f;
+        }
+        auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+            return static_cast<float>((r * 11 + c * 7) % 19) - 9.0f;
+        });
+        std::vector<float> b6(ld * N, 0.0f), b7(ld * N, 0.0f);
+        layer_norm_ssve_v6(a.data(), b6.data(), gamma.data(), beta.data(),
+                           M, N, ld, ld, 1e-5f);
+        layer_norm_ssve_v7(a.data(), b7.data(), gamma.data(), beta.data(),
+                           M, N, ld, ld, 1e-5f);
+        for (int64_t i = 0; i < ld * N; ++i) {
+            INFO("M=" << M << " N=" << N << " index " << i);
+            REQUIRE(b7[i] == b6[i]);
+        }
+    }
+}
+
 TEST_CASE("LayerNorm SSVE Welford: large-magnitude stress input (the stability claim)", "[norm][sprint2c][ssve][layernorm][welford][stress]") {
     if (!cpu_supports_sme()) SKIP("SME required");
     check_ln_variant_stress(layer_norm_ssve_welford);
@@ -1048,6 +1105,87 @@ TEST_CASE("RMSNorm SSVE V6: large-magnitude stress input", "[norm][sprint2][abla
 }
 
 
+// ---------------------------------------------------------------------------
+// Sprint 6 — V7: V6 with SME2 multi-vector LD1W/ST1W in the group path.
+//
+// V7 is V6 with four single-vector accesses folded into one 4-vector access,
+// so it must produce BIT-FOR-BIT what V6 produces: same memory, same order,
+// same arithmetic.  It therefore gets V6's shape set at V6's strict kTol (no
+// reassociation widening — the per-row-block accumulators still sum columns
+// sequentially), plus the two boundaries specific to this variant:
+//   - the SME2 group path vs the plain-SVE predicated tail (M < 4*VL), since
+//     only the group path uses multi-vector instructions;
+//   - the SME1 fallback, exercised implicitly whenever FEAT_SME2 is absent —
+//     on such a machine the wrapper runs V6 and these tests still pass, which
+//     is the point of the dispatch.
+//
+// Guarded on cpu_supports_sme() rather than sme2: the wrapper falls back to
+// V6, so the callable contract holds on any SME machine.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RMSNorm SSVE V7 (SME2): exactly one full group (M=4*VL)",
+          "[norm][sprint6][sme2][v7]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v7, 64, 32, 64, 64, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V7 (SME2): group + full tail blocks + partial (M=100)",
+          "[norm][sprint6][sme2][v7]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v7, 100, 50, 100, 100, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V7 (SME2): tail-only path (M < 4*VL, no multi-vector)",
+          "[norm][sprint6][sme2][v7]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v7, 8, 50, 8, 8, 1e-5f);
+    check_variant(rms_norm_ssve_v7, 40, 37, 48, 40, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V7 (SME2): multiple groups, mismatched ld, N=1",
+          "[norm][sprint6][sme2][v7]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant(rms_norm_ssve_v7, 192, 37, 200, 224, 1e-5f);
+    check_variant(rms_norm_ssve_v7, 128,  1, 128, 128, 1e-5f);
+}
+
+TEST_CASE("RMSNorm SSVE V7 (SME2): large-magnitude stress input",
+          "[norm][sprint6][sme2][v7][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant_stress(rms_norm_ssve_v7);
+}
+
+// The strongest statement available: V7 must agree with V6 EXACTLY. Folding
+// four loads into one multi-vector load changes no value, so any difference
+// at all — not merely one above a tolerance — means the operand mapping is
+// wrong (e.g. blocks transposed, or the counter predicate covering the wrong
+// element count). Skipped rather than trivially true without SME2, since the
+// wrapper would otherwise be comparing V6 against itself.
+TEST_CASE("RMSNorm SSVE V7 (SME2): bit-identical to V6",
+          "[norm][sprint6][sme2][v7]") {
+    if (!cpu_supports_sme())  SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required (V7 falls back to V6)");
+
+    for (auto shape : { std::pair<int64_t,int64_t>{64, 32},
+                        std::pair<int64_t,int64_t>{100, 50},
+                        std::pair<int64_t,int64_t>{192, 37} }) {
+        const int64_t M = shape.first, N = shape.second, ld = M;
+        std::vector<float> gamma(N);
+        for (int64_t i = 0; i < N; ++i) gamma[i] = 0.5f + 0.1f * float(i % 17);
+        auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+            return static_cast<float>((r * 11 + c * 7) % 19) - 9.0f;
+        });
+        std::vector<float> b6(ld * N, 0.0f), b7(ld * N, 0.0f);
+        rms_norm_ssve_v6(a.data(), b6.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+        rms_norm_ssve_v7(a.data(), b7.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+        for (int64_t i = 0; i < ld * N; ++i) {
+            INFO("M=" << M << " N=" << N << " index " << i);
+            REQUIRE(b7[i] == b6[i]);
+        }
+    }
+}
+
+
 // ===========================================================================
 // Sprint 3 — RMSNorm ZA-tile residency kernel (rms_norm_za)
 //
@@ -1252,6 +1390,7 @@ TEST_CASE("RMSNorm SSVE kernels: all-zero row is finite (eps regression)",
     check(rms_norm_ssve_v4, "rms_norm_ssve_v4");
     check(rms_norm_ssve_v5, "rms_norm_ssve_v5");
     check(rms_norm_ssve_v6, "rms_norm_ssve_v6");
+    check(rms_norm_ssve_v7, "rms_norm_ssve_v7");
     check(rms_norm_za,      "rms_norm_za");
 }
 
@@ -1277,6 +1416,7 @@ TEST_CASE("LayerNorm SSVE kernels: all-constant row is finite (eps regression)",
     check(layer_norm_ssve_v4,       "layer_norm_ssve_v4");
     check(layer_norm_ssve_v5,       "layer_norm_ssve_v5");
     check(layer_norm_ssve_v6,       "layer_norm_ssve_v6");
+    check(layer_norm_ssve_v7,       "layer_norm_ssve_v7");
     check(layer_norm_ssve_welford,  "layer_norm_ssve_welford");
 }
 
@@ -1311,6 +1451,10 @@ TEST_CASE("LayerNorm SSVE kernels: all-constant row is finite (eps regression)",
 extern "C" void rms_norm_ssve_v6(const float*, float*, const float*,
                                  int64_t, int64_t, int64_t, int64_t, float);
 extern "C" void layer_norm_ssve_v6(const float*, float*, const float*, const float*,
+                                   int64_t, int64_t, int64_t, int64_t, float);
+extern "C" void rms_norm_ssve_v7(const float*, float*, const float*,
+                                 int64_t, int64_t, int64_t, int64_t, float);
+extern "C" void layer_norm_ssve_v7(const float*, float*, const float*, const float*,
                                    int64_t, int64_t, int64_t, int64_t, float);
 
 using IG = mini_jit::InstGen;
@@ -1412,7 +1556,7 @@ static void encoding_diff(const std::vector<uint32_t>& jit,
 TEST_CASE("Sprint4 encoding diff: JIT RMSNorm == assembled rms_norm_ssve_v6",
           "[norm][sprint4][encoding-diff]") {
     Norm gen;
-    REQUIRE(gen.generate(Norm::ntype_t::rms) == Norm::error_t::success);
+    REQUIRE(gen.generate(Norm::ntype_t::rms, Norm::isa_t::sme1) == Norm::error_t::success);
     REQUIRE(gen.words().size() == 157);        // instruction count of the .S
     encoding_diff(gen.words(), linked_words(&::rms_norm_ssve_v6));
 }
@@ -1420,9 +1564,65 @@ TEST_CASE("Sprint4 encoding diff: JIT RMSNorm == assembled rms_norm_ssve_v6",
 TEST_CASE("Sprint4 encoding diff: JIT LayerNorm == assembled layer_norm_ssve_v6",
           "[norm][sprint4][encoding-diff]") {
     Norm gen;
-    REQUIRE(gen.generate(Norm::ntype_t::layer) == Norm::error_t::success);
+    REQUIRE(gen.generate(Norm::ntype_t::layer, Norm::isa_t::sme1) == Norm::error_t::success);
     REQUIRE(gen.words().size() == 208);
     encoding_diff(gen.words(), linked_words(&::layer_norm_ssve_v6));
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 6 — the same guarantee for the SME2 path.
+//
+// Emission is host-portable, so these run even where FEAT_SME2 is absent:
+// the generator is asked for isa_t::sme2 explicitly rather than letting
+// `automatic` pick, which is exactly why generate() takes the parameter. A
+// green diff means the SME2 kernels the JIT emits are the same instruction
+// words as the hand-written V7 kernels that already passed the bit-identity
+// and reference tests above — the JIT inherits that trust instead of
+// re-earning it.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Sprint6 encoding diff: JIT RMSNorm SME2 == assembled rms_norm_ssve_v7",
+          "[norm][sprint6][sme2][encoding-diff]") {
+    Norm gen;
+    REQUIRE(gen.generate(Norm::ntype_t::rms, Norm::isa_t::sme2) == Norm::error_t::success);
+    REQUIRE(gen.emitted_isa() == Norm::isa_t::sme2);
+    encoding_diff(gen.words(), linked_words(&::rms_norm_ssve_v7));
+}
+
+TEST_CASE("Sprint6 encoding diff: JIT LayerNorm SME2 == assembled layer_norm_ssve_v7",
+          "[norm][sprint6][sme2][encoding-diff]") {
+    Norm gen;
+    REQUIRE(gen.generate(Norm::ntype_t::layer, Norm::isa_t::sme2) == Norm::error_t::success);
+    REQUIRE(gen.emitted_isa() == Norm::isa_t::sme2);
+    encoding_diff(gen.words(), linked_words(&::layer_norm_ssve_v7));
+}
+
+// The emission DECISION itself, not just the encodings: on this machine
+// `automatic` must select the variant the hardware can actually run.
+TEST_CASE("Sprint6 JIT: automatic emission follows FEAT_SME2",
+          "[norm][sprint6][sme2]") {
+    Norm gen;
+    REQUIRE(gen.generate(Norm::ntype_t::rms) == Norm::error_t::success);
+    REQUIRE(gen.emitted_isa() ==
+            (cpu_supports_sme2() ? Norm::isa_t::sme2 : Norm::isa_t::sme1));
+}
+
+TEST_CASE("Sprint6 InstGen: SME2 multi-vector encoders match golden words",
+          "[norm][sprint6][sme2][encoders]") {
+    // golden words: objdump of clang -march=armv9-a+sme2 assembly
+    REQUIRE(IG::sme2_ptrue_pn_s(IG::p8)  == 0x25a07810u);   // ptrue pn8.s
+    REQUIRE(IG::sme2_ptrue_pn_s(IG::p9)  == 0x25a07811u);   // ptrue pn9.s
+    REQUIRE(IG::sme2_ptrue_pn_s(IG::p15) == 0x25a07817u);   // ptrue pn15.s
+    REQUIRE(IG::sme2_ld1w_x4(IG::z0,  IG::p8,  IG::x8)  == 0xa040c100u);
+    REQUIRE(IG::sme2_ld1w_x4(IG::z0,  IG::p8,  IG::x9)  == 0xa040c120u);
+    REQUIRE(IG::sme2_ld1w_x4(IG::z4,  IG::p8,  IG::x8)  == 0xa040c104u);
+    REQUIRE(IG::sme2_ld1w_x4(IG::z28, IG::p8,  IG::x8)  == 0xa040c11cu);
+    REQUIRE(IG::sme2_ld1w_x4(IG::z0,  IG::p9,  IG::x8)  == 0xa040c500u);
+    REQUIRE(IG::sme2_ld1w_x4(IG::z0,  IG::p15, IG::x19) == 0xa040de60u);
+    REQUIRE(IG::sme2_st1w_x4(IG::z0,  IG::p8,  IG::x9)  == 0xa060c120u);
+    REQUIRE(IG::sme2_st1w_x4(IG::z0,  IG::p8,  IG::x8)  == 0xa060c100u);
+    REQUIRE(IG::sme2_st1w_x4(IG::z4,  IG::p8,  IG::x9)  == 0xa060c124u);
+    REQUIRE(IG::sme2_st1w_x4(IG::z28, IG::p15, IG::x20) == 0xa060de9cu);
 }
 
 // --- execution: JIT kernel vs C++ reference (same cases as the V6 tests) ----
@@ -1502,6 +1702,116 @@ TEST_CASE("Sprint4 JIT kernels: all-constant row is finite (eps regression)",
 // held), this reproduces exactly what a real callee-saved-register-holding
 // caller like TEIR would see.
 // ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Sprint 6 — the same guarantee, for EVERY kernel.
+//
+// Sprint 5 fixed and tested only the two V6 winners, because those are what
+// TEIR calls.  The other 15 entry points kept saving just d8, and a Sprint-6
+// hardware probe found all 15 destroying the caller's d9-d15.  That is what
+// made whole benchmark tables read 0.00 GiB/s: main_norm's `volatile`
+// discipline is a caller-side workaround, and it only holds as long as
+// register allocation cooperates.
+//
+// Two tests below pin the property for every kernel at once, so a new variant
+// cannot ship without it.  The helper is the same construct as the V6 tests:
+// local register variables pin the pattern to the physical registers, and the
+// asm barriers force a real materialise/re-read rather than a compiler-tracked
+// copy (a plain C++ local would survive regardless of what the callee does,
+// and would therefore prove nothing).
+// ---------------------------------------------------------------------------
+
+template <typename F>
+static void require_preserves_d9_d15(F&& call) {
+    register double r9  asm("d9");
+    register double r10 asm("d10");
+    register double r11 asm("d11");
+    register double r12 asm("d12");
+    register double r13 asm("d13");
+    register double r14 asm("d14");
+    register double r15 asm("d15");
+
+    asm volatile("fmov d9,  #2.0\n\t"
+                 "fmov d10, #3.0\n\t"
+                 "fmov d11, #4.0\n\t"
+                 "fmov d12, #5.0\n\t"
+                 "fmov d13, #6.0\n\t"
+                 "fmov d14, #7.0\n\t"
+                 "fmov d15, #8.0\n\t"
+                 : "=w"(r9), "=w"(r10), "=w"(r11), "=w"(r12), "=w"(r13),
+                   "=w"(r14), "=w"(r15));
+
+    call();
+
+    asm volatile("" : "+w"(r9), "+w"(r10), "+w"(r11), "+w"(r12), "+w"(r13),
+                       "+w"(r14), "+w"(r15));
+
+    REQUIRE(r9  == 2.0);
+    REQUIRE(r10 == 3.0);
+    REQUIRE(r11 == 4.0);
+    REQUIRE(r12 == 5.0);
+    REQUIRE(r13 == 6.0);
+    REQUIRE(r14 == 7.0);
+    REQUIRE(r15 == 8.0);
+}
+
+TEST_CASE("Sprint6 AAPCS64: every RMSNorm kernel preserves d9-d15",
+          "[norm][sprint6][abi]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 64, N = 64, ld = M;
+    std::vector<float> a(ld * N), b(ld * N, 0.0f), gamma(N, 1.0f);
+    for (int64_t i = 0; i < ld * N; ++i) a[i] = 0.01f * float(i % 97);
+
+    auto check = [&](KernelFn k) {
+        require_preserves_d9_d15([&] {
+            k(a.data(), b.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+        });
+    };
+    check(rms_norm_ssve);
+    check(rms_norm_ssve_v1);
+    check(rms_norm_ssve_v2);
+    check(rms_norm_ssve_v3);
+    check(rms_norm_ssve_v4);
+    check(rms_norm_ssve_v5);
+    // Qualified: the encoding-diff section below also declares a raw
+    // extern "C" rms_norm_ssve_v6, so the bare name is ambiguous here.
+    // The namespaced wrapper is what real callers (TEIR, the bench) use.
+    check(mini_jit::norm::rms_norm_ssve_v6);
+    check(mini_jit::norm::rms_norm_ssve_v7);   // qualified — raw extern "C" twin exists
+    check(rms_norm_za);
+
+    // The roofline probe is not a norm kernel, but every "% of peak" in the
+    // report is divided by a number it produced, so it gets the same gate.
+    require_preserves_d9_d15([&] {
+        bw_probe_ssve(b.data(), a.data(), ld * N);
+    });
+}
+
+TEST_CASE("Sprint6 AAPCS64: every LayerNorm kernel preserves d9-d15",
+          "[norm][sprint6][abi]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t M = 64, N = 64, ld = M;
+    std::vector<float> a(ld * N), b(ld * N, 0.0f);
+    std::vector<float> gamma(N, 1.0f), beta(N, 0.0f);
+    for (int64_t i = 0; i < ld * N; ++i) a[i] = 0.01f * float(i % 97);
+
+    auto check = [&](LNKernelFn k) {
+        require_preserves_d9_d15([&] {
+            k(a.data(), b.data(), gamma.data(), beta.data(), M, N, ld, ld, 1e-5f);
+        });
+    };
+    check(layer_norm_ssve);
+    check(layer_norm_ssve_v1);
+    check(layer_norm_ssve_v2);
+    check(layer_norm_ssve_v4);
+    check(layer_norm_ssve_v5);
+    check(mini_jit::norm::layer_norm_ssve_v6);   // qualified — see RMSNorm note
+    check(mini_jit::norm::layer_norm_ssve_v7); // qualified — raw extern "C" twin exists
+    check(layer_norm_ssve_welford);
+    check(layer_norm_za);
+}
 
 TEST_CASE("Sprint5 AAPCS64: d9-d15 survive the RMSNorm V6 kernel call",
           "[norm][sprint5][abi]") {

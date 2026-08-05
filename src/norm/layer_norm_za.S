@@ -163,11 +163,22 @@ SYMBOL(layer_norm_za):
     // eps is stashed in memory rather than relied on via S8/D8 across smstart
     // (see rms_norm_ssve*.S / rms_norm_za.S Sprint-3 fix: streaming-mode
     // entry clobbers D8 too, not just D9-D15 -- verified empirically).
-    stp  x19, x20, [sp, #-80]!
+    stp  x19, x20, [sp, #-144]!
     stp  x21, x22, [sp, #16]
     stp  x23, x24, [sp, #32]
     stp  x25, x26, [sp, #48]
     str  d8,       [sp, #64]
+    str  d9,       [sp, #72]
+    str  d10,      [sp, #80]
+    str  d11,      [sp, #88]
+    str  d12,      [sp, #96]
+    str  d13,      [sp, #104]
+    str  d14,      [sp, #112]
+    str  d15,      [sp, #120]
+                                // (Sprint 6: the Sprint-5 d8-d15 AAPCS64 fix,
+                                // extended from the two V6 winners to every
+                                // kernel -- smstart/smstop zero all of d8-d15,
+                                // so a caller's d9-d15 were silently destroyed)
 
     mov   x19, x0                // a
     mov   x20, x1                // b
@@ -177,7 +188,7 @@ SYMBOL(layer_norm_za):
     mov   x24, x5                // N
     lsl   x25, x6, #2            // stride_a in bytes
     lsl   x26, x7, #2            // stride_b in bytes
-    str   s0,  [sp, #72]         // dedicated eps stash, stored BEFORE smstart
+    str   s0,  [sp, #128]         // dedicated eps stash, stored BEFORE smstart
 
     cbz   x23, .Lrow_done        // M == 0: nothing to do, no streaming region
 
@@ -187,7 +198,7 @@ SYMBOL(layer_norm_za):
     ptrue p0.s, all
 
     // eps broadcast (z29) and 1/N broadcast (z28), computed once.
-    ldr    s0, [sp, #72]          // eps reloaded from the dedicated stack slot
+    ldr    s0, [sp, #128]          // eps reloaded from the dedicated stack slot
     dup    z29.s, z0.s[0]
 
     fmov   s0, #1.0
@@ -323,8 +334,15 @@ SYMBOL(layer_norm_za):
 
 .Lrow_done:
     ldr  d8,       [sp, #64]
+    ldr  d9,       [sp, #72]
+    ldr  d10,      [sp, #80]
+    ldr  d11,      [sp, #88]
+    ldr  d12,      [sp, #96]
+    ldr  d13,      [sp, #104]
+    ldr  d14,      [sp, #112]
+    ldr  d15,      [sp, #120]
     ldp  x25, x26, [sp, #48]
     ldp  x23, x24, [sp, #32]
     ldp  x21, x22, [sp, #16]
-    ldp  x19, x20, [sp], #80
+    ldp  x19, x20, [sp], #144
     ret

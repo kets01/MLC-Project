@@ -122,6 +122,22 @@ void layer_norm_ssve_welford(const float* a,
                              int64_t      ld_b,
                              float        epsilon);
 
+// V7: V6 with SME2 multi-vector loads/stores — all three passes fold their
+// four consecutive VL-row block accesses into one 4-vector LD1W (and pass 3's
+// four stores into one 4-vector ST1W).  Same traffic and same summation order
+// as V6, so it must be bit-identical to it; built to test whether the RMSNorm
+// V7 result is norm-agnostic (Sprint 6).  Requires FEAT_SME2; the wrapper
+// dispatches to V6 when it is absent.
+void layer_norm_ssve_v7(const float* a,
+                        float*       b,
+                        const float* gamma,
+                        const float* beta,
+                        int64_t      m,
+                        int64_t      n,
+                        int64_t      ld_a,
+                        int64_t      ld_b,
+                        float        epsilon);
+
 // LayerNorm — hand-written SME/ZA kernel (Sprint 3, gated).  Full 3-pass ZA
 // residency: x is staged in ZA during the mean pass and reused from ZA for
 // BOTH the variance pass and the normalize pass (3R+1W -> 1R+1W, vs the SSVE
@@ -207,6 +223,21 @@ void rms_norm_ssve_v5(const float* a,
 // each column touch is 256 B contiguous (4x denser DRAM access); one
 // accumulator per block keeps V4's ILP with the reference's summation order.
 void rms_norm_ssve_v6(const float* a,
+                      float*       b,
+                      const float* gamma,
+                      int64_t      m,
+                      int64_t      n,
+                      int64_t      ld_a,
+                      int64_t      ld_b,
+                      float        epsilon);
+
+// V7: V6 with SME2 multi-vector loads/stores — the group loop's four
+// consecutive VL-row block accesses become ONE 4-vector LD1W (and one
+// 4-vector ST1W in pass 2).  Same traffic, same arithmetic, fewer
+// instructions: a single-variable test of whether V6 is instruction-issue
+// bound or memory bound (Sprint 6).  Requires FEAT_SME2; the wrapper
+// dispatches to V6 when it is absent, so this is safe to call anywhere.
+void rms_norm_ssve_v7(const float* a,
                       float*       b,
                       const float* gamma,
                       int64_t      m,

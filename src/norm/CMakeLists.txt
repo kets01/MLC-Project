@@ -8,6 +8,7 @@ add_library(norm_lib
     layer_norm_ssve_v4.S        # V4: V2 + 4 independent accumulators (both passes)
     layer_norm_ssve_v5.S        # V5: V4 + software-pipelined loads
     layer_norm_ssve_v6.S        # V6: 4-row-block contiguity grouping
+    layer_norm_ssve_v7.S        # Sprint 6: V6 + SME2 multi-vector LD1W/ST1W
     layer_norm_ssve_welford.S   # Welford: online single-pass mean+var
     layer_norm_za.S             # Sprint 3: ZA-tile residency (3R+1W -> 1R+1W fusion, gated)
     rms_norm_ssve.S             # V0: baseline SSVE kernel
@@ -17,6 +18,7 @@ add_library(norm_lib
     rms_norm_ssve_v4.S          # V4: V2 + 4 independent FMLA accumulators
     rms_norm_ssve_v5.S          # V5: V4 + software-pipelined loads
     rms_norm_ssve_v6.S          # V6: 4-row-block contiguity grouping
+    rms_norm_ssve_v7.S          # Sprint 6: V6 + SME2 multi-vector LD1W/ST1W
     rms_norm_za.S               # Sprint 3: ZA-tile residency (1R+1W fusion)
     bw_probe_ssve.S             # Sprint 2a: streaming-mode roofline probe
 )
@@ -48,6 +50,17 @@ set_source_files_properties(
     rms_norm_za.S
     bw_probe_ssve.S
     PROPERTIES COMPILE_FLAGS "-march=armv9-a+sme"
+)
+
+# V7 uses SME2 multi-vector LD1W/ST1W, so it needs +sme2 to ASSEMBLE.  That is
+# a build-time capability of the assembler, independent of the build host — CI
+# (M1/M2, no SME at all) still compiles this file fine.  Whether the kernel
+# RUNS is a separate, runtime question, handled by the cpu_supports_sme2()
+# dispatch in norm_ssve.cpp.
+set_source_files_properties(
+    rms_norm_ssve_v7.S
+    layer_norm_ssve_v7.S
+    PROPERTIES COMPILE_FLAGS "-march=armv9-a+sme2"
 )
 
 # norm_ssve.cpp includes week3/utility.hpp (cpu_supports_sme).

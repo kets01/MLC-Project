@@ -68,11 +68,22 @@ SYMBOL(rms_norm_ssve):
     //                      for eps now, kept saved/restored regardless)
     //  [sp+64] epsilon   — dedicated eps stash, stored before smstart
     // -----------------------------------------------------------------------
-    stp  x19, x20, [sp, #-80]!
+    stp  x19, x20, [sp, #-128]!
     stp  x21, x22, [sp, #16]
     stp  x23, x24, [sp, #32]
     str  x25,      [sp, #48]
     str  d8,       [sp, #56]
+    str  d9,       [sp, #64]
+    str  d10,      [sp, #72]
+    str  d11,      [sp, #80]
+    str  d12,      [sp, #88]
+    str  d13,      [sp, #96]
+    str  d14,      [sp, #104]
+    str  d15,      [sp, #112]
+                                // (Sprint 6: the Sprint-5 d8-d15 AAPCS64 fix,
+                                // extended from the two V6 winners to every
+                                // kernel -- smstart/smstop zero all of d8-d15,
+                                // so a caller's d9-d15 were silently destroyed)
 
     // -----------------------------------------------------------------------
     // Initialise callee-saved registers from arguments.
@@ -89,7 +100,7 @@ SYMBOL(rms_norm_ssve):
     lsl   x24, x5, #2      // ld_a_bytes = ld_a * 4
     lsl   x25, x6, #2      // ld_b_bytes = ld_b * 4
     fmov  s8,  s0          // kept for consistency (not relied on across smstart)
-    str   s0,  [sp, #64]   // dedicated eps stash, stored BEFORE smstart
+    str   s0,  [sp, #120]   // dedicated eps stash, stored BEFORE smstart
 
     cbz   x22, .Lrow_done
 
@@ -156,7 +167,7 @@ SYMBOL(rms_norm_ssve):
 
     // Broadcast epsilon, reloaded from the dedicated stack slot each block
     // (S8/D8 does not survive smstart, so it cannot be read from Z8 here):
-    ldr    s0, [sp, #64]
+    ldr    s0, [sp, #120]
     dup    z3.s, z0.s[0]               // z3 = {ε, ε, …}
     fadd   z2.s, p1/m, z2.s, z3.s     // z2[i] = sumsq[i]/N + ε
 
@@ -217,8 +228,15 @@ SYMBOL(rms_norm_ssve):
     // Epilogue — restore in reverse order.
     // -----------------------------------------------------------------------
     ldr  d8,       [sp, #56]
+    ldr  d9,       [sp, #64]
+    ldr  d10,      [sp, #72]
+    ldr  d11,      [sp, #80]
+    ldr  d12,      [sp, #88]
+    ldr  d13,      [sp, #96]
+    ldr  d14,      [sp, #104]
+    ldr  d15,      [sp, #112]
     ldr  x25,      [sp, #48]
     ldp  x23, x24, [sp, #32]
     ldp  x21, x22, [sp, #16]
-    ldp  x19, x20, [sp], #80
+    ldp  x19, x20, [sp], #128
     ret

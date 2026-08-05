@@ -35,6 +35,13 @@ class mini_jit::Norm {
       err_alloc = 1
     };
 
+    /// which instruction set the emitted kernel targets
+    enum class isa_t : uint32_t {
+      sme1      = 0,   ///< SSVE V6 — runs on any SME machine
+      sme2      = 1,   ///< V7: V6 with multi-vector LD1W/ST1W (needs FEAT_SME2)
+      automatic = 2    ///< pick sme2 when the host reports FEAT_SME2, else sme1
+    };
+
     // Canonical kernel signatures (decision A) — identical to the C++
     // reference and the hand-written kernels in norm.hpp.
     using rms_kernel_t = void (*)( const float* a,
@@ -57,11 +64,25 @@ class mini_jit::Norm {
                                      float        epsilon );
 
     /**
-     * @brief Emit the SSVE V6 kernel for the requested norm.
-     * Emission is host-portable; EXECUTING the kernel requires SME.
+     * @brief Emit a kernel for the requested norm.
+     *
+     * Emission is host-portable (it only writes instruction words), but
+     * EXECUTING the result requires SME — and, for isa_t::sme2, FEAT_SME2.
+     * With isa_t::automatic the generator makes the *feature*-dependent
+     * emission decision Sprint 4 left open: Sprint 6 measured V7 (SME2
+     * multi-vector) at +17% over V6 for RMSNorm in the DRAM regime, so it is
+     * emitted wherever the hardware supports it and V6 is emitted otherwise.
+     *
+     * Passing sme1/sme2 explicitly forces the choice, which is what lets the
+     * encoding-diff tests compare each emitted variant against the
+     * corresponding hand-written kernel regardless of the build host.
+     *
      * @return error_t::success on success.
      */
-    error_t generate( ntype_t ntype );
+    error_t generate( ntype_t ntype, isa_t isa = isa_t::automatic );
+
+    /// ISA actually emitted by the last generate() (never isa_t::automatic).
+    isa_t emitted_isa() const { return m_isa; }
 
     /// Kernel pointer after generate(ntype_t::rms); nullptr otherwise.
     rms_kernel_t get_rms_kernel() const;
@@ -75,8 +96,11 @@ class mini_jit::Norm {
   private:
     void emit_rms_v6();
     void emit_layer_v6();
+    void emit_rms_v7();      ///< V6 + SME2 multi-vector accesses
+    void emit_layer_v7();
 
     std::vector<uint32_t> m_ops;
     void*                 m_kernel = nullptr;
     ntype_t               m_ntype  = ntype_t::rms;
+    isa_t                 m_isa    = isa_t::sme1;
 };
