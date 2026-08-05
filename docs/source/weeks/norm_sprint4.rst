@@ -40,7 +40,12 @@ The JIT is verified by three layers, weakest to strongest
    word-for-word against the **linked** hand-written kernel, read straight
    from its function address at runtime — the reference is what the
    toolchain actually assembled, and can never go stale.  Green for both
-   norms: 143/143 words (RMSNorm) and 194/194 words (LayerNorm) identical.
+   norms: **157/157 words (RMSNorm) and 208/208 words (LayerNorm)**
+   identical.  (These counts are as of Sprint 5: the kernels were 143 and
+   194 words when this section was first written, and grew by the 14
+   save/restore instructions the Sprint-5 ``d8–d15`` AAPCS64 fix added to
+   each.  The diff was re-run after that change and stayed green — which is
+   the point of anchoring it to the linked kernel rather than a copy.)
    A green diff means the JIT kernel *inherits* the trust of a kernel that
    already passed the full Sprint-2/3 suite (including the eps-stash fix),
    instead of re-earning it.
@@ -104,9 +109,10 @@ D9–D15 hazard in this project; each time in a new disguise.)
 Parity and emission cost (M4, corrected harness)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Emission (one-time): **~4.7 µs** for RMSNorm (143 words), **~4.8 µs** for
-LayerNorm (194 words) — recouped after a handful of small-shape calls, and
-the pointer is reused thereafter.
+Emission (one-time): **~4.7 µs** for RMSNorm, **~4.8 µs** for LayerNorm
+(143 and 194 words at the time of this measurement; 157 and 208 after the
+Sprint-5 ABI fix) — recouped after a handful of small-shape calls, and the
+pointer is reused thereafter.
 
 .. list-table:: JIT-emitted V6 vs hand-written V6 (GiB/s, useful bytes, % of 59.5 GiB/s 1-core SSVE roofline)
    :header-rows: 1
@@ -158,8 +164,9 @@ Sprint 4 status
   measured rationale (Sprint 3).
 - 30 new ``InstGen`` encoders, each pinned to a toolchain golden word;
   two latent week-6 encoder bugs found and resolved.
-- Encoding diff green for both norms (143 + 194 words); JIT kernels verified
-  against the reference on M4; full suite green.
+- Encoding diff green for both norms (143 + 194 words at the time; 157 + 208
+  after the Sprint-5 ABI fix, re-verified); JIT kernels verified against the
+  reference on M4; full suite green.
 - Benchmark parity within noise at all shapes; emission ~5 µs one-time.
 - Harness corrections: ``cpu_supports_sme()`` syscall caching (with the
   Sprint-2a t0 restatement) and the bench/print loop separation.
