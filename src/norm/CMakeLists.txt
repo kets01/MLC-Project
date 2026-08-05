@@ -8,6 +8,7 @@ add_library(norm_lib
     layer_norm_ssve_v4.S        # V4: V2 + 4 independent accumulators (both passes)
     layer_norm_ssve_v5.S        # V5: V4 + software-pipelined loads
     layer_norm_ssve_v6.S        # V6: 4-row-block contiguity grouping
+    layer_norm_ssve_v7.S        # Sprint 6: V6 + SME2 multi-vector LD1W/ST1W
     layer_norm_ssve_welford.S   # Welford: online single-pass mean+var
     layer_norm_za.S             # Sprint 3: ZA-tile residency (3R+1W -> 1R+1W fusion, gated)
     rms_norm_ssve.S             # V0: baseline SSVE kernel
@@ -58,6 +59,7 @@ set_source_files_properties(
 # dispatch in norm_ssve.cpp.
 set_source_files_properties(
     rms_norm_ssve_v7.S
+    layer_norm_ssve_v7.S
     PROPERTIES COMPILE_FLAGS "-march=armv9-a+sme2"
 )
 
