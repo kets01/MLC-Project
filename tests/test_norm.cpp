@@ -1161,6 +1161,98 @@ TEST_CASE("RMSNorm SSVE V7 (SME2): large-magnitude stress input",
 // wrong (e.g. blocks transposed, or the counter predicate covering the wrong
 // element count). Skipped rather than trivially true without SME2, since the
 // wrapper would otherwise be comparing V6 against itself.
+// ---------------------------------------------------------------------------
+// Sprint 6 — ZA residency rebuilt on SME2 multi-vector MOVA.
+//
+// Shapes chosen around the two things that actually broke while building it:
+//   - N > SVL: the vector-group cursor `za.s[w8, 0, vgx4]` addresses slice w8
+//     of EACH of the four tiles, so it runs 0..SVL_S-1 and steps by ONE.  An
+//     earlier version stepped by four and wrapped at N = 17, silently
+//     corrupting every shape wider than one vector — these cases pin that.
+//   - N % 4 != 0: the final chunk is zero-padded rather than reading past
+//     column N-1.
+// Plus row tails, mismatched leading dims, and the N > 4*SVL fallback.
+// ---------------------------------------------------------------------------
+TEST_CASE("RMSNorm ZA-SME2: residency window, N%4 padding, tails, fallback",
+          "[norm][sprint6][sme2][za]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    // Small N uses the documented FRSQRTE+NR tolerance, not the strict kTol.
+    // Measured worst deviation at these shapes is 1.1e-5 relative — the
+    // accuracy one Newton-Raphson step actually delivers when few columns
+    // average out the inv_rms error.  This is NOT specific to the SME2
+    // rebuild: it is bit-identical to rms_norm_za on every shape here
+    // (verified elementwise), so the Sprint-3 kernel has the same property;
+    // its test list simply never included N = 4/17/31.  Documented rather
+    // than silently widened (CLAUDE.md §7: report the tolerance actually met).
+    check_variant(rms_norm_za_sme2, 16,  4,  16,  16, 1e-5f, kTolReassoc);
+    check_variant(rms_norm_za_sme2, 16, 16,  16,  16, 1e-5f, kTolReassoc); // 1 vector
+    check_variant(rms_norm_za_sme2, 16, 17,  16,  16, 1e-5f, kTolReassoc); // cursor past SVL
+    check_variant(rms_norm_za_sme2, 16, 31,  16,  16, 1e-5f, kTolReassoc); // N%4 padding
+    check_variant(rms_norm_za_sme2, 16, 64,  16,  16, 1e-5f);  // full capacity
+    check_variant(rms_norm_za_sme2,  7, 40,   8,   8, 1e-5f);  // row tail
+    check_variant(rms_norm_za_sme2, 100, 48, 128, 112, 1e-5f); // tails + ld
+    check_variant(rms_norm_za_sme2, 16, 65,  16,  16, 1e-5f);  // fallback
+    check_variant(rms_norm_za_sme2, 64, 2048, 64,  64, 1e-5f); // fallback, wide
+}
+
+TEST_CASE("LayerNorm ZA-SME2: residency window, N%4 padding, tails, fallback",
+          "[norm][sprint6][sme2][za]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    // Same boundary set as the RMSNorm ZA-SME2 case: N > SVL pins the
+    // vector-group cursor stepping by ONE, N%4 pins the zero-padded final
+    // chunk, plus row tails, mismatched lds and the N > 4*SVL fallback.
+    check_ln_variant(layer_norm_za_sme2, 16,   4,  16,  16, 1e-5f);
+    check_ln_variant(layer_norm_za_sme2, 16,  16,  16,  16, 1e-5f);
+    check_ln_variant(layer_norm_za_sme2, 16,  17,  16,  16, 1e-5f);
+    check_ln_variant(layer_norm_za_sme2, 16,  31,  16,  16, 1e-5f);
+    check_ln_variant(layer_norm_za_sme2, 16,  64,  16,  16, 1e-5f);
+    check_ln_variant(layer_norm_za_sme2,  7,  40,   8,   8, 1e-5f);
+    check_ln_variant(layer_norm_za_sme2, 100, 48, 128, 112, 1e-5f);
+    check_ln_variant(layer_norm_za_sme2, 16,  65,  16,  16, 1e-5f);
+    check_ln_variant(layer_norm_za_sme2, 64, 2048, 64,  64, 1e-5f);
+}
+
+TEST_CASE("LayerNorm ZA-SME2: large-magnitude stress input",
+          "[norm][sprint6][sme2][za][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_ln_variant_stress(layer_norm_za_sme2);
+}
+
+TEST_CASE("RMSNorm ZA-SME2: large-magnitude stress input",
+          "[norm][sprint6][sme2][za][stress]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+    check_variant_stress(rms_norm_za_sme2);
+}
+
+// The 2-vector control must also be bit-identical to V6: it touches the same
+// 256 B per column, only split across two instructions.  This is the test that
+// would have caught the counter-predicate bug found while building it (pn9 was
+// left uninitialised while the loads were already split, so blocks 2-3 read
+// garbage) — the standalone bench caught it, the suite should too.
+TEST_CASE("RMSNorm SSVE V7x2 (SME2 control): bit-identical to V6",
+          "[norm][sprint6][sme2][v7x2]") {
+    if (!cpu_supports_sme())  SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required (V7x2 falls back to V6)");
+    for (auto shape : { std::pair<int64_t,int64_t>{64, 32},
+                        std::pair<int64_t,int64_t>{100, 50},
+                        std::pair<int64_t,int64_t>{192, 37},
+                        std::pair<int64_t,int64_t>{8, 50} }) {
+        const int64_t M = shape.first, N = shape.second, ld = M;
+        std::vector<float> gamma(N);
+        for (int64_t i = 0; i < N; ++i) gamma[i] = 0.5f + 0.1f * float(i % 17);
+        auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+            return static_cast<float>((r * 11 + c * 7) % 19) - 9.0f;
+        });
+        std::vector<float> b6(ld * N, 0.0f), bx(ld * N, 0.0f);
+        rms_norm_ssve_v6  (a.data(), b6.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+        rms_norm_ssve_v7x2(a.data(), bx.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+        for (int64_t i = 0; i < ld * N; ++i) {
+            INFO("M=" << M << " N=" << N << " index " << i);
+            REQUIRE(bx[i] == b6[i]);
+        }
+    }
+}
+
 TEST_CASE("RMSNorm SSVE V7 (SME2): bit-identical to V6",
           "[norm][sprint6][sme2][v7]") {
     if (!cpu_supports_sme())  SKIP("SME required");
