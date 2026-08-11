@@ -1,11 +1,9 @@
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
-#include <thread>
 #include <vector>
 #include "norm/norm.hpp"
 #include "norm/jit_norm.hpp"  // Sprint 4: mini_jit::Norm
@@ -168,43 +166,53 @@ static double measure_peak_chip(unsigned threads) {
     // race); (b) a pass touches all 128 MiB before any chunk is revisited,
     // so no chunk is still cache-resident on its next rep, which would
     // measure cache instead of DRAM.
-    const size_t n_chunks = static_cast<size_t>(threads) * 8;
-    const size_t chunk    = PROBE_N / n_chunks;
-
-    std::atomic<size_t>   next{0};
-    std::atomic<unsigned> arrived{0};
-    std::atomic<int>      generation{0};
+    // Sprint 6: this used to be hand-rolled std::thread workers with an
+    // atomic work counter and a generation-counter barrier.  OpenMP expresses
+    // the same three properties directly, so the machinery is gone but the
+    // measurement semantics are unchanged:
+    //   - dynamic work distribution  -> schedule(dynamic): a fast P-core
+    //     simply claims more chunks than a slow E-core, which is the whole
+    //     point (equal static slices measured slowest-core x T, not the
+    //     memory system — the bug fixed in Sprint 5).
+    //   - one owner per chunk per pass -> a single `omp for` over n_chunks.
+    //   - a barrier between passes    -> the implicit barrier at the end of
+    //     `omp for`, which is exactly what kept a chunk from being revisited
+    //     while another thread still owned it, and what guarantees a full
+    //     128 MiB sweep before any chunk comes round again.
+    // The `parallel` region is opened ONCE outside the rep loop so the QoS
+    // hint is applied per worker thread rather than per pass.
+    const long long n_chunks = static_cast<long long>(threads) * 8;
+    const size_t    chunk    = PROBE_N / static_cast<size_t>(n_chunks);
 
     auto t0 = Clock::now();
-    std::vector<std::thread> workers;
-    workers.reserve(threads);
-    for (unsigned t = 0; t < threads; ++t) {
-        workers.emplace_back([&]() {
-            request_p_core();
-            for (int r = 0; r < R; ++r) {
-                for (;;) {
-                    size_t idx = next.fetch_add(1, std::memory_order_relaxed);
-                    if (idx >= n_chunks) break;
-                    float*       d = dst.data() + idx * chunk;
-                    const float* s = src.data() + idx * chunk;
-                    size_t n = (idx == n_chunks - 1) ? PROBE_N - idx * chunk : chunk;
-                    bw_scale_add(d, s, n);
-                }
-                // Barrier: last thread of the pass resets the work counter
-                // and releases the rest into the next pass.
-                int gen = generation.load(std::memory_order_acquire);
-                if (arrived.fetch_add(1, std::memory_order_acq_rel) == threads - 1) {
-                    next.store(0, std::memory_order_relaxed);
-                    arrived.store(0, std::memory_order_relaxed);
-                    generation.store(gen + 1, std::memory_order_release);
-                } else {
-                    while (generation.load(std::memory_order_acquire) == gen)
-                        std::this_thread::yield();
-                }
+#if BENCH_HAS_OMP
+    #pragma omp parallel num_threads(static_cast<int>(threads))
+    {
+        request_p_core();
+        for (int r = 0; r < R; ++r) {
+            #pragma omp for schedule(dynamic)
+            for (long long idx = 0; idx < n_chunks; ++idx) {
+                float*       d = dst.data() + static_cast<size_t>(idx) * chunk;
+                const float* s = src.data() + static_cast<size_t>(idx) * chunk;
+                size_t n = (idx == n_chunks - 1)
+                             ? PROBE_N - static_cast<size_t>(idx) * chunk : chunk;
+                bw_scale_add(d, s, n);
             }
-        });
+        }
     }
-    for (auto& w : workers) w.join();
+#else
+    // No OpenMP: run the same total work sequentially. The number is then a
+    // single-core figure and is labelled as such by the caller, rather than
+    // silently pretending to be a chip-wide ceiling.
+    for (int r = 0; r < R; ++r)
+        for (long long idx = 0; idx < n_chunks; ++idx) {
+            float*       d = dst.data() + static_cast<size_t>(idx) * chunk;
+            const float* s = src.data() + static_cast<size_t>(idx) * chunk;
+            size_t n = (idx == n_chunks - 1)
+                         ? PROBE_N - static_cast<size_t>(idx) * chunk : chunk;
+            bw_scale_add(d, s, n);
+        }
+#endif
     auto t1 = Clock::now();
 
     double elapsed = std::chrono::duration<double>(t1 - t0).count();
@@ -818,6 +826,216 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Sprint 6 — OpenMP row-parallel scaling, per ablation variant.
+//
+// WHY THE PARALLELISM LIVES HERE AND NOT IN THE KERNELS.  Decision F makes the
+// kernel a *leaf the compiler schedules*: it operates tile-at-a-time and never
+// assumes it owns the whole tensor.  Putting `#pragma omp parallel` inside a
+// kernel would break that contract (and is impossible anyway — they are .S
+// files).  So a caller splits the ROW axis into chunks and calls the unchanged
+// kernel once per chunk, which is exactly what the TEIR runtime already does
+// with `is_parallel` on the row axis; this section does the same thing without
+// TEIR so that EVERY variant can be measured threaded, not just the two the
+// JIT emits.
+//
+// Splitting on rows is the natural choice for this layout: the norm is
+// independent per row, and in column-major storage a row-chunk is a
+// contiguous slice of each column, so chunk k is just `a + k*chunk_rows` with
+// the leading dimension unchanged.  No data is shared between threads and no
+// reduction is needed across them.
+//
+// This is also the answer to "where does scaling flatten?" — it prints the
+// speed-up curve per variant instead of only for the TEIR path.
+// ---------------------------------------------------------------------------
+
+static void openmp_scaling_section(double peak_ssve, double peak_chip) {
+    std::cout << "\n" << std::string(96, '=') << "\n"
+              << "SPRINT 6 - OpenMP ROW-PARALLEL SCALING, PER VARIANT\n"
+              << std::string(96, '=') << "\n";
+#if !BENCH_HAS_OMP
+    (void)peak_ssve; (void)peak_chip;
+    std::cout << "OpenMP not available in this build - skipped.\n";
+    return;
+#else
+    // True-DRAM shape: the only regime where threading has anything to add
+    // (the cache-resident shapes already sit at ~97% of the streaming ceiling
+    // on ONE core, so there is nothing for more cores to recover).
+    const int64_t M = 4096, N = 8192, ld = M;
+    const size_t  sz = static_cast<size_t>(ld) * static_cast<size_t>(N);
+    const double  bytes = norm_bytes(M, N);
+
+    std::vector<float> a(sz), b(sz, 0.0f), expect(sz, 0.0f);
+    std::vector<float> gamma(N), beta(N);
+    for (size_t i = 0; i < sz; ++i) a[i] = 0.01f * float(i % 97);
+    for (int64_t j = 0; j < N; ++j) {
+        gamma[j] = 1.0f + 0.001f * float(j % 13);
+        beta[j]  = 0.01f * float(j % 7);
+    }
+
+    const int threads[] = {1, 2, 4, 6, 8, 10, 16};
+    const int reps = 5;
+
+    std::cout << "Shape M=" << M << " N=" << N << " (256 MiB), useful bytes (1R+1W).\n"
+              << "Ceilings: 1-core SSVE " << std::fixed << std::setprecision(1) << peak_ssve
+              << ", chip-wide " << peak_chip << " GiB/s.\n"
+              << "This M4 is 4 P-cores + 6 E-cores, so 10 threads is full occupancy\n"
+              << "and 16 is deliberate oversubscription.\n"
+              << "'moved' = physical traffic (RMSNorm 2R+1W = 1.5x useful, LayerNorm 3R+1W = 2x).\n\n";
+
+    // GROUP-ALIGNED WORK DISTRIBUTION — measured, not cosmetic.
+    //
+    // The V6/V7 kernels process 4*VL rows per group (64 on this 512-bit-SVL
+    // M4) and send whatever is left to a single-block predicated tail that
+    // touches only 64 B per column instead of the group path's 256 B — i.e.
+    // the tail reverts to exactly the low access density V6 was built to fix.
+    //
+    // A naive `chunk = M/nthreads` therefore hands EVERY thread a tail
+    // whenever nthreads does not divide M into multiples of 64.  At M=4096
+    // that is true for 6 threads (chunk 682, 42-row tail) and 10 threads
+    // (chunk 409, 25-row tail) — and those are precisely the thread counts
+    // that measured ~45% slower than their neighbours, collapsing to about
+    // the single-thread number.  It looked like core heterogeneity; it was
+    // the scheduler handing the kernel work it is bad at.
+    //
+    // So distribute in units of whole row-blocks.  kRowBlock = 256 is a
+    // multiple of 4*VL for every plausible SVL (256/512/1024-bit -> 32/64/128
+    // rows per group), which keeps this VLA-safe without needing to query SVL
+    // from C++ (decision D: no hard-coded streaming vector length).
+    const int64_t kRowBlock = 256;
+    const int64_t nblocks   = (M + kRowBlock - 1) / kRowBlock;
+
+    auto span = [&](int t, int nthreads, bool aligned) {
+        if (!aligned) {                       // the naive scheme, kept to show the cliff
+            const int64_t chunk = M / nthreads;
+            const int64_t r0    = static_cast<int64_t>(t) * chunk;
+            return std::pair<int64_t,int64_t>{ r0, (t == nthreads - 1) ? (M - r0) : chunk };
+        }
+        const int64_t base  = nblocks / nthreads;
+        const int64_t extra = nblocks % nthreads;
+        const int64_t b0    = t * base + std::min<int64_t>(t, extra);
+        const int64_t nb    = base + (t < extra ? 1 : 0);
+        const int64_t r0    = b0 * kRowBlock;
+        return std::pair<int64_t,int64_t>{ r0, std::min<int64_t>(nb * kRowBlock, M - r0) };
+    };
+
+    auto run_rms = [&](KernelFnBench fn, int nthreads, bool aligned = true) {
+        omp_set_num_threads(nthreads);
+        #pragma omp parallel for schedule(static)
+        for (int t = 0; t < nthreads; ++t) {
+            auto [r0, rows] = span(t, nthreads, aligned);
+            if (rows > 0)
+                fn(a.data() + r0, b.data() + r0, gamma.data(), rows, N, ld, ld, 1e-5f);
+        }
+    };
+    auto run_ln = [&](LNKernelFnBench fn, int nthreads, bool aligned = true) {
+        omp_set_num_threads(nthreads);
+        #pragma omp parallel for schedule(static)
+        for (int t = 0; t < nthreads; ++t) {
+            auto [r0, rows] = span(t, nthreads, aligned);
+            if (rows > 0)
+                fn(a.data() + r0, b.data() + r0, gamma.data(), beta.data(),
+                   rows, N, ld, ld, 1e-5f);
+        }
+    };
+
+    auto header = [&](const char* norm, double moved_factor) {
+        std::cout << norm << "   (moved = " << std::setprecision(2) << moved_factor
+                  << "x useful)\n"
+                  << std::left  << std::setw(9) << "threads"
+                  << std::right << std::setw(10) << "GiB/s"
+                  << std::setw(10) << "speedup"
+                  << std::setw(11) << "%1core"
+                  << std::setw(11) << "%chip"
+                  << std::setw(13) << "moved %chip"
+                  << std::setw(9)  << "correct" << "\n"
+                  << std::string(73, '-') << "\n";
+    };
+
+    auto row = [&](int t, double gibs, double base, double moved_factor, bool ok) {
+        std::cout << std::left  << std::setw(9) << t
+                  << std::right << std::fixed << std::setprecision(2)
+                  << std::setw(10) << gibs
+                  << std::setw(9)  << std::setprecision(2) << (gibs / base) << "x"
+                  << std::setw(10) << std::setprecision(1) << (100.0 * gibs / peak_ssve) << "%"
+                  << std::setw(10) << std::setprecision(1) << (100.0 * gibs / peak_chip) << "%"
+                  << std::setw(12) << std::setprecision(1)
+                  << (100.0 * gibs * moved_factor / peak_chip) << "%"
+                  << std::setw(9)  << (ok ? "yes" : "NO") << "\n";
+    };
+
+    // ---- RMSNorm variants ------------------------------------------------
+    rms_norm_ref(a.data(), expect.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+    struct RmsV { const char* name; KernelFnBench fn; };
+    const RmsV rms_variants[] = {
+        { "RMSNorm V0 (baseline)", rms_norm_ssve    },
+        { "RMSNorm V6 (SME1)",     rms_norm_ssve_v6 },
+        { "RMSNorm V7 (SME2)",     rms_norm_ssve_v7 },
+    };
+    for (const auto& v : rms_variants) {
+        header(v.name, 1.5);
+        double base = 0.0;
+        for (int t : threads) {
+            std::fill(b.begin(), b.end(), -1.0f);
+            run_rms(v.fn, t);
+            bool ok = max_abs_dev(b, expect) <= 1e-3;
+            double sec = bench([&] { run_rms(v.fn, t); }, reps);
+            double gibs = to_gibs(bytes, sec);
+            if (t == 1) base = gibs;
+            row(t, gibs, base, 1.5, ok);
+        }
+        std::cout << "\n";
+    }
+
+    // ---- The alignment cliff, isolated -----------------------------------
+    // Same kernel, same threads, same data — only the chunk boundaries move.
+    // This is the evidence for the group-aligned distribution above.
+    std::cout << "Work-distribution alignment (RMSNorm V7, identical work, only chunking differs)\n"
+              << std::left  << std::setw(9)  << "threads"
+              << std::right << std::setw(12) << "naive"
+              << std::setw(12) << "aligned"
+              << std::setw(11) << "gain"
+              << std::setw(18) << "naive chunk%64" << "\n"
+              << std::string(62, '-') << "\n";
+    for (int t : threads) {
+        std::fill(b.begin(), b.end(), -1.0f);
+        double sec_n = bench([&] { run_rms(rms_norm_ssve_v7, t, false); }, reps);
+        double sec_a = bench([&] { run_rms(rms_norm_ssve_v7, t, true ); }, reps);
+        double gn = to_gibs(bytes, sec_n), ga = to_gibs(bytes, sec_a);
+        std::cout << std::left  << std::setw(9) << t
+                  << std::right << std::fixed << std::setprecision(2)
+                  << std::setw(12) << gn << std::setw(12) << ga
+                  << std::setw(10) << std::setprecision(1) << (100.0 * (ga / gn - 1.0)) << "%"
+                  << std::setw(18) << ((M / t) % 64) << "\n";
+    }
+    std::cout << "\n";
+
+    // ---- LayerNorm variants ----------------------------------------------
+    layer_norm_ref(a.data(), expect.data(), gamma.data(), beta.data(),
+                   M, N, ld, ld, 1e-5f);
+    struct LnV { const char* name; LNKernelFnBench fn; };
+    const LnV ln_variants[] = {
+        { "LayerNorm V0 (baseline)", layer_norm_ssve    },
+        { "LayerNorm V6 (SME1)",     layer_norm_ssve_v6 },
+        { "LayerNorm V7 (SME2)",     layer_norm_ssve_v7 },
+    };
+    for (const auto& v : ln_variants) {
+        header(v.name, 2.0);
+        double base = 0.0;
+        for (int t : threads) {
+            std::fill(b.begin(), b.end(), -1.0f);
+            run_ln(v.fn, t);
+            bool ok = max_abs_dev(b, expect) <= 1e-3;
+            double sec = bench([&] { run_ln(v.fn, t); }, reps);
+            double gibs = to_gibs(bytes, sec);
+            if (t == 1) base = gibs;
+            row(t, gibs, base, 2.0, ok);
+        }
+        std::cout << "\n";
+    }
+#endif
+}
+
 int main() {
     request_p_core();
 
@@ -833,7 +1051,13 @@ int main() {
     if (!have_sme)
         std::cout << "Note: SME not detected — SSVE ceiling and kernel rows will be skipped.\n\n";
 
-    const unsigned nthreads = std::max(1u, std::thread::hardware_concurrency());
+#if BENCH_HAS_OMP
+    // OpenMP's own view of available parallelism; std::thread is no longer
+    // used anywhere in this harness.
+    const unsigned nthreads = std::max(1, omp_get_max_threads());
+#else
+    const unsigned nthreads = 1u;
+#endif
 
     // All ceilings live in volatile doubles: they are read again after many
     // SMSTART/SMSTOP transitions, which zero callee-saved FP registers
@@ -1353,6 +1577,9 @@ int main() {
         print_row("layer_norm_jit",     dm, dn, to_gibs((double)vbytes, (double)ln_jit_sec), (double)vpeak);
         std::cout << "\n";
     }
+
+    if (have_sme)
+        openmp_scaling_section((double)peak_ssve, (double)peak_chip);
 
     teir_threading_section((double)peak_ssve, (double)peak_chip);
 
