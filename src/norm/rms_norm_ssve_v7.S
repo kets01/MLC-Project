@@ -34,10 +34,27 @@
 //   outstanding-loads family, and it is the evidence for the report's claim
 //   that the remaining gap is DRAM behaviour, not code density.
 //
-// SCOPE.  Only the unpredicated group path uses SME2.  The 1-3 block tail
-// keeps V6's plain-SVE predicated loop: multi-vector loads use a
-// predicate-as-counter (PN8-PN15) whose partial forms would need WHILELO
-// ...,VLx4 and buy nothing on a path that runs at most three times per call.
+// NO TAIL PATH (Sprint 6 revision).  V6 needs a separate 1-3 block tail
+// because its group path is unpredicated: whatever does not fill a group of
+// four VL-row blocks falls into a single-block predicated loop that touches
+// only 64 B per column instead of 256 B — i.e. it reverts to exactly the low
+// access density V6 exists to fix.  That is a real cliff, not a rounding
+// error: with OpenMP row-chunking it made 6- and 10-thread runs ~45 % slower
+// than 4 and 8, because those chunk sizes are not multiples of 4*VL.
+//
+// SME2's predicate-as-counter removes the need for the second path entirely.
+// `whilelo pn8.s, x0, x22, vlx4` describes min(M - x0, 4*VL) active elements
+// ACROSS the four-vector group, so one loop body serves both the full groups
+// (all-true counter) and the final partial group (partial counter).  The tail
+// is not "multi-vector" — it is gone, and every column touch in the kernel is
+// a 256 B multi-vector access.
+//
+// Inactive-lane safety: the loads are pn8/z (zeroing), so inactive lanes read
+// 0, contribute 0 to the sum of squares, and a fully-inactive block ends with
+// acc = 0 -> 0*(1/N) + eps = eps, which FRSQRTE handles finitely.  The store
+// is predicated by the same counter, so nothing invalid reaches memory and no
+// SEL is needed.
+//
 // The C++ bridge dispatches to V6 when FEAT_SME2 is absent, so the same
 // binary still runs on M1/M2 (ROADMAP: "degrades to the SME1 kernel").
 //
@@ -47,8 +64,8 @@
 //   z8      {eps,...}          z16  gamma broadcast
 //   z17     {1/N,...}          z18  Newton-Raphson scratch
 //   z20-z23 inv_rms per block
-//   p0      all-true SVE predicate      pn8  all-true counter predicate
-// Tail path: z24 accumulator, z25 scratch, z26 inv_rms, p1 row predicate.
+//   p0      all-true SVE predicate (governs FP ops and the gamma broadcast)
+//   pn8     row counter predicate, recomputed per group by WHILELO ...,VLx4
 //
 // C signature (identical to V0-V6):
 //   void rms_norm_ssve_v7(const float *a,     // x0
@@ -104,8 +121,6 @@ SYMBOL(rms_norm_ssve_v7):
 
     smstart sm
     ptrue  p0.s, all
-    ptrue  pn8.s               // all-true predicate-as-counter for the
-                                // SME2 multi-vector loads/stores
 
     ldr    s0, [sp, #120]
     dup    z8.s, z0.s[0]       // z8 = {eps, ...}
@@ -120,12 +135,13 @@ SYMBOL(rms_norm_ssve_v7):
     mov   x0, #0               // x0 = row index
 
     // -----------------------------------------------------------------------
-    // Group loop — four full VL-row blocks per iteration, no predication.
+    // Single loop — four VL-row blocks per iteration, the last one partial.
+    // WHILELO ...,VLx4 makes the group predicate all-true while >= 4*VL rows
+    // remain and partial for the final group, so there is no separate tail.
     // -----------------------------------------------------------------------
 .Lgroup_loop_v7:
-    add   x6, x0, x14
-    cmp   x6, x22
-    b.hi  .Ltail_blocks_v7     // fewer than 4*VL rows left
+    whilelo pn8.s, x0, x22, vlx4
+    b.none  .Lblock_done_v7    // no rows left
 
     // === Pass 1: sum of squares, ONE 4-vector load per column ==============
     mov    z4.s, #0            // accumulator, block 0
@@ -201,62 +217,8 @@ SYMBOL(rms_norm_ssve_v7):
 
     addvl  x19, x19, #4
     addvl  x20, x20, #4
-    mov    x0,  x6
+    add    x0,  x0, x14
     b      .Lgroup_loop_v7
-
-    // -----------------------------------------------------------------------
-    // Tail — up to 3 full blocks + a partial block, plain-SVE predicated
-    // (identical to V6's tail; SME2 buys nothing on a path that runs at most
-    // three times per call, and a partial counter predicate would need its
-    // own WHILELO ...,VLx4 form).
-    // -----------------------------------------------------------------------
-.Ltail_blocks_v7:
-    whilelo  p1.s, x0, x22
-    b.none   .Lblock_done_v7
-
-    mov    z24.s, #0
-    mov    x8,    x19
-    mov    x9,    x23
-
-.Ltail_red_v7:
-    ld1w   {z0.s}, p1/z, [x8]
-    fmla   z24.s,  p1/m, z0.s, z0.s
-    add    x8,  x8,  x24
-    subs   x9,  x9,  #1
-    b.ne   .Ltail_red_v7
-
-    fmul   z24.s, p1/m, z24.s, z17.s
-    dup    z25.s, z8.s[0]
-    fadd   z24.s, p1/m, z24.s, z25.s
-    // inactive lanes get eps (not 0) so FRSQRTE never sees 0 -> inf
-    sel    z24.s, p1, z24.s, z25.s
-
-    frsqrte z26.s, z24.s
-    fmul    z25.s, z26.s, z24.s
-    frsqrts z25.s, z26.s, z25.s
-    fmul    z26.s, p1/m, z26.s, z25.s
-
-    mov    x8,  x19
-    mov    x9,  x20
-    mov    x10, x21
-    mov    x11, x23
-
-.Ltail_nrm_v7:
-    ld1w   {z0.s},  p1/z, [x8]
-    ld1rw  {z16.s}, p0/z, [x10]
-    fmul   z0.s, p1/m, z0.s, z16.s
-    fmul   z0.s, p1/m, z0.s, z26.s
-    st1w   {z0.s}, p1, [x9]
-    add    x8,  x8,  x24
-    add    x9,  x9,  x25
-    add    x10, x10, #4
-    subs   x11, x11, #1
-    b.ne   .Ltail_nrm_v7
-
-    addvl  x19, x19, #1
-    addvl  x20, x20, #1
-    incw   x0
-    b      .Ltail_blocks_v7
 
 .Lblock_done_v7:
     smstop sm
