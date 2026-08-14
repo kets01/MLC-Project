@@ -1990,3 +1990,174 @@ TEST_CASE("Sprint5 AAPCS64: d9-d15 survive the LayerNorm V6 kernel call",
 
     for (int64_t i = 0; i < ld * N; ++i) REQUIRE(std::isfinite(b[i]));
 }
+
+// ===========================================================================
+// Sprint 7a — numerical stability of the three variance formulations.
+//
+// These pin the claims context.md §8 makes about WHY LayerNorm is two-pass and
+// why RMSNorm sidesteps the problem.  They are host-portable (pure C++, no SME)
+// so they run on the CI runner as well as the M4.
+//
+// The stress axis is a SHIFT: adding a constant s to every element leaves the
+// variance unchanged but scales the problem's condition number by ~s^2.  That
+// separates conditioning from every other property of the data.
+//
+// Methodological note carried into the report: past shift ~1e5 the FP32 INPUT
+// is itself quantized (the ULP of 1e6 in FP32 is 0.0625, larger than the
+// signal), so beyond that point every estimator is measuring the variance of
+// the quantized data.  That is fine for comparing them -- all three see the
+// same input, and the f64 oracle is computed from that same quantized input --
+// but it is why the "true" variance drifts slightly at the top of the sweep.
+// ===========================================================================
+
+#include "norm/stability.hpp"
+
+namespace stab = mini_jit::norm::stability;
+
+// Unit-variance data shifted by `shift`; deterministic, no RNG.
+static std::vector<float> shifted_data(int64_t n, double shift) {
+    std::vector<float> x(static_cast<size_t>(n));
+    for (int64_t i = 0; i < n; ++i)
+        x[static_cast<size_t>(i)] =
+            static_cast<float>(shift + std::sin(static_cast<double>(i) * 0.7));
+    return x;
+}
+
+static double rel_err(double got, double ref) {
+    return ref > 0.0 ? std::fabs(got - ref) / ref : std::fabs(got - ref);
+}
+
+TEST_CASE("Sprint7a: all three formulations agree on well-conditioned data",
+          "[norm][sprint7][stability]") {
+    const int64_t N = 512;
+    auto x = shifted_data(N, 0.0);
+    const double truth = stab::variance_ref_f64(x.data(), N);
+
+    // kappa == 1 means the problem is perfectly conditioned: nothing to expose.
+    REQUIRE(stab::variance_condition_number(x.data(), N) == Approx(1.0).margin(0.01));
+
+    REQUIRE(rel_err(stab::variance_naive_f32(x.data(), N),   truth) < 1e-5);
+    REQUIRE(rel_err(stab::variance_twopass_f32(x.data(), N), truth) < 1e-5);
+    REQUIRE(rel_err(stab::variance_welford_f32(x.data(), N), truth) < 1e-5);
+}
+
+TEST_CASE("Sprint7a: naive single-pass variance degrades with the condition number",
+          "[norm][sprint7][stability]") {
+    const int64_t N = 512;
+
+    // The falsifiable claim: naive's relative error grows in proportion to
+    // kappa, while two-pass does not grow at all.  Each step multiplies the
+    // shift by 10, hence kappa by ~100.
+    double prev_naive = 0.0;
+    for (double shift : {1e1, 1e2, 1e3}) {
+        auto         x     = shifted_data(N, shift);
+        const double truth = stab::variance_ref_f64(x.data(), N);
+        const double e_naive = rel_err(stab::variance_naive_f32(x.data(), N), truth);
+        const double e_two   = rel_err(stab::variance_twopass_f32(x.data(), N), truth);
+
+        INFO("shift=" << shift << " naive=" << e_naive << " two-pass=" << e_two);
+        REQUIRE(e_naive > prev_naive * 10.0);   // grows at least an order per step
+        REQUIRE(e_two   < 1e-5);                // two-pass stays put
+        prev_naive = e_naive;
+    }
+
+    // By shift 1e3 the naive estimator has lost the answer entirely: its error
+    // is of the same order as the quantity it is estimating.
+    auto         x3    = shifted_data(N, 1e3);
+    const double truth = stab::variance_ref_f64(x3.data(), N);
+    REQUIRE(rel_err(stab::variance_naive_f32(x3.data(), N), truth) > 1.0);
+}
+
+TEST_CASE("Sprint7a: naive variance goes NEGATIVE, making sqrt() a NaN",
+          "[norm][sprint7][stability]") {
+    const int64_t N = 512;
+
+    // This is the qualitative failure, not merely a loss of accuracy: a
+    // variance estimate below zero has no square root, so a LayerNorm built on
+    // this formulation emits NaN rather than an inaccurate number.
+    for (double shift : {1e5, 1e6}) {
+        auto        x  = shifted_data(N, shift);
+        const float nv = stab::variance_naive_f32(x.data(), N);
+        INFO("shift=" << shift << " naive variance=" << nv);
+        REQUIRE(nv < 0.0f);
+        REQUIRE(std::isnan(std::sqrt(nv)));
+
+        // The centred two-pass, on identical data, stays positive and close.
+        const float tp = stab::variance_twopass_f32(x.data(), N);
+        REQUIRE(tp > 0.0f);
+        REQUIRE(rel_err(tp, stab::variance_ref_f64(x.data(), N)) < 1e-3);
+    }
+}
+
+TEST_CASE("Sprint7a: two-pass is immune to shift across 12 orders of kappa",
+          "[norm][sprint7][stability]") {
+    const int64_t N = 512;
+    for (double shift : {0.0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6}) {
+        auto         x     = shifted_data(N, shift);
+        const double truth = stab::variance_ref_f64(x.data(), N);
+        const double e     = rel_err(stab::variance_twopass_f32(x.data(), N), truth);
+        INFO("shift=" << shift
+             << " kappa=" << stab::variance_condition_number(x.data(), N)
+             << " rel_err=" << e);
+        REQUIRE(e < 1e-3);
+    }
+}
+
+TEST_CASE("Sprint7a: Welford beats naive by orders of magnitude but not two-pass",
+          "[norm][sprint7][stability]") {
+    const int64_t N = 512;
+
+    // Sprint 6 §1.3 corrected the report's claim about Welford.  What is
+    // actually true, and what this pins: Welford >> naive always, and Welford
+    // is at best comparable to two-pass, degrading slowly as the shift grows
+    // because its RUNNING MEAN updates at full input magnitude.
+    auto         x     = shifted_data(N, 1e4);
+    const double truth = stab::variance_ref_f64(x.data(), N);
+
+    const double e_naive = rel_err(stab::variance_naive_f32(x.data(), N),   truth);
+    const double e_wel   = rel_err(stab::variance_welford_f32(x.data(), N), truth);
+    const double e_two   = rel_err(stab::variance_twopass_f32(x.data(), N), truth);
+
+    INFO("naive=" << e_naive << " welford=" << e_wel << " two-pass=" << e_two);
+    REQUIRE(e_wel < e_naive / 1e5);   // Welford is enormously better than naive
+    REQUIRE(e_wel < 1e-3);            // and still an accurate estimate itself
+    REQUIRE(e_two < 1e-3);
+}
+
+TEST_CASE("Sprint7a: RMSNorm's reduction is shift-immune but overflows in FP32",
+          "[norm][sprint7][stability]") {
+    const int64_t N = 512;
+
+    // The honest counterpart to the LayerNorm story.  RMSNorm never forms a
+    // mean, so no shift can make it cancel -- but Sum(x^2) must fit in FP32.
+    // The limit is sharp and easy to state: the reduction overflows once
+    // N*x^2 exceeds FLT_MAX ~ 3.4e38, i.e. at |x| ~ sqrt(3.4e38/N), which for
+    // N=512 is ~8.1e17.  That is RMSNorm's own failure mode and it belongs in
+    // the report beside LayerNorm's cancellation.
+    std::vector<float> ok(static_cast<size_t>(N), 1e17f);     // 512 * 1e34 = 5.1e36
+    REQUIRE(std::isfinite(stab::sumsq_f32(ok.data(), N)));
+
+    std::vector<float> over(static_cast<size_t>(N), 1e19f);   // 512 * 1e38 -> inf
+    REQUIRE(std::isinf(stab::sumsq_f32(over.data(), N)));
+
+    // Straddle the predicted boundary to show it is where the theory says,
+    // not merely somewhere between two decades.
+    const float boundary = std::sqrt(3.4e38f / static_cast<float>(N));
+    std::vector<float> below(static_cast<size_t>(N), boundary * 0.9f);
+    std::vector<float> above(static_cast<size_t>(N), boundary * 1.1f);
+    REQUIRE(std::isfinite(stab::sumsq_f32(below.data(), N)));
+    REQUIRE(std::isinf(stab::sumsq_f32(above.data(), N)));
+
+    // Shift-immunity: the RMS reduction on shifted data loses no accuracy
+    // relative to a float64 computation of the same quantity, at a shift where
+    // naive VARIANCE has already returned a negative number.
+    auto x = shifted_data(N, 1e5);
+    double ref = 0.0;
+    for (int64_t i = 0; i < N; ++i) {
+        const double v = static_cast<double>(x[static_cast<size_t>(i)]);
+        ref += v * v;
+    }
+    const double got = static_cast<double>(stab::sumsq_f32(x.data(), N));
+    REQUIRE(rel_err(got, ref) < 1e-4);
+    REQUIRE(stab::variance_naive_f32(x.data(), N) < 0.0f);   // the contrast
+}
