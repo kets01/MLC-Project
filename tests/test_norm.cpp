@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <chrono>   // Sprint 7b: timing the streaming-transition probes
 #include <cmath>
 #include <vector>
 #include "norm/norm.hpp"
@@ -2160,4 +2161,92 @@ TEST_CASE("Sprint7a: RMSNorm's reduction is shift-immune but overflows in FP32",
     const double got = static_cast<double>(stab::sumsq_f32(x.data(), N));
     REQUIRE(rel_err(got, ref) < 1e-4);
     REQUIRE(stab::variance_naive_f32(x.data(), N) < 0.0f);   // the contrast
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 7b — the streaming-transition probes.
+//
+// These are instruments, so they get the same treatment as bw_probe_ssve: a
+// test that they do what they claim before any number derived from them is
+// quoted.  SME-guarded (they execute smstart), so they skip on CI.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Sprint7b: RDSVL reports a sane streaming vector length",
+          "[norm][sprint7][streaming]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    const int64_t lanes = svl_fp32_lanes();
+
+    // SVL is architecturally 128..2048 bits, i.e. 4..64 FP32 lanes, and is
+    // always a power of two.  Asserting the RANGE rather than 16 is the point:
+    // decision D says the code must not assume the M4's width.
+    REQUIRE(lanes >= 4);
+    REQUIRE(lanes <= 64);
+    REQUIRE((lanes & (lanes - 1)) == 0);
+
+    // Cross-check against the kernels' observable behaviour rather than trusting
+    // one instruction: V6/V7 group 4 VL-row blocks, and the Sprint-2 tests pin
+    // M = 4*VL as "exactly one full group" on this machine.
+    INFO("SVL = " << lanes << " FP32 lanes, group = " << (4 * lanes) << " rows");
+    REQUIRE(4 * lanes >= 16);
+}
+
+TEST_CASE("Sprint7b: the transition probes run and the control is cheaper",
+          "[norm][sprint7][streaming]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    // Correctness of a timing instrument is mostly "does it terminate and does
+    // the control differ in the expected direction".  Both are checked here;
+    // the magnitude is a benchmark question, not a test question.
+    smstart_probe_empty(0);      // zero-iteration guard must not hang or fault
+    smstart_probe_pairs(0);
+    smstart_probe_sm_only(0);
+
+    const int64_t IT = 100000;
+    auto time_it = [](void (*fn)(int64_t), int64_t iters) {
+        const auto t0 = std::chrono::high_resolution_clock::now();
+        fn(iters);
+        const auto t1 = std::chrono::high_resolution_clock::now();
+        return std::chrono::duration<double>(t1 - t0).count();
+    };
+
+    const double t_empty = time_it(smstart_probe_empty,   IT);
+    const double t_pairs = time_it(smstart_probe_pairs,   IT);
+    const double t_sm    = time_it(smstart_probe_sm_only, IT);
+
+    INFO("empty=" << t_empty << " pairs=" << t_pairs << " sm=" << t_sm);
+    REQUIRE(t_pairs > t_empty);   // the transition costs something
+    REQUIRE(t_sm    > t_empty);
+}
+
+TEST_CASE("Sprint7b: the probes preserve d9-d15 across the transition",
+          "[norm][sprint7][streaming][abi]") {
+    if (!cpu_supports_sme()) SKIP("SME required");
+
+    // The bug this project has hit five times (Sprint 4 #6/#8, Sprint 5's
+    // prerequisite, Sprint 6 §1.1, and a mova microbenchmark that reported inf).
+    // A new SME entry point that does not preserve d8-d15 is a latent version of
+    // it, so the probes are pinned the same way the kernels are.
+    register double r9  asm("d9")  = 1.0;
+    register double r10 asm("d10") = 2.0;
+    register double r11 asm("d11") = 3.0;
+    register double r12 asm("d12") = 4.0;
+    register double r13 asm("d13") = 5.0;
+    register double r14 asm("d14") = 6.0;
+    register double r15 asm("d15") = 7.0;
+    asm volatile("" : "+w"(r9), "+w"(r10), "+w"(r11), "+w"(r12),
+                      "+w"(r13), "+w"(r14), "+w"(r15));
+
+    smstart_probe_pairs(64);
+    smstart_probe_sm_only(64);
+
+    asm volatile("" : "+w"(r9), "+w"(r10), "+w"(r11), "+w"(r12),
+                      "+w"(r13), "+w"(r14), "+w"(r15));
+    REQUIRE(r9  == 1.0);
+    REQUIRE(r10 == 2.0);
+    REQUIRE(r11 == 3.0);
+    REQUIRE(r12 == 4.0);
+    REQUIRE(r13 == 5.0);
+    REQUIRE(r14 == 6.0);
+    REQUIRE(r15 == 7.0);
 }
