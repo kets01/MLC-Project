@@ -1,5 +1,6 @@
 add_library(norm_lib
     reference.cpp
+    stability.cpp               # Sprint 7a: FP32 variance estimators (analysis only)
     norm_ssve.cpp               # C++ SME guard + extern-C bridge
     jit_norm.cpp                # Sprint 4: mini_jit::Norm JIT generator
     layer_norm_ssve.S           # Sprint 2c: LayerNorm SSVE kernel V0 (Mariza)
