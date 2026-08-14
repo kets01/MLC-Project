@@ -25,6 +25,7 @@ add_library(norm_lib
     rms_norm_za.S               # Sprint 3: ZA-tile residency (1R+1W fusion)
     rms_norm_za_sme2.S          # Sprint 6: ZA residency via multi-vector MOVA
     bw_probe_ssve.S             # Sprint 2a: streaming-mode roofline probe
+    smstart_probe.S             # Sprint 7b: streaming-transition cost probe
 )
 
 # layer_norm_ssve.S and rms_norm_ssve*.S carry a .arch armv9-a+sme directive
@@ -53,6 +54,7 @@ set_source_files_properties(
     rms_norm_ssve_v6.S
     rms_norm_za.S
     bw_probe_ssve.S
+    smstart_probe.S
     PROPERTIES COMPILE_FLAGS "-march=armv9-a+sme"
 )
 
