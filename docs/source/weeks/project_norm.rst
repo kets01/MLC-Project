@@ -73,6 +73,12 @@ Sprint status
        kernel; SME2 multi-vector V7 (+17 % RMSNorm in DRAM) promoted into the
        JIT and TEIR; **four earlier report claims found wrong and corrected**
      - Done
+   * - 7
+     - The two ``context.md`` §8 tradeoffs measured: naive single-pass variance
+       driven to negative-and-NaN, two-pass shown flat across 12 orders of κ,
+       and the streaming transition timed directly at 9 ns — with the
+       small-tensor penalty attributed to group granularity, not ``SMSTART``
+     - Done
 
 The best kernel per architecture (SSVE **V6**, 4-row-block contiguity
 grouping, for both norms; **V7** where ``FEAT_SME2`` is present) is the
@@ -117,4 +123,5 @@ ablation treatment there.
    norm_sprint4
    norm_sprint5
    norm_sprint6
+   norm_sprint7
    sprint2_debug_log
