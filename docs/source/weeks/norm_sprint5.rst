@@ -162,6 +162,15 @@ compared it against a probe using 128 MiB arrays. That is the Sprint-2a
 a DRAM-only ceiling. The study now runs at M=4096, N=8192 (256 MiB working
 set), matching the probe's regime.
 
+.. note::
+
+   Because of that fix, **this section needed no re-baselining in Sprint 6.**
+   Numerator and denominator are both at 256 MiB, so the percentages here were
+   already footprint-matched — the one place in the report where they were.
+   The Sprint-6 §1.2 correction generalises this same reasoning to every other
+   shape, by measuring the ceiling as a curve instead of moving every workload
+   to DRAM.
+
 Threaded scaling (M4, Release, 256 MiB working set)
 -----------------------------------------------------
 
@@ -241,9 +250,59 @@ safe because of this sprint's ``d8–d15`` fix.
 
 Reading the numbers: RMSNorm scales 2.11× to about half the chip ceiling,
 LayerNorm 1.94× to 30 %. Scaling saturates well before the ceiling in both
-cases — past 8 threads the M4's E-cores contribute little bandwidth, and the
-row-chunked schedule gives each thread a strided walk over a 256 MiB footprint
-rather than one dense stream.
+cases.
+
+.. admonition:: Corrected in Sprint 6 (§2.2–2.3) — part of this curve was the harness
+   :class: warning
+
+   The original explanation for the flattening — *"past 8 threads the M4's
+   E-cores contribute little bandwidth, and the row-chunked schedule gives each
+   thread a strided walk"* — attributed to P/E heterogeneity what was largely a
+   **sawtooth produced by this harness's own chunk misalignment**.
+
+   At thread counts where ``M / threads`` is not a multiple of the kernel's
+   4·VL group, the measured throughput collapsed.  With group-aligned
+   (256-row) chunking the effect disappears exactly where predicted and
+   nowhere else:
+
+   .. list-table:: RMSNorm V7, naive vs group-aligned chunking (256 MiB)
+      :header-rows: 1
+
+      * - threads
+        - naive chunking
+        - group-aligned
+        - Δ
+      * - 1 / 2 / 4
+        - 24.77 / 29.29 / 35.81
+        - 24.80 / 29.35 / 35.85
+        - ~0 % (control)
+      * - 6
+        - 29.69
+        - **42.24**
+        - **+42.3 %**
+      * - 8
+        - 40.98
+        - 40.71
+        - −0.7 % (control)
+      * - 10
+        - 29.20
+        - **41.86**
+        - **+43.4 %**
+      * - 16
+        - 45.77
+        - 44.75
+        - −2.2 % (control)
+
+   The zero-effect rows are the control: they are the thread counts that were
+   *already* group-aligned, and they show no change, which is what rules out a
+   generic "aligned is faster" explanation.
+
+   With aligned chunking the curve is monotonic and the real shape is a knee at
+   ~4–6 threads and genuine flatness from 8 (8 → 16 buys ~2 %).  **The
+   mechanism behind the base-offset sensitivity was not identified** — a 64 B-
+   aligned offset is still 11 % slower than the allocation start, so it is not
+   simply cache-line alignment.  The fix is justified by its control, not by an
+   explanation, and is recorded that way.
 
 This is more headroom than Sprint 2a predicted. That prediction ("one core
 already sustains ~66 % of the chip aggregate, so threading buys ≤1.5×") was
