@@ -165,7 +165,7 @@ The V0–V3 conclusions hinge on "% of peak", so the peak itself must be validat
   - [x] Replay of the arithmetic variants — **the verdicts do NOT all transfer:** V1 (FRSQRTE+NR for `inv_std`) ≈0 (same as RMSNorm), but **V2 (pre-computed 1/N) = +9–12 %** vs RMSNorm's ≈0 — LayerNorm has TWO per-block FDIVs (mean, variance), both at serialization points between its three shorter passes, so hoisting them pays here.
   - [x] Memory-behaviour levers from 2b — **transfer cleanly:** V4 multi-accumulator +26–28 % (two accumulated statistics don't blunt it); V5 load pipelining ≈0 vs V4 (OOO rename covers it).
   - [x] **LayerNorm V6 = 4-row-block contiguity (three passes kept):** ties V4 at cache-assisted shapes, **+71 % vs V0 in the true-DRAM regime** (8.4 → 14.4 GiB/s) → **LayerNorm incumbent**. True 3R→2R pass fusion needs more resident state than 32 Z registers hold — recorded as the quantified Sprint-3 ZA hypothesis (+33 % traffic reduction available on LayerNorm, none on RMSNorm). Bytes stated under both conventions in the report.
-  - [x] **Welford vs two-pass — two-pass dominates BOTH axes:** Welford is 25–30 % slower than V6 *despite moving 25 % fewer bytes* (per-element `delta/count` recurrence serializes on SIMD, as pre-registered), AND ~100× less accurate on shifted data in FP32 (max err 1.2e-3 vs 1.2e-5 at shift=1e4; the centered two-pass squares small values, FP32 Welford rounds `mean` at input magnitude every element). Stress tests added for V4/V5/V6/Welford (gap-fill); accuracy table in the report.
+  - [x] **Welford vs two-pass — two-pass wins on SPEED; the accuracy half was overstated (corrected in Sprint 6 §1.3).** Welford is 25–30 % slower than V6 *despite moving 25 % fewer bytes* (per-element `delta/count` recurrence serializes on SIMD, as pre-registered) — **this is what decides the incumbent and it stands.** The original "~100× less accurate" claim does NOT: re-measured vs a float64 reference it holds at exactly one shift (1e4, and the factor is ~46×), is a wash at 0 and 1e2, and **reverses at 1e5** where Welford is 2.5× *better*. The stated mechanism was also wrong — Welford's *variance* is the more accurate of the two; the extra output error comes from the running **mean** updating at full input magnitude. Also newly documented: V6's 1.16e-5 accuracy floor is **FRSQRTE+NR, not the algorithm** (V0 with exact FSQRT reaches 3.33e-6 — a 3.5× accuracy cost that was undocumented). Stress tests added for V4/V5/V6/Welford; corrected accuracy table in the report.
 - [x] **LayerNorm vs RMSNorm on the same harness, same shapes** (decision C): **RMSNorm is 1.8–2.3× faster (LN/RMS = 0.43–0.56)** — well beyond the proposal's "10–40 %". Attribution: 1.33× structural traffic floor (3R+1W vs 2R+1W) plus per-byte efficiency (mean-subtract, β, two serialization points per block). Moved-bytes: LN V6 ~55 % of roofline vs RMS V6 ~95 %.
 
 ### 2d. Sprint close-out (docs + commits — same discipline as Sprints 0/1)
@@ -338,6 +338,29 @@ accumulator does and doesn't help a bandwidth-bound vector op.
 - [x] Measure-driven optimization (decision E/F): the harness identified the real bottleneck, and the tuning that followed was **V7 = V6 + SME2 multi-vector accesses** (below). Levers left alone with reasons: ZA tiling (Sprint 3 measured it `mova`-bound at every footprint), streaming transitions (already one region per call), load scheduling (V5 ≈0).
 - [x] **Ablation study**: one consolidated table in `main_norm` — scalar reference → V0 → V1/V2/V3 → V4/V5 → V6 → V7 → ZA → JIT, both norms, three regimes (per-call-overhead / cache-assisted / true-DRAM), same harness and same shapes throughout, with **LayerNorm two-pass vs Welford vs RMSNorm single-pass** side by side (decision C). Each row prints its measured max deviation from the reference, so accuracy is shown rather than asserted. The harness also caught itself: 20 reps made the small shape report hand-written V6 10 % below its own word-identical JIT twin — reps now scale with working set, after which they agree exactly.
 - [x] Report GiB/s **vs both validated ceilings** (single-core SSVE and chip-wide) across shapes; byte convention (useful 1R+1W) restated in the section header.
+- [x] **THE CEILING IS A CURVE, NOT A CONSTANT — every "% of peak" in the report since Sprint 2a was
+      computed against the wrong denominator for cache-resident shapes.** 2a measured the streaming ceiling
+      at a 256 MiB working set (59.5 GiB/s) and then applied that one number to every shape. It is the
+      *DRAM* ceiling: the same probe reaches **115.6 GiB/s at 16 MiB** and ~117 across 512 KiB–16 MiB.
+      Dividing a cache-resident kernel by the DRAM ceiling credits it for a constraint it never met and
+      inflated those figures by ~2×. **The most-quoted number in the report — RMSNorm V6 at "~95 % of the
+      moved-bytes roofline" — is really 50 %.** This is the same class of error 2a itself named ("peak of
+      *what*"): 2a fixed the execution-mode half (NEON vs streaming) and left the footprint half unasked.
+      FIXED: `main_norm` now sweeps the ceiling across footprints (64 KiB → 256 MiB, both modes) and every
+      table divides by the ceiling at its own working set, so the numbers regenerate from the tree instead
+      of depending on a constant that suits one regime. **All five report sections re-baselined**
+      (Sprints 0/1, 2-RMS, 2-LN, 4, 6; Sprint 5 needed none — it already ran numerator and denominator both
+      at 256 MiB). No kernel changed and no kernel-to-kernel ratio changed; what changed is the claim that
+      the SSVE kernels were near saturation. Two further readings fell out of the sweep: streaming mode
+      costs ~25 % vs NEON at DRAM but is nearly free in cache (0.93×), so "streaming is a structural
+      handicap" is a DRAM-regime statement; and below ~512 KiB the SSVE figure stops being a bandwidth
+      number at all (NEON climbs to 292 GiB/s at 64 KiB while SSVE falls to 105 — that is `SMSTART` cost
+      becoming a visible share of a sub-µs pass, which is Sprint 7b's subject).
+- [x] **Sprint 1's numbers were additionally `-O0`.** Its "roofline target" of 10.62 GiB/s was a debug-build
+      probe (the Sprint-5 `CMAKE_BUILD_TYPE` defect), so its 6–29 % figures divided one unoptimized number
+      by another. Re-measured in Release against footprint-matched ceilings: the scalar reference sits at
+      **0.8–6.3 %**. Its "RMSNorm is consistently 1.3–1.6× faster" also does not survive — the Release
+      ratio falls from 1.6× at M=128,N=64 to 1.08× at M=1024,N=2048.
 - [x] Verify every optimized configuration still matches the reference (decision B) — verification runs *before* each row's GiB/s is reported, and the JIT/TEIR paths are verified on top of that.
 - [x] **SME2 exploration — DONE, and the pre-registered expectation was WRONG (the sprint's headline result).**
       `FEAT_SME2` confirmed by `sysctl`, and the multi-vector forms assembled **and executed** in a
@@ -365,11 +388,17 @@ accumulator does and doesn't help a bandwidth-bound vector op.
       unit test. **Encoding diff green for both SME2 kernels**; emitted size 157→148 (RMS) and 208→196
       (LN) words, exactly the folded accesses. TEIR inherits it via the default: **single-thread RMSNorm
       21.04 → 24.68 GiB/s (+17.3 %)**, every configuration verified.
-- [x] ~~SME2 multi-vector on the **ZA** path~~ — **reasoned skip, unchanged by this sprint's data.**
-      Sprint 3 measured ZA pinned at ~10 GiB/s at *every* footprint (`mova`-bound, not memory-bound), and
-      this bullet's own arithmetic still holds: even a 2x `mova` speed-up reaches ~20 GiB/s, a tie at best
-      with V6, and only in the N ≤ 64 window that is cache-resident anyway. Recorded as a skip with its
-      reason rather than an untried box.
+- [x] **SME2 multi-vector on the ZA path — the skip was RETRACTED and the experiment run.** The skip
+      rested on an untested factor: `mova` had never been characterised as *issue*-bound vs *ZA-port*-bound,
+      and the "2x" was assumed. Measured directly (no memory traffic, 16 vectors either way): single-vector
+      **3.88 G vec/s**, 4-vector **15.50 G vec/s** = **4.00x** — issue-bound, and the fold is 4:1, not 2:1,
+      so the skip's own arithmetic did not hold. Both kernels built (`rms_norm_za_sme2.S`,
+      `layer_norm_za_sme2.S`), bit-identical to the Sprint-3 versions on every shape tested:
+      **RMSNorm 10.07 → 16.35 (+62 %), LayerNorm 4.83 → 10.34 (+114 %)**. **Verdict unchanged — ZA still
+      loses (−37 % / −24 % vs V7) — but now by measurement rather than extrapolation**, and the residual
+      cause is different from the original diagnosis: the ZA kernels touch **one** SVL-row block per
+      iteration (64 B per column) against V6/V7's **four** (256 B), so what binds them is the Sprint-2b
+      access-density lever, not `mova`.
 
   <details><summary>Original pre-registration (kept verbatim — it is the thing the measurement overturned)</summary>
 
