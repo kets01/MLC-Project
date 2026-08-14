@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <string>
 #include <vector>
 #include "norm/norm.hpp"
 #include "norm/jit_norm.hpp"  // Sprint 4: mini_jit::Norm
@@ -218,6 +219,190 @@ static double measure_peak_chip(unsigned threads) {
     double elapsed = std::chrono::duration<double>(t1 - t0).count();
     double bytes   = static_cast<double>(PROBE_N) * sizeof(float) * 2.0 * R;
     return to_gibs(bytes, elapsed);
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 6 correction — the ceiling is a CURVE, not a constant.
+//
+// Every "% of peak" since Sprint 2a divides by ONE number: the 59.5 GiB/s
+// SSVE figure measured above at PROBE_N = 128 MiB per array.  That number is
+// correct for what it measures — the single-core streaming ceiling when the
+// data comes from DRAM — and it is the right denominator for a DRAM-resident
+// kernel.  It is the WRONG denominator for a cache-resident one, which never
+// faces DRAM bandwidth at all and is limited by the hierarchy's much higher
+// ceiling.  Sprint 2a asked "peak of WHAT" and answered the execution-mode
+// half (NEON vs streaming); this is the footprint half it left unasked.
+//
+// Methodology — the point on which the whole correction rests: at a small
+// footprint both arrays stay resident after the first repetition, so what is
+// measured is STEADY-STATE RESIDENT bandwidth, not cold-miss bandwidth.  That
+// is a legitimate denominator here only because the norm kernels are
+// benchmarked exactly the same way (repeated calls over the same buffers).
+// Probe and kernel must sit in the same residency regime or their ratio is
+// meaningless.
+//
+// Limitations, stated rather than glossed:
+//   * The probe is a pure 1R+1W streaming copy; the norms are 2R+1W (RMS) and
+//     3R+1W (LN) with a pass-2 re-read that interacts with the hierarchy
+//     differently.  A footprint-matched probe is a BETTER denominator than a
+//     single DRAM constant, not an exact one.
+//   * Sprint 6 §2.2 found an unexplained base-offset effect (allocation start
+//     measured fastest).  Fresh allocations per point AVOID it; they do not
+//     control for it.
+// ---------------------------------------------------------------------------
+
+struct CeilingPoint {
+    double mib;        // total working set (src + dst)
+    double neon_gibs;
+    double ssve_gibs;
+};
+
+// Reps scale with footprint via a fixed byte budget rather than a fixed count.
+// Sprint 6 caught the fixed-count failure directly: at a small shape it made
+// the hand-written V6 read 10 % below its own word-identical JIT twin, which
+// is impossible for identical code and was therefore sampling noise.
+static int reps_for(size_t bytes_per_pass) {
+    const double kBudget = 512.0 * 1024.0 * 1024.0;   // ~512 MiB moved per point
+    int r = static_cast<int>(kBudget / static_cast<double>(bytes_per_pass));
+    return std::max(5, std::min(r, 1000));
+}
+
+static std::vector<CeilingPoint> measure_ceiling_curve(bool have_sme) {
+    // Total working set = 2 arrays * n * 4 B.  64 KiB -> 256 MiB, geometric.
+    // The last point is PROBE_N-equivalent, so it must reproduce the 59.5 /
+    // 79.5 figures printed above — that agreement is the sweep's own control.
+    //
+    // The sub-MiB points exist because the smallest ablation shape (128x64) is
+    // only 0.06 MiB; without them its denominator would be extrapolated from
+    // the 1 MiB point.  They come with a caveat that the printout repeats: at
+    // that size a pass takes well under a microsecond, so the SSVE probe's own
+    // SMSTART/SMSTOP entry cost and the harness's two Clock::now() calls are a
+    // visible fraction of the measurement.  A sub-MiB "ceiling" is therefore
+    // NOT a pure bandwidth figure, and the curve bending down there is that
+    // overhead, not the memory system.  Quantifying it properly is Sprint 7b.
+    const double mibs[] = { 0.0625, 0.125, 0.25, 0.5,
+                            1, 2, 4, 8, 16, 32, 64, 128, 256 };
+    const int    K      = static_cast<int>(sizeof(mibs) / sizeof(mibs[0]));
+
+    std::vector<CeilingPoint> out;
+    out.reserve(static_cast<size_t>(K));
+
+    for (int k = 0; k < K; ++k) {
+        const size_t n = static_cast<size_t>(mibs[k] * 1024.0 * 1024.0 / (2.0 * sizeof(float)));
+
+        // Fresh allocation per point (see limitation 2 above).
+        std::vector<float> src(n), dst(n);
+        for (size_t i = 0; i < n; ++i) src[i] = static_cast<float>(i & 0xFF) + 1.0f;
+        for (size_t i = 0; i < n; ++i) dst[i] = 0.0f;   // faults dst pages too
+
+        const size_t pass_bytes = n * sizeof(float) * 2;
+        const int    reps       = reps_for(pass_bytes);
+
+        // BYTES volatile: read again after the SSVE probe's SMSTART/SMSTOP
+        // transitions, which zero d8-d15 behind the compiler's back.  Sprint 6
+        // Part 3 #5 is exactly this bug — a microbenchmark that reported `inf`
+        // because its own probe did not preserve them.
+        volatile double BYTES = static_cast<double>(pass_bytes);
+
+        bw_scale_add(dst.data(), src.data(), n);        // warm-up / page-fault
+        volatile double t_neon = bench([&]() { bw_scale_add(dst.data(), src.data(), n); }, reps);
+
+        volatile double t_ssve = 0.0;
+        if (have_sme)
+            t_ssve = bench_probe_ssve(dst.data(), src.data(), n);  // warms up internally
+
+        CeilingPoint p;
+        p.mib       = mibs[k];
+        p.neon_gibs = to_gibs(static_cast<double>(BYTES), static_cast<double>(t_neon));
+        p.ssve_gibs = have_sme
+                        ? to_gibs(static_cast<double>(BYTES), static_cast<double>(t_ssve))
+                        : 0.0;
+        out.push_back(p);
+    }
+    return out;
+}
+
+// The denominator a kernel of this footprint should actually be divided by:
+// the measured SSVE ceiling at the nearest working-set size at or above it.
+// Falls back to the DRAM figure past the top of the curve.
+static double ceiling_for_footprint(const std::vector<CeilingPoint>& pts,
+                                    double mib, double dram_fallback) {
+    double best = dram_fallback;
+    for (const auto& p : pts) {
+        if (p.ssve_gibs <= 0.0) continue;
+        if (p.mib >= mib) { best = p.ssve_gibs; break; }
+        best = p.ssve_gibs;
+    }
+    return best;
+}
+
+// Printing is a SEPARATE loop from measurement: no SME call may sit between a
+// computed FP value and its output, or the SMSTART clobber can zero it (the
+// discipline small_n_sweep documents below).
+static void print_ceiling_curve(const std::vector<CeilingPoint>& pts, bool have_sme,
+                                double dram_ssve) {
+    std::cout << "\n" << std::string(78, '=') << "\n"
+              << "CEILING vs FOOTPRINT - is 59.5 GiB/s the right denominator?\n"
+              << std::string(78, '=') << "\n"
+              << "Steady-state RESIDENT bandwidth: buffers are re-touched every rep, the\n"
+              << "same way the norm kernels are benchmarked.  Probe = 1R+1W scale-add.\n"
+              << "The 256 MiB row must reproduce the two ceilings printed above (control).\n"
+              << "Sub-MiB rows are overhead-contaminated (a pass is < 1 us, so SMSTART and\n"
+              << "the timing calls are a visible share) — not pure bandwidth.  See 7b.\n\n"
+              << std::left << std::setw(14) << "  working set"
+              << std::right << std::setw(12) << "NEON"
+              << std::setw(12) << "SSVE"
+              << std::setw(14) << "SSVE/NEON" << "\n";
+
+    for (const auto& p : pts) {
+        // Sub-MiB points would all render as "0 MiB" as integers.
+        std::string label;
+        if (p.mib < 1.0) {
+            label = std::to_string(static_cast<int>(p.mib * 1024.0)) + " KiB";
+        } else {
+            label = std::to_string(static_cast<int>(p.mib)) + " MiB";
+        }
+        std::cout << "  " << std::left << std::setw(12) << label
+                  << std::right << std::fixed
+                  << std::setw(12) << std::setprecision(2) << p.neon_gibs;
+        if (have_sme) {
+            std::cout << std::setw(12) << std::setprecision(2) << p.ssve_gibs
+                      << std::setw(14) << std::setprecision(3)
+                      << (p.neon_gibs > 0.0 ? p.ssve_gibs / p.neon_gibs : 0.0);
+        } else {
+            std::cout << std::setw(12) << "-" << std::setw(14) << "-";
+        }
+        std::cout << "\n";
+    }
+
+    if (!have_sme) { std::cout << "\n"; return; }
+
+    // What the correction actually costs, for the three shapes the consolidated
+    // ablation reports.  This is the size of the restatement, printed rather
+    // than argued: only shapes that are NOT DRAM-resident move.
+    struct AblShape { const char* label; int64_t m, n; };
+    const AblShape shapes[] = {
+        { "128x64    (per-call overhead)", 128,  64   },
+        { "1024x2048 (cache-assisted)",    1024, 2048 },
+        { "4096x8192 (true DRAM)",         4096, 8192 },
+    };
+
+    std::cout << "\nDenominator restatement for the consolidated-ablation shapes:\n"
+              << std::left << std::setw(34) << "  shape"
+              << std::right << std::setw(12) << "footprint"
+              << std::setw(12) << "old (DRAM)"
+              << std::setw(14) << "footprint-matched" << "\n";
+    for (const auto& s : shapes) {
+        const double mib = static_cast<double>(s.m) * static_cast<double>(s.n)
+                           * sizeof(float) * 2.0 / (1024.0 * 1024.0);
+        const double matched = ceiling_for_footprint(pts, mib, dram_ssve);
+        std::cout << "  " << std::left << std::setw(32) << s.label
+                  << std::right << std::fixed
+                  << std::setw(10) << std::setprecision(2) << mib << " MiB"
+                  << std::setw(12) << std::setprecision(2) << dram_ssve
+                  << std::setw(14) << std::setprecision(2) << matched << "\n";
+    }
+    std::cout << "\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -1075,6 +1260,12 @@ int main() {
         << std::setw(7) << peak_ssve << " GiB/s  <- kernel roofline\n"
         << "  chip-wide         (" << nthreads << " threads, NEON)              : "
         << std::setw(7) << peak_chip << " GiB/s  <- Sprint-5 threading target\n\n";
+
+    // The footprint half of "peak of WHAT" (Sprint 6 §1.2).  Runs before the
+    // ablation so its curve is available as a per-shape denominator, and so
+    // the 256 MiB row can be checked against the constants just printed.
+    const std::vector<CeilingPoint> ceiling_curve = measure_ceiling_curve(have_sme);
+    print_ceiling_curve(ceiling_curve, have_sme, static_cast<double>(peak_ssve));
 
     // Sprint 6's consolidated ablation runs FIRST: it is the evaluation
     // deliverable, and the per-sprint sections below are the detail behind it.
