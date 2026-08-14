@@ -11,6 +11,29 @@ SVL = 512 bits, `FEAT_SME` and `FEAT_SME2` both present), Release build.
 
 ---
 
+## Resolution status (added after the log was written)
+
+Every item below has since been worked through against the report. Status:
+
+| item | resolution |
+|---|---|
+| §1.1 half-applied ABI fix | **Closed in-sprint** — all 17 entry points fixed, `[sprint6][abi]` test pins them |
+| §1.2 wrong denominator | **Fixed in code and docs.** `main_norm` now measures the ceiling as a *curve* across footprints (64 KiB → 256 MiB, both modes) and every table divides by the ceiling at its own working set. All five affected report sections re-baselined; Sprint 5 needed none. The §1.2 table reproduced on a fresh run, with the 256 MiB row matching the standalone probes as its control |
+| §1.3 Welford accuracy | **Corrected** in `norm_sprint2_layernorm.rst` and `ROADMAP.md`, including the wrong *mechanism* and the previously undocumented 3.5× accuracy cost of V6's FRSQRTE+NR |
+| §1.4 ZA skip | **Corrected** — the report said ZA-SME2 was "not attempted"; both kernels are committed and measured. Report and ROADMAP now carry the retraction and the measured verdict |
+| §2.1–2.3 threading | **Corrected** in `norm_sprint5.rst` with the alignment control table; the unidentified base-offset mechanism is recorded as unidentified, not explained |
+| §2.4 V7 mechanism | **Corrected** in `norm_sprint6.rst` — the `v7x2` control table is now in the report, and the claim is narrowed to a threshold effect; the report previously said the MLP hypothesis "survives", which the control does not support |
+| §2.5–2.6 GFLOPS lens | **No artifact** — never reached the report; a guard note added to Sprint 6 so the FMOPA figures are not misread as a target |
+| §2.7–2.8 vendor claims | **No artifact** — never reached the report. Deliberately left out rather than added, since the vDSP baseline is our own composition and the traffic figure was assumed |
+| §Part 3 process errors | Lessons; the assertion practice is the durable one |
+| §Part 4 measurements | **Added to the report** (Sprint 6, "Instrument readings from this sprint"), including the finding that cache-resident RMSNorm V7 is FP-issue-bound at 100 % of the SSVE issue ceiling — which is what explains V7's ≈0 gain there |
+
+One correction to this log's own §1.2 table: the **32 MiB** point is the least
+stable on the curve (88.6 here, 92.8 and 96.0 on two later runs). It sits at the
+L2→DRAM knee and should not be quoted precisely.
+
+---
+
 ## Part 1 — False statements already in the repo (pre-existing)
 
 ### 1.1 "The Sprint-5 AAPCS64 fix is done"
