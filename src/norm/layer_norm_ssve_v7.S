@@ -31,9 +31,21 @@
 // predictions, so this measurement discriminates between them — which is the
 // point of building it rather than assuming.
 //
-// SCOPE: only the unpredicated group path uses SME2; the 1-3 block tail keeps
-// V6's plain-SVE predicated loop.  The C++ bridge dispatches to V6 when
-// FEAT_SME2 is absent, so the same binary runs on M1/M2 and on M4.
+// NO TAIL PATH (Sprint 6 revision, mirroring rms_norm_ssve_v7.S).  V6 needs a
+// separate 1-3 block tail because its group path is unpredicated; that tail
+// touches 64 B per column instead of 256 B, reverting to the low access
+// density V6 exists to fix.  SME2's predicate-as-counter removes the second
+// path entirely: `whilelo pn8.s, x0, x23, vlx4` describes
+// min(M - x0, 4*VL) active elements ACROSS the four-vector group, so one loop
+// body serves the full groups AND the final partial group.
+//
+// Inactive-lane safety: loads are pn8/z, so inactive lanes read 0 and a
+// fully-inactive block ends with mean 0 and variance 0 -> +eps, which
+// FRSQRTE handles finitely; the store is governed by the same counter, so
+// nothing invalid reaches memory.
+//
+// The C++ bridge dispatches to V6 when FEAT_SME2 is absent, so the same
+// binary runs on M1/M2 and on M4.
 //
 // C signature: same as layer_norm_ssve_v2/v6.
 
@@ -99,8 +111,6 @@ SYM(layer_norm_ssve_v7):
 
     smstart sm
     ptrue p0.s, all
-    ptrue pn8.s                    // all-true counter predicate for the SME2
-                                    // multi-vector loads/stores
 
     ldr   s0, [sp, #128]
     dup   z7.s, z0.s[0]            // z7 = [eps,...]
@@ -118,9 +128,8 @@ SYM(layer_norm_ssve_v7):
     // Group loop: process 4 VL-row blocks per iteration
     // ──────────────────────────────────────────────────────────────
 .Lgroup_v7:
-    add   x15, x0, x14
-    cmp   x15, x23
-    b.hi  .Ltail_v7                // fewer than 4 full blocks remain
+    whilelo pn8.s, x0, x23, vlx4   // all-true while >= 4*VL rows remain,
+    b.none  .Ldone_v7              // partial for the last group, none at end
 
     // ── Group pass 1: mean (one 4-vector load per column) ────────
     mov   z8.s,  #0
@@ -239,77 +248,6 @@ SYM(layer_norm_ssve_v7):
     addvl x20, x20, #4
     add   x0, x0, x14
     b     .Lgroup_v7
-
-    // ──────────────────────────────────────────────────────────────
-    // Tail: 1–3 remaining blocks, predicated (V2-style, p1, plain SVE)
-    // ──────────────────────────────────────────────────────────────
-.Ltail_v7:
-    whilelo p1.s, x0, x23
-    b.none  .Ldone_v7
-
-    // Pass 1: mean
-    mov   z8.s, #0
-    mov   x8, x19
-    mov   x9, x24
-
-.Ltp1_v7:
-    ld1w  {z0.s}, p1/z, [x8]
-    fadd  z8.s, p1/m, z8.s, z0.s
-    add   x8, x8, x25
-    subs  x9, x9, #1
-    b.ne  .Ltp1_v7
-
-    fmul  z8.s, p1/m, z8.s, z4.s   // mean
-
-    // Pass 2: variance + inv_std
-    mov   z9.s, #0
-    mov   x8, x19
-    mov   x9, x24
-
-.Ltp2_v7:
-    ld1w  {z0.s}, p1/z, [x8]
-    fsub  z0.s, p1/m, z0.s, z8.s
-    fmla  z9.s, p1/m, z0.s, z0.s
-    add   x8, x8, x25
-    subs  x9, x9, #1
-    b.ne  .Ltp2_v7
-
-    fmul  z9.s, p1/m, z9.s, z4.s
-    fadd  z9.s, p1/m, z9.s, z7.s
-
-    sel     z9.s, p1, z9.s, z7.s
-    frsqrte z5.s, z9.s
-    fmul    z3.s, z5.s, z9.s
-    frsqrts z3.s, z5.s, z3.s
-    fmul    z5.s, p1/m, z5.s, z3.s // z5 = inv_std
-
-    // Pass 3: normalize + scale + shift
-    mov   x8,  x19
-    mov   x9,  x20
-    mov   x10, x21
-    mov   x11, x22
-    mov   x12, x24
-
-.Ltp3_v7:
-    ld1w  {z0.s}, p1/z, [x8]
-    ld1rw {z1.s}, p1/z, [x10]
-    ld1rw {z2.s}, p1/z, [x11]
-    fsub  z0.s, p1/m, z0.s, z8.s
-    fmul  z0.s, p1/m, z0.s, z5.s
-    fmul  z0.s, p1/m, z0.s, z1.s
-    fadd  z0.s, p1/m, z0.s, z2.s
-    st1w  {z0.s}, p1, [x9]
-    add   x8,  x8,  x25
-    add   x9,  x9,  x26
-    add   x10, x10, #4
-    add   x11, x11, #4
-    subs  x12, x12, #1
-    b.ne  .Ltp3_v7
-
-    addvl x19, x19, #1
-    addvl x20, x20, #1
-    incw  x0
-    b     .Ltail_v7
 
 .Ldone_v7:
     smstop sm

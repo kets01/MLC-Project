@@ -55,7 +55,9 @@ Sprint status
      - Done
    * - 3
      - Hand-written SME/ZA-tile kernels for both norms — a measured,
-       explained *negative* result (39–68 % slower than the SSVE winner)
+       explained *negative* result (39–68 % slower than the SSVE winner;
+       rebuilt on SME2 multi-vector ``MOVA`` in Sprint 6 for +62 %/+114 %,
+       and still losing)
      - Done
    * - 4
      - ``mini_jit::Norm`` runtime code generator, verified byte-identical to
@@ -67,14 +69,35 @@ Sprint status
        OpenMP row-parallel scaling measured against the chip ceiling
      - Done
    * - 6
-     - Consolidated ablation against both ceilings; the ``d8-d15`` ABI fix
-       completed across every kernel; SME2 multi-vector V7 (+17 % RMSNorm in
-       DRAM) promoted into the JIT and TEIR
+     - Consolidated ablation; the ``d8-d15`` ABI fix completed across every
+       kernel; SME2 multi-vector V7 (+17 % RMSNorm in DRAM) promoted into the
+       JIT and TEIR; **four earlier report claims found wrong and corrected**
      - Done
 
 The best kernel per architecture (SSVE **V6**, 4-row-block contiguity
-grouping, for both norms) is frozen as the incumbent that Sprint 4's JIT
-emits and Sprint 5's TEIR runtime calls.
+grouping, for both norms; **V7** where ``FEAT_SME2`` is present) is the
+incumbent that Sprint 4's JIT emits and Sprint 5's TEIR runtime calls.
+
+.. important::
+
+   **A correction that touches every performance number in this report.**
+   Until Sprint 6, every "% of roofline" divided by a single figure —
+   59.5 GiB/s, the single-core streaming ceiling measured at a 256 MiB working
+   set.  That is the **DRAM** ceiling, and it is the correct denominator only
+   for DRAM-resident shapes.
+
+   The ceiling is a curve: the same probe reaches **115.6 GiB/s at a 16 MiB
+   footprint**.  Dividing a cache-resident kernel by the DRAM ceiling credits
+   it for a constraint it never met, and inflated those percentages by ~2×.
+   The most-quoted number in this report — RMSNorm V6 at "~95 % of the
+   moved-bytes roofline" — is really **50 %**.
+
+   No kernel got slower; the measurements are unchanged, and so is every
+   kernel-to-kernel ratio the ablation is built on.  What changed is the
+   denominator, and with it the claim that the SSVE kernels were near
+   saturation.  ``main_norm`` now measures the ceiling across footprints and
+   each row divides by the one matching its own working set.  Sections
+   restated on that basis carry a note saying so.
 
 Reading this section
 ---------------------

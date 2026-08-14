@@ -567,3 +567,20 @@ uint32_t mini_jit::InstGen::sme2_st1w_x4( sve_t zt, pred_t pn, gpr_t rn ) {
          | (reg_id(rn) << 5)
          | ((uint32_t)zt & 0x1fu);
 }
+
+// WHILELO PN<pn>.S, X<rn>, X<rm>, VLx<vl>
+// Golden words (clang -march=armv9-a+sme2, objdump):
+//   whilelo pn8.s,  x0, x22, vlx4 -> 0x25b66c10
+//   whilelo pn8.s,  x0, x23, vlx4 -> 0x25b76c10   (Rm  field, bits 20:16)
+//   whilelo pn9.s,  x0, x22, vlx4 -> 0x25b66c11   (PN  field, bits  2:0)
+//   whilelo pn15.s, x0, x22, vlx4 -> 0x25b66c17
+//   whilelo pn8.s,  x5, x22, vlx4 -> 0x25b66cb0   (Rn  field, bits  9:5)
+//   whilelo pn8.s,  x0, x22, vlx2 -> 0x25b64c10   (VLx2 vs VLx4 = bit 13)
+uint32_t mini_jit::InstGen::sme2_whilelo_pn_s( pred_t pn, gpr_t rn, gpr_t rm,
+                                               uint32_t vl ) {
+  return 0x25a04c10u
+         | (reg_id(rm) << 16)
+         | (reg_id(rn) << 5)
+         | (((uint32_t)pn - 8u) & 0x7u)
+         | ((vl == 4u) ? 0x2000u : 0u);
+}

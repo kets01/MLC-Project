@@ -114,10 +114,11 @@ Emission (one-time): **~4.7 µs** for RMSNorm, **~4.8 µs** for LayerNorm
 Sprint-5 ABI fix) — recouped after a handful of small-shape calls, and the
 pointer is reused thereafter.
 
-.. list-table:: JIT-emitted V6 vs hand-written V6 (GiB/s, useful bytes, % of 59.5 GiB/s 1-core SSVE roofline)
+.. list-table:: JIT-emitted V6 vs hand-written V6 (GiB/s, useful bytes, % of the ceiling at each shape's footprint)
    :header-rows: 1
 
    * - Shape (M×N)
+     - ceiling
      - RMS hand
      - RMS JIT
      - Δ
@@ -125,33 +126,42 @@ pointer is reused thereafter.
      - LN JIT
      - Δ
    * - 128×64
-     - 38.56 (65.2 %)
-     - 38.56 (65.2 %)
+     - 104.7
+     - 38.56 (36.8 %)
+     - 38.56 (36.8 %)
      - +0.0 %
-     - 16.46 (27.8 %)
-     - 16.65 (28.1 %)
+     - 16.46 (15.7 %)
+     - 16.65 (15.9 %)
      - +1.1 %
    * - 128×2048
-     - 38.52 (65.1 %)
-     - 38.52 (65.1 %)
+     - 116.0
+     - 38.52 (33.2 %)
+     - 38.52 (33.2 %)
      - +0.0 %
-     - 16.51 (27.9 %)
-     - 16.51 (27.9 %)
+     - 16.51 (14.2 %)
+     - 16.51 (14.2 %)
      - −0.0 %
    * - 1024×2048
-     - 38.44 (65.0 %)
-     - 38.45 (65.0 %)
+     - 115.6
+     - 38.44 (33.3 %)
+     - 38.45 (33.3 %)
      - +0.0 %
-     - 16.49 (27.9 %)
-     - 16.48 (27.9 %)
+     - 16.49 (14.3 %)
+     - 16.48 (14.3 %)
      - −0.0 %
    * - 4096×2048 (DRAM)
-     - 25.84 (43.7 %)
-     - 26.21 (44.3 %)
+     - 63.3
+     - 25.84 (40.8 %)
+     - 26.21 (41.4 %)
      - +1.5 %
-     - 14.42 (24.4 %)
-     - 14.44 (24.4 %)
+     - 14.42 (22.8 %)
+     - 14.44 (22.8 %)
      - +0.1 %
+
+Percentages restated in Sprint 6 (§1.2): the table originally divided all four
+shapes by 59.5 GiB/s, the ceiling at a 256 MiB footprint.  Only the last row is
+near that regime.  The parity conclusion is untouched — it rests on the hand-vs-JIT
+Δ columns, which are ratios.
 
 Parity within noise at every shape — exactly what a word-identical kernel
 must show once the call paths are equalized.  The mmap'd JIT page vs the
@@ -198,33 +208,63 @@ reference, hand-written V6, ZA residency, and the JIT-emitted kernel, for
 both norms, at 10 reps instead of 50 (each call already moves 256 MiB, so
 more reps buys no extra precision at real time cost).
 
-Findings (Apple M4, 59.5 GiB/s single-core SSVE roofline)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. admonition:: This addendum found half of Sprint 6 §1.2, two sprints early
+   :class: important
 
-.. list-table:: True-DRAM shape (M=4096, N=8192, 256 MiB total) vs the 64 MB shape
+   The paragraph above states the problem almost exactly: *"every '% of
+   roofline' number to date compares a possibly cache-assisted numerator
+   against a guaranteed-DRAM denominator."*  That is §1.2.
+
+   Sprint 4 fixed it by moving the **numerator** to DRAM — benchmarking a
+   shape whose footprint matches the probe's.  That makes the *one* ratio it
+   measures honest, and it is why the 256 MiB column below needed no
+   correction.  What it did not do is generalise: every other shape in the
+   report stayed cache-resident and kept the DRAM denominator.
+
+   Sprint 6 fixed the other half by moving the **denominator** to match each
+   shape — measuring the ceiling as a curve.  Either fix makes one comparison
+   valid; only the second makes all of them valid.  The 64 MiB column below is
+   restated accordingly (ceiling 63.3 GiB/s at that footprint, not 59.5).
+
+Findings (Apple M4; each column against the ceiling at its own footprint)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table:: True-DRAM shape (M=4096, N=8192, 256 MiB total) vs the 64 MiB shape
    :header-rows: 1
    :widths: 22 16 16 16
 
    * - variant
-     - 64 MB (M=4096,N=2048)
-     - 256 MiB (M=4096,N=8192)
+     - 64 MiB (M=4096,N=2048), ceiling 63.3
+     - 256 MiB (M=4096,N=8192), ceiling 59.5
      - drop
    * - RMS V6 hand-written
-     - 25.84 (43.7 %)
-     - 20.22 (34.1 %)
+     - 25.84 (40.8 %)
+     - 20.22 (34.0 %)
      - **−22 %**
    * - RMS V6 JIT-emitted
-     - 26.21 (44.3 %)
-     - 20.26 (34.2 %)
+     - 26.21 (41.4 %)
+     - 20.26 (34.0 %)
      - **−23 %**
    * - LN V6 hand-written
-     - 14.42 (24.4 %)
-     - 13.12 (22.2 %)
+     - 14.42 (22.8 %)
+     - 13.12 (22.0 %)
      - **−9 %**
    * - LN V6 JIT-emitted
-     - 14.44 (24.4 %)
-     - 13.13 (22.2 %)
+     - 14.44 (22.8 %)
+     - 13.13 (22.1 %)
      - **−9 %**
+
+The correction also decomposes the drop, which the single-denominator version
+could not.  The ceiling itself falls 63.3 → 59.5 GiB/s (−6 %) between the two
+footprints, so that much of each drop is the machine, not the kernel:
+
+* **RMSNorm −22 %** = −6 % ceiling + **−17 % efficiency** (40.8 % → 34.0 %).
+  Most of it is genuinely the kernel losing cache assistance, as the original
+  text concluded.
+* **LayerNorm −9 %** = −6 % ceiling + **−3.5 % efficiency** (22.8 % → 22.0 %).
+  Here the drop is *mostly the ceiling* — LayerNorm barely changes its
+  efficiency at all, which strengthens the original reading that its extra
+  arithmetic per byte keeps it closer to compute-bound.
 
 The **64 MB shape was still partially cache-assisted** — a real, measurable
 gap, not noise. RMSNorm drops further than LayerNorm (−22 % vs −9 %): RMSNorm

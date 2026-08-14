@@ -484,6 +484,16 @@ class mini_jit::InstGen {
      *        Same register-group constraint as sme2_ld1w_x4.
      */
     static uint32_t sme2_st1w_x4( sve_t zt, pred_t pn, gpr_t rn );
+
+    /**
+     * @brief WHILELO PN<pn>.S, X<rn>, X<rm>, VLx<vl>  (SME2)
+     *        Builds a predicate-as-counter describing min(rm-rn, vl*VL)
+     *        active elements ACROSS a group of `vl` vectors — which is what
+     *        lets one multi-vector loop body serve both full groups and the
+     *        final partial group, with no separate tail path.
+     * @param vl  vector-group size: 2 or 4.
+     */
+    static uint32_t sme2_whilelo_pn_s( pred_t pn, gpr_t rn, gpr_t rm, uint32_t vl );
 };
 
 #endif

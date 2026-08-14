@@ -138,6 +138,20 @@ void layer_norm_ssve_v7(const float* a,
                         int64_t      ld_b,
                         float        epsilon);
 
+// LayerNorm ZA residency rebuilt on SME2 multi-vector MOVA (Sprint 6), the
+// counterpart of rms_norm_za_sme2.  LayerNorm stages 3 MOVAs per element to
+// RMSNorm's 2, so it has proportionally more MOVA cost for the 4:1 fold to
+// remove.  Requires FEAT_SME2; falls back to V6 when absent.
+void layer_norm_za_sme2(const float* a,
+                        float*       b,
+                        const float* gamma,
+                        const float* beta,
+                        int64_t      m,
+                        int64_t      n,
+                        int64_t      ld_a,
+                        int64_t      ld_b,
+                        float        epsilon);
+
 // LayerNorm — hand-written SME/ZA kernel (Sprint 3, gated).  Full 3-pass ZA
 // residency: x is staged in ZA during the mean pass and reused from ZA for
 // BOTH the variance pass and the normalize pass (3R+1W -> 1R+1W, vs the SSVE
@@ -238,6 +252,35 @@ void rms_norm_ssve_v6(const float* a,
 // bound or memory bound (Sprint 6).  Requires FEAT_SME2; the wrapper
 // dispatches to V6 when it is absent, so this is safe to call anywhere.
 void rms_norm_ssve_v7(const float* a,
+                      float*       b,
+                      const float* gamma,
+                      int64_t      m,
+                      int64_t      n,
+                      int64_t      ld_a,
+                      int64_t      ld_b,
+                      float        epsilon);
+
+// V7x2: the 2-vector CONTROL for V7 (Sprint 6).  Identical work and identical
+// 256 B per column, issued as two 2-vector accesses instead of one 4-vector
+// access — isolates bytes-of-demand-per-instruction as the only variable, to
+// discriminate memory-level-parallelism from prefetcher explanations for V7's
+// DRAM win.  Measurement variant; not emitted by the JIT.
+void rms_norm_ssve_v7x2(const float* a,
+                        float*       b,
+                        const float* gamma,
+                        int64_t      m,
+                        int64_t      n,
+                        int64_t      ld_a,
+                        int64_t      ld_b,
+                        float        epsilon);
+
+// ZA residency rebuilt on SME2 multi-vector MOVA (Sprint 6).  Same 1R+1W
+// residency idea as rms_norm_za, but four columns are staged per MOVA instead
+// of one, folding ZA traffic 4:1 — built because a direct measurement showed
+// MOVA is issue-bound (4.00x from the 4-vector form), which invalidates the
+// premise of the Sprint-3 decision to leave ZA alone.  Requires FEAT_SME2;
+// falls back to V6 when absent.
+void rms_norm_za_sme2(const float* a,
                       float*       b,
                       const float* gamma,
                       int64_t      m,

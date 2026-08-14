@@ -1,11 +1,10 @@
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
-#include <thread>
+#include <string>
 #include <vector>
 #include "norm/norm.hpp"
 #include "norm/jit_norm.hpp"  // Sprint 4: mini_jit::Norm
@@ -168,48 +167,242 @@ static double measure_peak_chip(unsigned threads) {
     // race); (b) a pass touches all 128 MiB before any chunk is revisited,
     // so no chunk is still cache-resident on its next rep, which would
     // measure cache instead of DRAM.
-    const size_t n_chunks = static_cast<size_t>(threads) * 8;
-    const size_t chunk    = PROBE_N / n_chunks;
-
-    std::atomic<size_t>   next{0};
-    std::atomic<unsigned> arrived{0};
-    std::atomic<int>      generation{0};
+    // Sprint 6: this used to be hand-rolled std::thread workers with an
+    // atomic work counter and a generation-counter barrier.  OpenMP expresses
+    // the same three properties directly, so the machinery is gone but the
+    // measurement semantics are unchanged:
+    //   - dynamic work distribution  -> schedule(dynamic): a fast P-core
+    //     simply claims more chunks than a slow E-core, which is the whole
+    //     point (equal static slices measured slowest-core x T, not the
+    //     memory system — the bug fixed in Sprint 5).
+    //   - one owner per chunk per pass -> a single `omp for` over n_chunks.
+    //   - a barrier between passes    -> the implicit barrier at the end of
+    //     `omp for`, which is exactly what kept a chunk from being revisited
+    //     while another thread still owned it, and what guarantees a full
+    //     128 MiB sweep before any chunk comes round again.
+    // The `parallel` region is opened ONCE outside the rep loop so the QoS
+    // hint is applied per worker thread rather than per pass.
+    const long long n_chunks = static_cast<long long>(threads) * 8;
+    const size_t    chunk    = PROBE_N / static_cast<size_t>(n_chunks);
 
     auto t0 = Clock::now();
-    std::vector<std::thread> workers;
-    workers.reserve(threads);
-    for (unsigned t = 0; t < threads; ++t) {
-        workers.emplace_back([&]() {
-            request_p_core();
-            for (int r = 0; r < R; ++r) {
-                for (;;) {
-                    size_t idx = next.fetch_add(1, std::memory_order_relaxed);
-                    if (idx >= n_chunks) break;
-                    float*       d = dst.data() + idx * chunk;
-                    const float* s = src.data() + idx * chunk;
-                    size_t n = (idx == n_chunks - 1) ? PROBE_N - idx * chunk : chunk;
-                    bw_scale_add(d, s, n);
-                }
-                // Barrier: last thread of the pass resets the work counter
-                // and releases the rest into the next pass.
-                int gen = generation.load(std::memory_order_acquire);
-                if (arrived.fetch_add(1, std::memory_order_acq_rel) == threads - 1) {
-                    next.store(0, std::memory_order_relaxed);
-                    arrived.store(0, std::memory_order_relaxed);
-                    generation.store(gen + 1, std::memory_order_release);
-                } else {
-                    while (generation.load(std::memory_order_acquire) == gen)
-                        std::this_thread::yield();
-                }
+#if BENCH_HAS_OMP
+    #pragma omp parallel num_threads(static_cast<int>(threads))
+    {
+        request_p_core();
+        for (int r = 0; r < R; ++r) {
+            #pragma omp for schedule(dynamic)
+            for (long long idx = 0; idx < n_chunks; ++idx) {
+                float*       d = dst.data() + static_cast<size_t>(idx) * chunk;
+                const float* s = src.data() + static_cast<size_t>(idx) * chunk;
+                size_t n = (idx == n_chunks - 1)
+                             ? PROBE_N - static_cast<size_t>(idx) * chunk : chunk;
+                bw_scale_add(d, s, n);
             }
-        });
+        }
     }
-    for (auto& w : workers) w.join();
+#else
+    // No OpenMP: run the same total work sequentially. The number is then a
+    // single-core figure and is labelled as such by the caller, rather than
+    // silently pretending to be a chip-wide ceiling.
+    for (int r = 0; r < R; ++r)
+        for (long long idx = 0; idx < n_chunks; ++idx) {
+            float*       d = dst.data() + static_cast<size_t>(idx) * chunk;
+            const float* s = src.data() + static_cast<size_t>(idx) * chunk;
+            size_t n = (idx == n_chunks - 1)
+                         ? PROBE_N - static_cast<size_t>(idx) * chunk : chunk;
+            bw_scale_add(d, s, n);
+        }
+#endif
     auto t1 = Clock::now();
 
     double elapsed = std::chrono::duration<double>(t1 - t0).count();
     double bytes   = static_cast<double>(PROBE_N) * sizeof(float) * 2.0 * R;
     return to_gibs(bytes, elapsed);
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 6 correction — the ceiling is a CURVE, not a constant.
+//
+// Every "% of peak" since Sprint 2a divides by ONE number: the 59.5 GiB/s
+// SSVE figure measured above at PROBE_N = 128 MiB per array.  That number is
+// correct for what it measures — the single-core streaming ceiling when the
+// data comes from DRAM — and it is the right denominator for a DRAM-resident
+// kernel.  It is the WRONG denominator for a cache-resident one, which never
+// faces DRAM bandwidth at all and is limited by the hierarchy's much higher
+// ceiling.  Sprint 2a asked "peak of WHAT" and answered the execution-mode
+// half (NEON vs streaming); this is the footprint half it left unasked.
+//
+// Methodology — the point on which the whole correction rests: at a small
+// footprint both arrays stay resident after the first repetition, so what is
+// measured is STEADY-STATE RESIDENT bandwidth, not cold-miss bandwidth.  That
+// is a legitimate denominator here only because the norm kernels are
+// benchmarked exactly the same way (repeated calls over the same buffers).
+// Probe and kernel must sit in the same residency regime or their ratio is
+// meaningless.
+//
+// Limitations, stated rather than glossed:
+//   * The probe is a pure 1R+1W streaming copy; the norms are 2R+1W (RMS) and
+//     3R+1W (LN) with a pass-2 re-read that interacts with the hierarchy
+//     differently.  A footprint-matched probe is a BETTER denominator than a
+//     single DRAM constant, not an exact one.
+//   * Sprint 6 §2.2 found an unexplained base-offset effect (allocation start
+//     measured fastest).  Fresh allocations per point AVOID it; they do not
+//     control for it.
+// ---------------------------------------------------------------------------
+
+struct CeilingPoint {
+    double mib;        // total working set (src + dst)
+    double neon_gibs;
+    double ssve_gibs;
+};
+
+// Reps scale with footprint via a fixed byte budget rather than a fixed count.
+// Sprint 6 caught the fixed-count failure directly: at a small shape it made
+// the hand-written V6 read 10 % below its own word-identical JIT twin, which
+// is impossible for identical code and was therefore sampling noise.
+static int reps_for(size_t bytes_per_pass) {
+    const double kBudget = 512.0 * 1024.0 * 1024.0;   // ~512 MiB moved per point
+    int r = static_cast<int>(kBudget / static_cast<double>(bytes_per_pass));
+    return std::max(5, std::min(r, 1000));
+}
+
+static std::vector<CeilingPoint> measure_ceiling_curve(bool have_sme) {
+    // Total working set = 2 arrays * n * 4 B.  64 KiB -> 256 MiB, geometric.
+    // The last point is PROBE_N-equivalent, so it must reproduce the 59.5 /
+    // 79.5 figures printed above — that agreement is the sweep's own control.
+    //
+    // The sub-MiB points exist because the smallest ablation shape (128x64) is
+    // only 0.06 MiB; without them its denominator would be extrapolated from
+    // the 1 MiB point.  They come with a caveat that the printout repeats: at
+    // that size a pass takes well under a microsecond, so the SSVE probe's own
+    // SMSTART/SMSTOP entry cost and the harness's two Clock::now() calls are a
+    // visible fraction of the measurement.  A sub-MiB "ceiling" is therefore
+    // NOT a pure bandwidth figure, and the curve bending down there is that
+    // overhead, not the memory system.  Quantifying it properly is Sprint 7b.
+    const double mibs[] = { 0.0625, 0.125, 0.25, 0.5,
+                            1, 2, 4, 8, 16, 32, 64, 128, 256 };
+    const int    K      = static_cast<int>(sizeof(mibs) / sizeof(mibs[0]));
+
+    std::vector<CeilingPoint> out;
+    out.reserve(static_cast<size_t>(K));
+
+    for (int k = 0; k < K; ++k) {
+        const size_t n = static_cast<size_t>(mibs[k] * 1024.0 * 1024.0 / (2.0 * sizeof(float)));
+
+        // Fresh allocation per point (see limitation 2 above).
+        std::vector<float> src(n), dst(n);
+        for (size_t i = 0; i < n; ++i) src[i] = static_cast<float>(i & 0xFF) + 1.0f;
+        for (size_t i = 0; i < n; ++i) dst[i] = 0.0f;   // faults dst pages too
+
+        const size_t pass_bytes = n * sizeof(float) * 2;
+        const int    reps       = reps_for(pass_bytes);
+
+        // BYTES volatile: read again after the SSVE probe's SMSTART/SMSTOP
+        // transitions, which zero d8-d15 behind the compiler's back.  Sprint 6
+        // Part 3 #5 is exactly this bug — a microbenchmark that reported `inf`
+        // because its own probe did not preserve them.
+        volatile double BYTES = static_cast<double>(pass_bytes);
+
+        bw_scale_add(dst.data(), src.data(), n);        // warm-up / page-fault
+        volatile double t_neon = bench([&]() { bw_scale_add(dst.data(), src.data(), n); }, reps);
+
+        volatile double t_ssve = 0.0;
+        if (have_sme)
+            t_ssve = bench_probe_ssve(dst.data(), src.data(), n);  // warms up internally
+
+        CeilingPoint p;
+        p.mib       = mibs[k];
+        p.neon_gibs = to_gibs(static_cast<double>(BYTES), static_cast<double>(t_neon));
+        p.ssve_gibs = have_sme
+                        ? to_gibs(static_cast<double>(BYTES), static_cast<double>(t_ssve))
+                        : 0.0;
+        out.push_back(p);
+    }
+    return out;
+}
+
+// The denominator a kernel of this footprint should actually be divided by:
+// the measured SSVE ceiling at the nearest working-set size at or above it.
+// Falls back to the DRAM figure past the top of the curve.
+static double ceiling_for_footprint(const std::vector<CeilingPoint>& pts,
+                                    double mib, double dram_fallback) {
+    double best = dram_fallback;
+    for (const auto& p : pts) {
+        if (p.ssve_gibs <= 0.0) continue;
+        if (p.mib >= mib) { best = p.ssve_gibs; break; }
+        best = p.ssve_gibs;
+    }
+    return best;
+}
+
+// Printing is a SEPARATE loop from measurement: no SME call may sit between a
+// computed FP value and its output, or the SMSTART clobber can zero it (the
+// discipline small_n_sweep documents below).
+static void print_ceiling_curve(const std::vector<CeilingPoint>& pts, bool have_sme,
+                                double dram_ssve) {
+    std::cout << "\n" << std::string(78, '=') << "\n"
+              << "CEILING vs FOOTPRINT - is 59.5 GiB/s the right denominator?\n"
+              << std::string(78, '=') << "\n"
+              << "Steady-state RESIDENT bandwidth: buffers are re-touched every rep, the\n"
+              << "same way the norm kernels are benchmarked.  Probe = 1R+1W scale-add.\n"
+              << "The 256 MiB row must reproduce the two ceilings printed above (control).\n"
+              << "Sub-MiB rows are overhead-contaminated (a pass is < 1 us, so SMSTART and\n"
+              << "the timing calls are a visible share) — not pure bandwidth.  See 7b.\n\n"
+              << std::left << std::setw(14) << "  working set"
+              << std::right << std::setw(12) << "NEON"
+              << std::setw(12) << "SSVE"
+              << std::setw(14) << "SSVE/NEON" << "\n";
+
+    for (const auto& p : pts) {
+        // Sub-MiB points would all render as "0 MiB" as integers.
+        std::string label;
+        if (p.mib < 1.0) {
+            label = std::to_string(static_cast<int>(p.mib * 1024.0)) + " KiB";
+        } else {
+            label = std::to_string(static_cast<int>(p.mib)) + " MiB";
+        }
+        std::cout << "  " << std::left << std::setw(12) << label
+                  << std::right << std::fixed
+                  << std::setw(12) << std::setprecision(2) << p.neon_gibs;
+        if (have_sme) {
+            std::cout << std::setw(12) << std::setprecision(2) << p.ssve_gibs
+                      << std::setw(14) << std::setprecision(3)
+                      << (p.neon_gibs > 0.0 ? p.ssve_gibs / p.neon_gibs : 0.0);
+        } else {
+            std::cout << std::setw(12) << "-" << std::setw(14) << "-";
+        }
+        std::cout << "\n";
+    }
+
+    if (!have_sme) { std::cout << "\n"; return; }
+
+    // What the correction actually costs, for the three shapes the consolidated
+    // ablation reports.  This is the size of the restatement, printed rather
+    // than argued: only shapes that are NOT DRAM-resident move.
+    struct AblShape { const char* label; int64_t m, n; };
+    const AblShape shapes[] = {
+        { "128x64    (per-call overhead)", 128,  64   },
+        { "1024x2048 (cache-assisted)",    1024, 2048 },
+        { "4096x8192 (true DRAM)",         4096, 8192 },
+    };
+
+    std::cout << "\nDenominator restatement for the consolidated-ablation shapes:\n"
+              << std::left << std::setw(34) << "  shape"
+              << std::right << std::setw(12) << "footprint"
+              << std::setw(12) << "old (DRAM)"
+              << std::setw(14) << "footprint-matched" << "\n";
+    for (const auto& s : shapes) {
+        const double mib = static_cast<double>(s.m) * static_cast<double>(s.n)
+                           * sizeof(float) * 2.0 / (1024.0 * 1024.0);
+        const double matched = ceiling_for_footprint(pts, mib, dram_ssve);
+        std::cout << "  " << std::left << std::setw(32) << s.label
+                  << std::right << std::fixed
+                  << std::setw(10) << std::setprecision(2) << mib << " MiB"
+                  << std::setw(12) << std::setprecision(2) << dram_ssve
+                  << std::setw(14) << std::setprecision(2) << matched << "\n";
+    }
+    std::cout << "\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -223,17 +416,44 @@ static double norm_bytes(int64_t m, int64_t n) {
 }
 
 // ---------------------------------------------------------------------------
-// Print a GiB/s row in the same style as the weekly reports
+// The measured ceiling curve, populated once in main() before any kernel runs.
+//
+// File-scope and heap-backed on purpose: every "% of peak" in this harness now
+// reads from it, and a std::vector's storage is memory, which survives the
+// SMSTART/SMSTOP transitions that zero d8-d15.  A ceiling held in a register
+// would not (Sprint 6 Part 3 #5).
+// ---------------------------------------------------------------------------
+
+static std::vector<CeilingPoint> g_ceiling_curve;
+
+// The denominator for a kernel of this shape: a norm's working set is exactly
+// its useful bytes (input read once + output written once), so norm_bytes()
+// IS the footprint.  Falls back to the DRAM constant if the curve is empty
+// (no SME, or called before main() measured it).
+static double peak_for_shape(int64_t m, int64_t n, double dram_fallback) {
+    const double mib = norm_bytes(m, n) / (1024.0 * 1024.0);
+    return ceiling_for_footprint(g_ceiling_curve, mib, dram_fallback);
+}
+
+// ---------------------------------------------------------------------------
+// Print a GiB/s row in the same style as the weekly reports.
+//
+// Sprint 6 §1.2 correction: the percentage is against the ceiling measured at
+// THIS shape's footprint, not the single 59.5 GiB/s DRAM figure.  `peak` is
+// now only the fallback for shapes past the top of the curve.
 // ---------------------------------------------------------------------------
 
 static void print_row(const char* label, int64_t m, int64_t n,
                       double gibs, double peak) {
+    const double matched = peak_for_shape(m, n, peak);
     std::cout << std::left  << std::setw(22) << label
               << "  M=" << std::setw(5) << m
               << "  N=" << std::setw(5) << n
               << "  " << std::fixed << std::setprecision(2) << std::setw(7) << gibs
               << " GiB/s"
-              << "  (" << std::setprecision(1) << (100.0 * gibs / peak) << "% of 1-core SSVE peak)\n";
+              << "  (" << std::setprecision(1) << (100.0 * gibs / matched)
+              << "% of the " << std::setprecision(1) << matched
+              << " GiB/s ceiling at this footprint)\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -378,13 +598,16 @@ static double bench_ln_za(const float* a, float* b, const float* gamma,
 static void print_ablation_row(const char* label, int64_t m, int64_t n,
                                 double gibs, double peak, double base_gibs,
                                 const char* base_name = "V0") {
-    double delta_pct = (base_gibs > 0.0) ? (gibs / base_gibs - 1.0) * 100.0 : 0.0;
+    // Footprint-matched denominator (Sprint 6 §1.2), as in print_row.
+    const double matched   = peak_for_shape(m, n, peak);
+    double       delta_pct = (base_gibs > 0.0) ? (gibs / base_gibs - 1.0) * 100.0 : 0.0;
     std::cout << std::left  << std::setw(24) << label
               << "  M=" << std::setw(5) << m
               << "  N=" << std::setw(5) << n
               << "  " << std::fixed << std::setprecision(2) << std::setw(7) << gibs
               << " GiB/s"
-              << "  (" << std::setprecision(1) << (100.0 * gibs / peak) << "% peak)";
+              << "  (" << std::setprecision(1) << (100.0 * gibs / matched) << "% of "
+              << std::setprecision(1) << matched << ")";
     if (base_gibs > 0.0) {
         std::cout << "  " << (delta_pct >= 0 ? "+" : "") << std::setprecision(1)
                   << delta_pct << "% vs " << base_name;
@@ -409,10 +632,17 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
     const int     K    = static_cast<int>(sizeof(ns) / sizeof(ns[0]));
     std::vector<double> secs(K);   // heap storage survives SMSTART clobbers
 
+    // Every N in this sweep has a DIFFERENT footprint (16 -> 4096 spans three
+    // orders of magnitude), so a single denominator is least defensible here
+    // of anywhere in the harness: it is the whole point of the sweep that the
+    // regime changes as N grows.  Each row now divides by the ceiling measured
+    // at its own footprint.
     std::cout << "M=" << m << ":\n"
               << std::left << std::setw(8) << "  N"
               << std::right << std::setw(12) << "us/call"
-              << std::setw(12) << "GiB/s" << std::setw(22) << "(% 1-core SSVE peak)\n";
+              << std::setw(12) << "GiB/s"
+              << std::setw(12) << "ceiling"
+              << std::setw(12) << "% of it\n";
 
     // Bench loop and print loop are SEPARATE on purpose.  SMSTART zeroes
     // D9-D15 behind the compiler's back, and volatile inputs cannot protect
@@ -432,14 +662,16 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
     }
 
     for (int k = 0; k < K; ++k) {
-        const int64_t n     = ns[k];
-        const double  gibs  = to_gibs(norm_bytes(m, n), secs[k]);
+        const int64_t n       = ns[k];
+        const double  gibs    = to_gibs(norm_bytes(m, n), secs[k]);
+        const double  matched = peak_for_shape(m, n, static_cast<double>(vpeak));
         std::cout << "  " << std::left << std::setw(6) << n
                   << std::right << std::fixed
                   << std::setw(12) << std::setprecision(3) << secs[k] * 1e6
                   << std::setw(12) << std::setprecision(2) << gibs
-                  << std::setw(12) << std::setprecision(1)
-                  << (100.0 * gibs / vpeak) << " %\n";
+                  << std::setw(12) << std::setprecision(2) << matched
+                  << std::setw(11) << std::setprecision(1)
+                  << (100.0 * gibs / matched) << " %\n";
     }
 
     // Least-squares fit t = t0 + b*N (no SME calls past this point).
@@ -460,10 +692,15 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
     // pass-2 residency, binds there), and the fit is not a valid overhead
     // estimate.
     if (t0 >= 0.0) {
+        // The asymptote is the slope's large-N limit, so it belongs against
+        // the ceiling at the LARGEST swept footprint, not at an average one.
+        const double asym_peak = peak_for_shape(m, ns[K - 1], static_cast<double>(vpeak));
         std::cout << "  fit t(N) = t0 + b*N:  t0 = " << std::setprecision(3) << t0 * 1e6
                   << " us/call fixed overhead,  asymptotic " << std::setprecision(2) << asym
-                  << " GiB/s (" << std::setprecision(1) << (100.0 * asym / vpeak)
-                  << "% of 1-core SSVE peak),  overhead = streaming work at N ~ "
+                  << " GiB/s (" << std::setprecision(1) << (100.0 * asym / asym_peak)
+                  << "% of the " << std::setprecision(2) << asym_peak
+                  << " GiB/s ceiling at N=" << ns[K - 1]
+                  << "),  overhead = streaming work at N ~ "
                   << std::setprecision(0) << n_half << "\n\n";
     } else {
         std::cout << "  fit t(N) = t0 + b*N: INVALID (t0 < 0) — throughput is not\n"
@@ -702,9 +939,11 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
               << "SPRINT 6 - CONSOLIDATED ABLATION (scalar -> SSVE levers -> ZA -> JIT -> TEIR+OpenMP)\n"
               << std::string(106, '=') << "\n"
               << "Bytes: USEFUL (1 read + 1 write per element) for every row, kernels and probes alike.\n"
-              << "Ceilings: 1-core SSVE " << std::fixed << std::setprecision(2) << peak_ssve
-              << " GiB/s (single-thread roofline), chip-wide " << peak_chip
-              << " GiB/s (threading target).\n"
+              << "%1core is against the ceiling measured AT EACH SHAPE'S FOOTPRINT (see the curve\n"
+              << "above), not the single " << std::fixed << std::setprecision(2) << peak_ssve
+              << " GiB/s DRAM figure — a cache-resident kernel never faces\n"
+              << "DRAM bandwidth, so dividing by it credits the kernel for a constraint it never met.\n"
+              << "Chip-wide ceiling " << peak_chip << " GiB/s (threading target).\n"
               << "Every row is verified against the C++ reference before its GiB/s is reported;\n"
               << "max|dev| is the largest absolute deviation observed on that row's output.\n";
 
@@ -753,8 +992,18 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
             beta[j]  = 0.01f * float(j % 7);
         }
 
-        print_abl_header(s.m, s.n, 2.0 * bytes / 2.0 / (1 << 20), peak_ssve, peak_chip);
-        std::cout << "  regime: " << s.regime << "\n";
+        // Sprint 6 §1.2: this shape's denominator is the ceiling measured at
+        // ITS footprint, not the 59.5 GiB/s DRAM constant.  Only the 256 MiB
+        // shape is unchanged by the correction; the other two roughly halve.
+        const double matched_peak = peak_for_shape(s.m, s.n, peak_ssve);
+
+        print_abl_header(s.m, s.n, 2.0 * bytes / 2.0 / (1 << 20), matched_peak, peak_chip);
+        std::cout << "  regime: " << s.regime
+                  << "   |  ceiling at this footprint: " << std::fixed
+                  << std::setprecision(2) << matched_peak << " GiB/s"
+                  << (matched_peak > peak_ssve * 1.02
+                          ? "  (DRAM constant would have been " : "  (= the DRAM constant ")
+                  << std::setprecision(2) << peak_ssve << ")\n";
 
         // ---- RMSNorm ladder -------------------------------------------------
         rms_norm_ref(a.data(), expect.data(), gamma.data(), s.m, s.n, ld, ld, 1e-5f);
@@ -769,7 +1018,7 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
             }, reps);
             double gibs = to_gibs(bytes, sec);
             if (scalar_rms == 0.0) scalar_rms = gibs;
-            print_abl_row(r, gibs, peak_ssve, peak_chip, scalar_rms, dev, dev <= kGate);
+            print_abl_row(r, gibs, matched_peak, peak_chip, scalar_rms, dev, dev <= kGate);
         };
 
         std::cout << "RMSNorm (single-pass, 2R+1W)\n";
@@ -800,7 +1049,7 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
             }, reps);
             double gibs = to_gibs(bytes, sec);
             if (scalar_ln == 0.0) scalar_ln = gibs;
-            print_abl_row(r, gibs, peak_ssve, peak_chip, scalar_ln, dev, dev <= kGate);
+            print_abl_row(r, gibs, matched_peak, peak_chip, scalar_ln, dev, dev <= kGate);
         };
 
         std::cout << "LayerNorm (two-pass, 3R+1W)\n";
@@ -818,6 +1067,216 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Sprint 6 — OpenMP row-parallel scaling, per ablation variant.
+//
+// WHY THE PARALLELISM LIVES HERE AND NOT IN THE KERNELS.  Decision F makes the
+// kernel a *leaf the compiler schedules*: it operates tile-at-a-time and never
+// assumes it owns the whole tensor.  Putting `#pragma omp parallel` inside a
+// kernel would break that contract (and is impossible anyway — they are .S
+// files).  So a caller splits the ROW axis into chunks and calls the unchanged
+// kernel once per chunk, which is exactly what the TEIR runtime already does
+// with `is_parallel` on the row axis; this section does the same thing without
+// TEIR so that EVERY variant can be measured threaded, not just the two the
+// JIT emits.
+//
+// Splitting on rows is the natural choice for this layout: the norm is
+// independent per row, and in column-major storage a row-chunk is a
+// contiguous slice of each column, so chunk k is just `a + k*chunk_rows` with
+// the leading dimension unchanged.  No data is shared between threads and no
+// reduction is needed across them.
+//
+// This is also the answer to "where does scaling flatten?" — it prints the
+// speed-up curve per variant instead of only for the TEIR path.
+// ---------------------------------------------------------------------------
+
+static void openmp_scaling_section(double peak_ssve, double peak_chip) {
+    std::cout << "\n" << std::string(96, '=') << "\n"
+              << "SPRINT 6 - OpenMP ROW-PARALLEL SCALING, PER VARIANT\n"
+              << std::string(96, '=') << "\n";
+#if !BENCH_HAS_OMP
+    (void)peak_ssve; (void)peak_chip;
+    std::cout << "OpenMP not available in this build - skipped.\n";
+    return;
+#else
+    // True-DRAM shape: the only regime where threading has anything to add
+    // (the cache-resident shapes already sit at ~97% of the streaming ceiling
+    // on ONE core, so there is nothing for more cores to recover).
+    const int64_t M = 4096, N = 8192, ld = M;
+    const size_t  sz = static_cast<size_t>(ld) * static_cast<size_t>(N);
+    const double  bytes = norm_bytes(M, N);
+
+    std::vector<float> a(sz), b(sz, 0.0f), expect(sz, 0.0f);
+    std::vector<float> gamma(N), beta(N);
+    for (size_t i = 0; i < sz; ++i) a[i] = 0.01f * float(i % 97);
+    for (int64_t j = 0; j < N; ++j) {
+        gamma[j] = 1.0f + 0.001f * float(j % 13);
+        beta[j]  = 0.01f * float(j % 7);
+    }
+
+    const int threads[] = {1, 2, 4, 6, 8, 10, 16};
+    const int reps = 5;
+
+    std::cout << "Shape M=" << M << " N=" << N << " (256 MiB), useful bytes (1R+1W).\n"
+              << "Ceilings: 1-core SSVE " << std::fixed << std::setprecision(1) << peak_ssve
+              << ", chip-wide " << peak_chip << " GiB/s.\n"
+              << "This M4 is 4 P-cores + 6 E-cores, so 10 threads is full occupancy\n"
+              << "and 16 is deliberate oversubscription.\n"
+              << "'moved' = physical traffic (RMSNorm 2R+1W = 1.5x useful, LayerNorm 3R+1W = 2x).\n\n";
+
+    // GROUP-ALIGNED WORK DISTRIBUTION — measured, not cosmetic.
+    //
+    // The V6/V7 kernels process 4*VL rows per group (64 on this 512-bit-SVL
+    // M4) and send whatever is left to a single-block predicated tail that
+    // touches only 64 B per column instead of the group path's 256 B — i.e.
+    // the tail reverts to exactly the low access density V6 was built to fix.
+    //
+    // A naive `chunk = M/nthreads` therefore hands EVERY thread a tail
+    // whenever nthreads does not divide M into multiples of 64.  At M=4096
+    // that is true for 6 threads (chunk 682, 42-row tail) and 10 threads
+    // (chunk 409, 25-row tail) — and those are precisely the thread counts
+    // that measured ~45% slower than their neighbours, collapsing to about
+    // the single-thread number.  It looked like core heterogeneity; it was
+    // the scheduler handing the kernel work it is bad at.
+    //
+    // So distribute in units of whole row-blocks.  kRowBlock = 256 is a
+    // multiple of 4*VL for every plausible SVL (256/512/1024-bit -> 32/64/128
+    // rows per group), which keeps this VLA-safe without needing to query SVL
+    // from C++ (decision D: no hard-coded streaming vector length).
+    const int64_t kRowBlock = 256;
+    const int64_t nblocks   = (M + kRowBlock - 1) / kRowBlock;
+
+    auto span = [&](int t, int nthreads, bool aligned) {
+        if (!aligned) {                       // the naive scheme, kept to show the cliff
+            const int64_t chunk = M / nthreads;
+            const int64_t r0    = static_cast<int64_t>(t) * chunk;
+            return std::pair<int64_t,int64_t>{ r0, (t == nthreads - 1) ? (M - r0) : chunk };
+        }
+        const int64_t base  = nblocks / nthreads;
+        const int64_t extra = nblocks % nthreads;
+        const int64_t b0    = t * base + std::min<int64_t>(t, extra);
+        const int64_t nb    = base + (t < extra ? 1 : 0);
+        const int64_t r0    = b0 * kRowBlock;
+        return std::pair<int64_t,int64_t>{ r0, std::min<int64_t>(nb * kRowBlock, M - r0) };
+    };
+
+    auto run_rms = [&](KernelFnBench fn, int nthreads, bool aligned = true) {
+        omp_set_num_threads(nthreads);
+        #pragma omp parallel for schedule(static)
+        for (int t = 0; t < nthreads; ++t) {
+            auto [r0, rows] = span(t, nthreads, aligned);
+            if (rows > 0)
+                fn(a.data() + r0, b.data() + r0, gamma.data(), rows, N, ld, ld, 1e-5f);
+        }
+    };
+    auto run_ln = [&](LNKernelFnBench fn, int nthreads, bool aligned = true) {
+        omp_set_num_threads(nthreads);
+        #pragma omp parallel for schedule(static)
+        for (int t = 0; t < nthreads; ++t) {
+            auto [r0, rows] = span(t, nthreads, aligned);
+            if (rows > 0)
+                fn(a.data() + r0, b.data() + r0, gamma.data(), beta.data(),
+                   rows, N, ld, ld, 1e-5f);
+        }
+    };
+
+    auto header = [&](const char* norm, double moved_factor) {
+        std::cout << norm << "   (moved = " << std::setprecision(2) << moved_factor
+                  << "x useful)\n"
+                  << std::left  << std::setw(9) << "threads"
+                  << std::right << std::setw(10) << "GiB/s"
+                  << std::setw(10) << "speedup"
+                  << std::setw(11) << "%1core"
+                  << std::setw(11) << "%chip"
+                  << std::setw(13) << "moved %chip"
+                  << std::setw(9)  << "correct" << "\n"
+                  << std::string(73, '-') << "\n";
+    };
+
+    auto row = [&](int t, double gibs, double base, double moved_factor, bool ok) {
+        std::cout << std::left  << std::setw(9) << t
+                  << std::right << std::fixed << std::setprecision(2)
+                  << std::setw(10) << gibs
+                  << std::setw(9)  << std::setprecision(2) << (gibs / base) << "x"
+                  << std::setw(10) << std::setprecision(1) << (100.0 * gibs / peak_ssve) << "%"
+                  << std::setw(10) << std::setprecision(1) << (100.0 * gibs / peak_chip) << "%"
+                  << std::setw(12) << std::setprecision(1)
+                  << (100.0 * gibs * moved_factor / peak_chip) << "%"
+                  << std::setw(9)  << (ok ? "yes" : "NO") << "\n";
+    };
+
+    // ---- RMSNorm variants ------------------------------------------------
+    rms_norm_ref(a.data(), expect.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+    struct RmsV { const char* name; KernelFnBench fn; };
+    const RmsV rms_variants[] = {
+        { "RMSNorm V0 (baseline)", rms_norm_ssve    },
+        { "RMSNorm V6 (SME1)",     rms_norm_ssve_v6 },
+        { "RMSNorm V7 (SME2)",     rms_norm_ssve_v7 },
+    };
+    for (const auto& v : rms_variants) {
+        header(v.name, 1.5);
+        double base = 0.0;
+        for (int t : threads) {
+            std::fill(b.begin(), b.end(), -1.0f);
+            run_rms(v.fn, t);
+            bool ok = max_abs_dev(b, expect) <= 1e-3;
+            double sec = bench([&] { run_rms(v.fn, t); }, reps);
+            double gibs = to_gibs(bytes, sec);
+            if (t == 1) base = gibs;
+            row(t, gibs, base, 1.5, ok);
+        }
+        std::cout << "\n";
+    }
+
+    // ---- The alignment cliff, isolated -----------------------------------
+    // Same kernel, same threads, same data — only the chunk boundaries move.
+    // This is the evidence for the group-aligned distribution above.
+    std::cout << "Work-distribution alignment (RMSNorm V7, identical work, only chunking differs)\n"
+              << std::left  << std::setw(9)  << "threads"
+              << std::right << std::setw(12) << "naive"
+              << std::setw(12) << "aligned"
+              << std::setw(11) << "gain"
+              << std::setw(18) << "naive chunk%64" << "\n"
+              << std::string(62, '-') << "\n";
+    for (int t : threads) {
+        std::fill(b.begin(), b.end(), -1.0f);
+        double sec_n = bench([&] { run_rms(rms_norm_ssve_v7, t, false); }, reps);
+        double sec_a = bench([&] { run_rms(rms_norm_ssve_v7, t, true ); }, reps);
+        double gn = to_gibs(bytes, sec_n), ga = to_gibs(bytes, sec_a);
+        std::cout << std::left  << std::setw(9) << t
+                  << std::right << std::fixed << std::setprecision(2)
+                  << std::setw(12) << gn << std::setw(12) << ga
+                  << std::setw(10) << std::setprecision(1) << (100.0 * (ga / gn - 1.0)) << "%"
+                  << std::setw(18) << ((M / t) % 64) << "\n";
+    }
+    std::cout << "\n";
+
+    // ---- LayerNorm variants ----------------------------------------------
+    layer_norm_ref(a.data(), expect.data(), gamma.data(), beta.data(),
+                   M, N, ld, ld, 1e-5f);
+    struct LnV { const char* name; LNKernelFnBench fn; };
+    const LnV ln_variants[] = {
+        { "LayerNorm V0 (baseline)", layer_norm_ssve    },
+        { "LayerNorm V6 (SME1)",     layer_norm_ssve_v6 },
+        { "LayerNorm V7 (SME2)",     layer_norm_ssve_v7 },
+    };
+    for (const auto& v : ln_variants) {
+        header(v.name, 2.0);
+        double base = 0.0;
+        for (int t : threads) {
+            std::fill(b.begin(), b.end(), -1.0f);
+            run_ln(v.fn, t);
+            bool ok = max_abs_dev(b, expect) <= 1e-3;
+            double sec = bench([&] { run_ln(v.fn, t); }, reps);
+            double gibs = to_gibs(bytes, sec);
+            if (t == 1) base = gibs;
+            row(t, gibs, base, 2.0, ok);
+        }
+        std::cout << "\n";
+    }
+#endif
+}
+
 int main() {
     request_p_core();
 
@@ -833,7 +1292,13 @@ int main() {
     if (!have_sme)
         std::cout << "Note: SME not detected — SSVE ceiling and kernel rows will be skipped.\n\n";
 
-    const unsigned nthreads = std::max(1u, std::thread::hardware_concurrency());
+#if BENCH_HAS_OMP
+    // OpenMP's own view of available parallelism; std::thread is no longer
+    // used anywhere in this harness.
+    const unsigned nthreads = std::max(1, omp_get_max_threads());
+#else
+    const unsigned nthreads = 1u;
+#endif
 
     // All ceilings live in volatile doubles: they are read again after many
     // SMSTART/SMSTOP transitions, which zero callee-saved FP registers
@@ -851,6 +1316,14 @@ int main() {
         << std::setw(7) << peak_ssve << " GiB/s  <- kernel roofline\n"
         << "  chip-wide         (" << nthreads << " threads, NEON)              : "
         << std::setw(7) << peak_chip << " GiB/s  <- Sprint-5 threading target\n\n";
+
+    // The footprint half of "peak of WHAT" (Sprint 6 §1.2).  Runs before the
+    // ablation so its curve is available as a per-shape denominator, and so
+    // the 256 MiB row can be checked against the constants just printed.
+    // Populate the file-scope curve BEFORE any table runs: every "% of peak"
+    // printed below reads its denominator from it via peak_for_shape().
+    g_ceiling_curve = measure_ceiling_curve(have_sme);
+    print_ceiling_curve(g_ceiling_curve, have_sme, static_cast<double>(peak_ssve));
 
     // Sprint 6's consolidated ablation runs FIRST: it is the evaluation
     // deliverable, and the per-sprint sections below are the detail behind it.
@@ -1353,6 +1826,9 @@ int main() {
         print_row("layer_norm_jit",     dm, dn, to_gibs((double)vbytes, (double)ln_jit_sec), (double)vpeak);
         std::cout << "\n";
     }
+
+    if (have_sme)
+        openmp_scaling_section((double)peak_ssve, (double)peak_chip);
 
     teir_threading_section((double)peak_ssve, (double)peak_chip);
 

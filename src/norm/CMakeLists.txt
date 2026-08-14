@@ -11,6 +11,7 @@ add_library(norm_lib
     layer_norm_ssve_v7.S        # Sprint 6: V6 + SME2 multi-vector LD1W/ST1W
     layer_norm_ssve_welford.S   # Welford: online single-pass mean+var
     layer_norm_za.S             # Sprint 3: ZA-tile residency (3R+1W -> 1R+1W fusion, gated)
+    layer_norm_za_sme2.S        # Sprint 6: ZA residency via multi-vector MOVA
     rms_norm_ssve.S             # V0: baseline SSVE kernel
     rms_norm_ssve_v1.S          # V1: FRSQRTE+FRSQRTS (no FSQRT/FDIV)
     rms_norm_ssve_v2.S          # V2: V1 + pre-computed 1/N
@@ -19,7 +20,9 @@ add_library(norm_lib
     rms_norm_ssve_v5.S          # V5: V4 + software-pipelined loads
     rms_norm_ssve_v6.S          # V6: 4-row-block contiguity grouping
     rms_norm_ssve_v7.S          # Sprint 6: V6 + SME2 multi-vector LD1W/ST1W
+    rms_norm_ssve_v7x2.S        # Sprint 6: 2-vector control for V7
     rms_norm_za.S               # Sprint 3: ZA-tile residency (1R+1W fusion)
+    rms_norm_za_sme2.S          # Sprint 6: ZA residency via multi-vector MOVA
     bw_probe_ssve.S             # Sprint 2a: streaming-mode roofline probe
 )
 
@@ -59,6 +62,9 @@ set_source_files_properties(
 # dispatch in norm_ssve.cpp.
 set_source_files_properties(
     rms_norm_ssve_v7.S
+    rms_norm_ssve_v7x2.S
+    rms_norm_za_sme2.S
+    layer_norm_za_sme2.S
     layer_norm_ssve_v7.S
     PROPERTIES COMPILE_FLAGS "-march=armv9-a+sme2"
 )
