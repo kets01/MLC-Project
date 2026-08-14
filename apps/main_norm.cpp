@@ -416,17 +416,44 @@ static double norm_bytes(int64_t m, int64_t n) {
 }
 
 // ---------------------------------------------------------------------------
-// Print a GiB/s row in the same style as the weekly reports
+// The measured ceiling curve, populated once in main() before any kernel runs.
+//
+// File-scope and heap-backed on purpose: every "% of peak" in this harness now
+// reads from it, and a std::vector's storage is memory, which survives the
+// SMSTART/SMSTOP transitions that zero d8-d15.  A ceiling held in a register
+// would not (Sprint 6 Part 3 #5).
+// ---------------------------------------------------------------------------
+
+static std::vector<CeilingPoint> g_ceiling_curve;
+
+// The denominator for a kernel of this shape: a norm's working set is exactly
+// its useful bytes (input read once + output written once), so norm_bytes()
+// IS the footprint.  Falls back to the DRAM constant if the curve is empty
+// (no SME, or called before main() measured it).
+static double peak_for_shape(int64_t m, int64_t n, double dram_fallback) {
+    const double mib = norm_bytes(m, n) / (1024.0 * 1024.0);
+    return ceiling_for_footprint(g_ceiling_curve, mib, dram_fallback);
+}
+
+// ---------------------------------------------------------------------------
+// Print a GiB/s row in the same style as the weekly reports.
+//
+// Sprint 6 §1.2 correction: the percentage is against the ceiling measured at
+// THIS shape's footprint, not the single 59.5 GiB/s DRAM figure.  `peak` is
+// now only the fallback for shapes past the top of the curve.
 // ---------------------------------------------------------------------------
 
 static void print_row(const char* label, int64_t m, int64_t n,
                       double gibs, double peak) {
+    const double matched = peak_for_shape(m, n, peak);
     std::cout << std::left  << std::setw(22) << label
               << "  M=" << std::setw(5) << m
               << "  N=" << std::setw(5) << n
               << "  " << std::fixed << std::setprecision(2) << std::setw(7) << gibs
               << " GiB/s"
-              << "  (" << std::setprecision(1) << (100.0 * gibs / peak) << "% of 1-core SSVE peak)\n";
+              << "  (" << std::setprecision(1) << (100.0 * gibs / matched)
+              << "% of the " << std::setprecision(1) << matched
+              << " GiB/s ceiling at this footprint)\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -571,13 +598,16 @@ static double bench_ln_za(const float* a, float* b, const float* gamma,
 static void print_ablation_row(const char* label, int64_t m, int64_t n,
                                 double gibs, double peak, double base_gibs,
                                 const char* base_name = "V0") {
-    double delta_pct = (base_gibs > 0.0) ? (gibs / base_gibs - 1.0) * 100.0 : 0.0;
+    // Footprint-matched denominator (Sprint 6 §1.2), as in print_row.
+    const double matched   = peak_for_shape(m, n, peak);
+    double       delta_pct = (base_gibs > 0.0) ? (gibs / base_gibs - 1.0) * 100.0 : 0.0;
     std::cout << std::left  << std::setw(24) << label
               << "  M=" << std::setw(5) << m
               << "  N=" << std::setw(5) << n
               << "  " << std::fixed << std::setprecision(2) << std::setw(7) << gibs
               << " GiB/s"
-              << "  (" << std::setprecision(1) << (100.0 * gibs / peak) << "% peak)";
+              << "  (" << std::setprecision(1) << (100.0 * gibs / matched) << "% of "
+              << std::setprecision(1) << matched << ")";
     if (base_gibs > 0.0) {
         std::cout << "  " << (delta_pct >= 0 ? "+" : "") << std::setprecision(1)
                   << delta_pct << "% vs " << base_name;
@@ -602,10 +632,17 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
     const int     K    = static_cast<int>(sizeof(ns) / sizeof(ns[0]));
     std::vector<double> secs(K);   // heap storage survives SMSTART clobbers
 
+    // Every N in this sweep has a DIFFERENT footprint (16 -> 4096 spans three
+    // orders of magnitude), so a single denominator is least defensible here
+    // of anywhere in the harness: it is the whole point of the sweep that the
+    // regime changes as N grows.  Each row now divides by the ceiling measured
+    // at its own footprint.
     std::cout << "M=" << m << ":\n"
               << std::left << std::setw(8) << "  N"
               << std::right << std::setw(12) << "us/call"
-              << std::setw(12) << "GiB/s" << std::setw(22) << "(% 1-core SSVE peak)\n";
+              << std::setw(12) << "GiB/s"
+              << std::setw(12) << "ceiling"
+              << std::setw(12) << "% of it\n";
 
     // Bench loop and print loop are SEPARATE on purpose.  SMSTART zeroes
     // D9-D15 behind the compiler's back, and volatile inputs cannot protect
@@ -625,14 +662,16 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
     }
 
     for (int k = 0; k < K; ++k) {
-        const int64_t n     = ns[k];
-        const double  gibs  = to_gibs(norm_bytes(m, n), secs[k]);
+        const int64_t n       = ns[k];
+        const double  gibs    = to_gibs(norm_bytes(m, n), secs[k]);
+        const double  matched = peak_for_shape(m, n, static_cast<double>(vpeak));
         std::cout << "  " << std::left << std::setw(6) << n
                   << std::right << std::fixed
                   << std::setw(12) << std::setprecision(3) << secs[k] * 1e6
                   << std::setw(12) << std::setprecision(2) << gibs
-                  << std::setw(12) << std::setprecision(1)
-                  << (100.0 * gibs / vpeak) << " %\n";
+                  << std::setw(12) << std::setprecision(2) << matched
+                  << std::setw(11) << std::setprecision(1)
+                  << (100.0 * gibs / matched) << " %\n";
     }
 
     // Least-squares fit t = t0 + b*N (no SME calls past this point).
@@ -653,10 +692,15 @@ static void small_n_sweep(int64_t m, double peak_ssve) {
     // pass-2 residency, binds there), and the fit is not a valid overhead
     // estimate.
     if (t0 >= 0.0) {
+        // The asymptote is the slope's large-N limit, so it belongs against
+        // the ceiling at the LARGEST swept footprint, not at an average one.
+        const double asym_peak = peak_for_shape(m, ns[K - 1], static_cast<double>(vpeak));
         std::cout << "  fit t(N) = t0 + b*N:  t0 = " << std::setprecision(3) << t0 * 1e6
                   << " us/call fixed overhead,  asymptotic " << std::setprecision(2) << asym
-                  << " GiB/s (" << std::setprecision(1) << (100.0 * asym / vpeak)
-                  << "% of 1-core SSVE peak),  overhead = streaming work at N ~ "
+                  << " GiB/s (" << std::setprecision(1) << (100.0 * asym / asym_peak)
+                  << "% of the " << std::setprecision(2) << asym_peak
+                  << " GiB/s ceiling at N=" << ns[K - 1]
+                  << "),  overhead = streaming work at N ~ "
                   << std::setprecision(0) << n_half << "\n\n";
     } else {
         std::cout << "  fit t(N) = t0 + b*N: INVALID (t0 < 0) — throughput is not\n"
@@ -895,9 +939,11 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
               << "SPRINT 6 - CONSOLIDATED ABLATION (scalar -> SSVE levers -> ZA -> JIT -> TEIR+OpenMP)\n"
               << std::string(106, '=') << "\n"
               << "Bytes: USEFUL (1 read + 1 write per element) for every row, kernels and probes alike.\n"
-              << "Ceilings: 1-core SSVE " << std::fixed << std::setprecision(2) << peak_ssve
-              << " GiB/s (single-thread roofline), chip-wide " << peak_chip
-              << " GiB/s (threading target).\n"
+              << "%1core is against the ceiling measured AT EACH SHAPE'S FOOTPRINT (see the curve\n"
+              << "above), not the single " << std::fixed << std::setprecision(2) << peak_ssve
+              << " GiB/s DRAM figure — a cache-resident kernel never faces\n"
+              << "DRAM bandwidth, so dividing by it credits the kernel for a constraint it never met.\n"
+              << "Chip-wide ceiling " << peak_chip << " GiB/s (threading target).\n"
               << "Every row is verified against the C++ reference before its GiB/s is reported;\n"
               << "max|dev| is the largest absolute deviation observed on that row's output.\n";
 
@@ -946,8 +992,18 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
             beta[j]  = 0.01f * float(j % 7);
         }
 
-        print_abl_header(s.m, s.n, 2.0 * bytes / 2.0 / (1 << 20), peak_ssve, peak_chip);
-        std::cout << "  regime: " << s.regime << "\n";
+        // Sprint 6 §1.2: this shape's denominator is the ceiling measured at
+        // ITS footprint, not the 59.5 GiB/s DRAM constant.  Only the 256 MiB
+        // shape is unchanged by the correction; the other two roughly halve.
+        const double matched_peak = peak_for_shape(s.m, s.n, peak_ssve);
+
+        print_abl_header(s.m, s.n, 2.0 * bytes / 2.0 / (1 << 20), matched_peak, peak_chip);
+        std::cout << "  regime: " << s.regime
+                  << "   |  ceiling at this footprint: " << std::fixed
+                  << std::setprecision(2) << matched_peak << " GiB/s"
+                  << (matched_peak > peak_ssve * 1.02
+                          ? "  (DRAM constant would have been " : "  (= the DRAM constant ")
+                  << std::setprecision(2) << peak_ssve << ")\n";
 
         // ---- RMSNorm ladder -------------------------------------------------
         rms_norm_ref(a.data(), expect.data(), gamma.data(), s.m, s.n, ld, ld, 1e-5f);
@@ -962,7 +1018,7 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
             }, reps);
             double gibs = to_gibs(bytes, sec);
             if (scalar_rms == 0.0) scalar_rms = gibs;
-            print_abl_row(r, gibs, peak_ssve, peak_chip, scalar_rms, dev, dev <= kGate);
+            print_abl_row(r, gibs, matched_peak, peak_chip, scalar_rms, dev, dev <= kGate);
         };
 
         std::cout << "RMSNorm (single-pass, 2R+1W)\n";
@@ -993,7 +1049,7 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
             }, reps);
             double gibs = to_gibs(bytes, sec);
             if (scalar_ln == 0.0) scalar_ln = gibs;
-            print_abl_row(r, gibs, peak_ssve, peak_chip, scalar_ln, dev, dev <= kGate);
+            print_abl_row(r, gibs, matched_peak, peak_chip, scalar_ln, dev, dev <= kGate);
         };
 
         std::cout << "LayerNorm (two-pass, 3R+1W)\n";
@@ -1264,8 +1320,10 @@ int main() {
     // The footprint half of "peak of WHAT" (Sprint 6 §1.2).  Runs before the
     // ablation so its curve is available as a per-shape denominator, and so
     // the 256 MiB row can be checked against the constants just printed.
-    const std::vector<CeilingPoint> ceiling_curve = measure_ceiling_curve(have_sme);
-    print_ceiling_curve(ceiling_curve, have_sme, static_cast<double>(peak_ssve));
+    // Populate the file-scope curve BEFORE any table runs: every "% of peak"
+    // printed below reads its denominator from it via peak_for_shape().
+    g_ceiling_curve = measure_ceiling_curve(have_sme);
+    print_ceiling_curve(g_ceiling_curve, have_sme, static_cast<double>(peak_ssve));
 
     // Sprint 6's consolidated ablation runs FIRST: it is the evaluation
     // deliverable, and the per-sprint sections below are the detail behind it.
