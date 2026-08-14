@@ -131,7 +131,7 @@ ceiling at a 256 MiB working set (Sprint 6 §1.2).
 
 .. list-table:: Sprint 2c — layer_norm_ssve V0 vs reference (Apple M4)
    :header-rows: 1
-   :widths: 10 10 20 20 16 12
+   :widths: 8 8 17 17 10 14 12
 
    * - M (rows)
      - N (features)
