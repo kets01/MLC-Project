@@ -11,8 +11,26 @@ Both norms converge on the same winning structure (**V6**, 4-row-block
 contiguity grouping); the sprint's headline result is *why*, and what each
 lever did or did not buy.
 
-Headline results (Apple M4, useful-bytes GiB/s, M=1024 × N=2048 = 16 MB)
+Headline results (Apple M4, useful-bytes GiB/s, M=1024 × N=2048 = 16 MiB)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. admonition:: Percentages corrected in Sprint 6 — the denominator was wrong
+   :class: warning
+
+   Every "% of roofline" in this section originally divided by **59.4 GiB/s**,
+   the single-core streaming ceiling Sprint 2a measured at a 256 MiB working
+   set.  That is the **DRAM** ceiling.  This shape's working set is 16 MiB —
+   it is cache-resident and never faces DRAM bandwidth at all, and the
+   streaming ceiling measured at 16 MiB is **115.56 GiB/s**.
+
+   Dividing a cache-resident kernel by the DRAM ceiling credits it for
+   surviving a constraint it never met, and inflated these figures by ~2×.
+   The headline "**95 % of the moved-bytes roofline**" is really **50 %**.
+   The kernel did not change; only the denominator did.
+
+   This is the same class of error Sprint 2a itself named — "peak of *what*".
+   2a fixed the execution-mode half (NEON vs streaming) and left the footprint
+   half unasked.  The numbers below are the corrected ones.
 
 .. list-table::
    :header-rows: 1
@@ -21,22 +39,66 @@ Headline results (Apple M4, useful-bytes GiB/s, M=1024 × N=2048 = 16 MB)
      - RMSNorm
      - LayerNorm
    * - scalar C++ reference
-     - 1.0 GiB/s
-     - 1.0 GiB/s
+     - 1.03 GiB/s (0.9 %)
+     - 0.95 GiB/s (0.8 %)
    * - V0 (naive VLA SSVE)
-     - 22–25
-     - 12–13
+     - 25.02 (21.7 %)
+     - 12.82 (11.1 %)
    * - **V6 (incumbent)**
-     - **37.8 (64 % of roofline)**
-     - **16.3 (27 % of roofline)**
+     - **38.46 (33.3 % of roofline)**
+     - **16.48 (14.3 % of roofline)**
    * - V6 in moved-bytes terms
-     - ~57 (95 % of roofline)
-     - ~33 (55 % of roofline)
+     - ~57.7 (50 % of roofline)
+     - ~33.0 (29 % of roofline)
 
-**The three validated ceilings** (Sprint 2a): single-core NEON **79.4**,
-single-core SSVE-streaming **59.4** (← the kernel roofline, same execution
-mode as the kernels), chip-wide 10-thread **89.9** GiB/s (← the Sprint-5
-threading target). All "% of roofline" above is against the 59.4 figure.
+**The ceiling is a curve, not a constant** (Sprint 6 §1.2).  Measured on the
+M4 with the same streaming probe, at the footprint stated:
+
+.. list-table:: Single-core ceilings vs working set (useful bytes, 1R+1W)
+   :header-rows: 1
+
+   * - working set
+     - NEON
+     - SSVE (streaming)
+     - SSVE/NEON
+   * - 64 KiB
+     - 292.0
+     - 104.7
+     - 0.36
+   * - 512 KiB – 16 MiB
+     - 126.0 → 120.5
+     - **117.2 → 115.6**
+     - ~0.93
+   * - 32 MiB
+     - 102.7
+     - 96.0
+     - 0.94
+   * - 64 MiB
+     - 85.3
+     - 63.3
+     - 0.74
+   * - 256 MiB (DRAM)
+     - 80.0
+     - **59.5**
+     - 0.75
+
+All "% of roofline" in this section is now against the row matching the
+shape's own footprint — 115.56 GiB/s for the 16 MiB headline shape.  Two
+further readings from that curve, both new in Sprint 6:
+
+- **Streaming mode is nearly free in cache but costs ~25 % at DRAM**
+  (0.93× vs 0.75× of NEON).  For a memory-bound kernel at large N, choosing
+  streaming mode is a structural handicap no amount of kernel quality recovers.
+- **Below ~512 KiB the SSVE figure stops being a bandwidth number.** NEON
+  keeps climbing toward L1 speed (292 GiB/s at 64 KiB) while SSVE *falls* to
+  104.7 — that divergence is the probe's own ``SMSTART``/``SMSTOP`` becoming a
+  visible share of a sub-microsecond pass, not the memory system.  Quantifying
+  it properly is Sprint 7b's job; until then, sub-MiB percentages here should
+  be read as "fraction of achievable streaming throughput at this size", since
+  kernel and probe pay the same entry cost.
+
+The chip-wide 10-thread ceiling (**86.3 GiB/s**, the Sprint-5 threading
+target) is measured at 256 MiB and is unaffected by this correction.
 
 **RMSNorm is 1.8–2.3× faster than LayerNorm** on identical shapes (LN/RMS =
 0.43–0.56) — beyond the proposal's "10–40 %". The gap is structural: a 1.33×
@@ -60,9 +122,11 @@ What each lever bought (both norms, detail in the sub-sections below)
   big in the true-DRAM regime (**RMSNorm +131 %, LayerNorm +71 % vs V0** at
   64 MB) — the winning lever is *access density*, not residency (residency was
   measured to be already satisfied). **Incumbent for both norms.**
-- **Welford** (LayerNorm single-pass): a documented **double negative** —
-  25–30 % slower than V6 *and* ~100× less accurate on shifted FP32 data. On
-  SIMD the stable two-pass wins on both speed and accuracy.
+- **Welford** (LayerNorm single-pass): 25–30 % slower than V6, which is why
+  two-pass stays the incumbent.  *The accuracy half of this claim was
+  overstated and is corrected in the LayerNorm section* — Welford is not
+  "~100× less accurate" in general; it is worse at one shift magnitude, a wash
+  at others, and **better** at shift = 1e5.
 
 Reading guide (the sections are in build order, not sprint-letter order)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -191,61 +255,80 @@ Total: 20 356 assertions, all green on M4.  Sprint-1 tests unaffected.
 GiB/s results (Apple M4, Streaming SVE, SVL = 512 bits)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**Roofline: 79.28 GiB/s** (measured STREAM-style peak on M4 with our harness).
+**Roofline:** originally quoted as a single **79.28 GiB/s** STREAM peak.  That
+figure is the single-core **NEON** ceiling at a DRAM-sized working set, and it
+is doubly the wrong denominator here: wrong *execution mode* (Sprint 2a — these
+kernels run streaming ``LD1W``/``ST1W``, not NEON) and wrong *footprint*
+(Sprint 6 §1.2 — every shape below is cache-resident).  The percentages below
+are restated against the streaming ceiling measured at each shape's own
+footprint; the GiB/s themselves are the original V0 measurements, unchanged.
 
-.. list-table:: Sprint 2 — rms_norm_ssve GiB/s vs reference (Apple M4)
+.. list-table:: Sprint 2 — rms_norm_ssve (V0) GiB/s vs reference (Apple M4)
    :header-rows: 1
-   :widths: 10 10 18 18 18 14
+   :widths: 8 8 15 15 10 16 12
 
    * - M (rows)
      - N (features)
      - ``rms_norm_ref`` GiB/s
      - ``rms_norm_ssve`` GiB/s
-     - % of peak
+     - ceiling
+     - % of ceiling
      - Speedup
    * - 128
      - 64
      - 6.60
      - 18.31
-     - 23.1 %
+     - 104.7
+     - 17.5 %
      - 2.8×
    * - 128
      - 512
      - 3.41
      - 25.15
-     - 31.7 %
+     - 117.2
+     - 21.5 %
      - 7.4×
    * - 128
      - 2048
      - 3.24
      - 25.01
-     - 31.5 %
+     - 116.0
+     - 21.6 %
      - 7.7×
    * - 1024
      - 64
      - 1.40
      - 25.15
-     - 31.7 %
+     - 117.2
+     - 21.5 %
      - 18.0×
    * - 1024
      - 512
      - 1.62
      - 24.36
-     - 30.7 %
+     - 115.7
+     - 21.0 %
      - 15.0×
    * - 1024
      - 2048
      - 1.03
      - 24.75
-     - 31.2 %
+     - 115.6
+     - 21.4 %
      - 24.0×
 
-The SSVE kernel achieves **23–32 % of the 79 GiB/s scalar-STREAM peak** and
-delivers a **4–24× speedup** over the C++ reference.  The gap between scalar
-STREAM (10.62 GiB/s, Sprint 1) and the M4's true vectorised peak (79 GiB/s)
-shows the Sprint-1 roofline was the scalar ceiling, not the hardware ceiling.
+The V0 kernel achieves **17–22 % of the ceiling at its own footprint** (the
+original text said 23–32 %, against the wrong denominator) and delivers a
+**4–24× speedup** over the C++ reference.
 
-The remaining headroom to the 79 GiB/s peak is primarily:
+The original conclusion drawn here — that Sprint 1's 10.62 GiB/s roofline was
+"the scalar ceiling, not the hardware ceiling" — was right in spirit and wrong
+in detail: Sprint 5 later found that 10.62 was a ``-O0`` **build artifact**,
+not a property of scalar code at all.  The real lesson is the one Sprint 2a
+went on to draw, and Sprint 6 completed: a roofline is only meaningful once you
+state *which execution mode* and *which footprint* it was measured at.
+
+The remaining headroom is primarily:
 
 - **Two passes over the data per row** (sum-of-squares + normalize) — the
   future JIT/ZA-tiled kernel can fuse both passes using the ZA accumulator.
@@ -334,89 +417,108 @@ Before measuring, the predicted gains were:
 Findings
 ~~~~~~~~
 
-**Roofline: 79.58 GiB/s** (STREAM-style probe, re-measured for this run).
+**Roofline:** originally a single **79.58 GiB/s** figure (single-core NEON at
+DRAM footprint).  Restated below against the streaming ceiling at each shape's
+own footprint — 104.7 GiB/s at 64 KiB, 116.0 at 2 MiB, 115.6 at 16 MiB
+(Sprint 2a for the mode, Sprint 6 §1.2 for the footprint).  **The GiB/s and the
+"vs V0" deltas are the original measurements and do not change** — a
+denominator error cannot affect a ratio between two kernels, which is why every
+conclusion this ablation drew still stands.
 
 .. list-table:: Sprint 2b — RMSNorm SSVE ablation (Apple M4, SVL = 512 bits)
    :header-rows: 1
-   :widths: 22 10 10 14 12 14
+   :widths: 20 8 8 12 10 14 14
 
    * - Variant
      - M
      - N
      - GiB/s
-     - % of peak
+     - ceiling
+     - % of ceiling
      - vs V0
    * - V0 (FSQRT+FDIV)
      - 128
      - 64
      - 17.77
-     - 22.3 %
+     - 104.7
+     - 17.0 %
      - baseline
    * - V1 (FRSQRTE+NR)
      - 128
      - 64
      - 17.95
-     - 22.6 %
+     - 104.7
+     - 17.1 %
      - +1.0 %
    * - V2 (V1 + inv_N)
      - 128
      - 64
      - 17.70
-     - 22.2 %
+     - 104.7
+     - 16.9 %
      - −0.4 %
    * - V3 (V2 + unroll-2)
      - 128
      - 64
      - 17.78
-     - 22.3 %
+     - 104.7
+     - 17.0 %
      - +0.1 %
    * - V0 (FSQRT+FDIV)
      - 128
      - 2048
      - 25.11
-     - 31.6 %
+     - 116.0
+     - 21.6 %
      - baseline
    * - V1 (FRSQRTE+NR)
      - 128
      - 2048
      - 26.74
-     - 33.6 %
+     - 116.0
+     - 23.0 %
      - **+6.5 %**
    * - V2 (V1 + inv_N)
      - 128
      - 2048
      - 25.12
-     - 31.6 %
+     - 116.0
+     - 21.6 %
      - +0.1 %
    * - V3 (V2 + unroll-2)
      - 128
      - 2048
      - 24.96
-     - 31.4 %
+     - 116.0
+     - 21.5 %
      - −0.6 %
    * - V0 (FSQRT+FDIV)
      - 1024
      - 2048
      - 24.75
-     - 31.1 %
+     - 115.6
+     - 21.4 %
      - baseline
    * - V1 (FRSQRTE+NR)
      - 1024
      - 2048
      - 24.98
-     - 31.4 %
+     - 115.6
+     - 21.6 %
      - +0.9 %
    * - V2 (V1 + inv_N)
      - 1024
      - 2048
      - 25.01
-     - 31.4 %
+     - 115.6
+     - 21.6 %
      - +1.0 %
    * - V3 (V2 + unroll-2)
      - 1024
      - 2048
      - 25.10
-     - 31.6 %
+     - 115.6
+     - 21.7 %
      - +1.4 %
 
 **Interpretation:**
@@ -443,8 +545,12 @@ Findings
   branch logic for the odd-N peel and the more complex loop body add marginal
   overhead.
 
-- **Structural ceiling:** all variants plateau at **~31–34 % of the 79.58 GiB/s
-  vectorised peak**.  The bottleneck is not inv_rms computation, nor branch
+- **Structural ceiling:** all variants plateau at **~21–23 % of the ceiling at
+  their own footprint** (interim figure at the time: "31–34 % of 79.58 GiB/s",
+  which used the NEON-at-DRAM denominator twice corrected since — see 2a for
+  the mode and Sprint 6 §1.2 for the footprint).  The plateau itself is the
+  finding, and it is denominator-independent: every variant lands within 2
+  points of every other.  The bottleneck is not inv_rms computation, nor branch
   overhead — it is the **two-pass column-major loop pattern** itself.  Both
   passes traverse all N columns sequentially; the memory system cannot hide the
   second read of the A matrix.  Closing the gap requires pass fusion (keeping the
@@ -473,7 +579,9 @@ Sprint 2b status
   on M4; skip on CI.
 - **Benchmark:** ablation table printed by ``./build/apps/main_norm``; all four
   variants run in sequence under a single streaming region per shape.
-- **Best result:** 26.74 GiB/s (V1, M=128, N=2048) = 33.6 % of vectorised peak.
+- **Best result:** 26.74 GiB/s (V1, M=128, N=2048) = **23.0 %** of the
+  116.0 GiB/s ceiling at that shape's 2 MiB footprint (quoted at the time as
+  "33.6 % of vectorised peak").
 - **LayerNorm SSVE ablation:** to be done after the LayerNorm V0 kernel is written.
 
 Sprint 2a — Roofline validation
@@ -522,9 +630,9 @@ The three ceilings (Apple M4, best-of-10, 128 MiB arrays)
      - what the old "peak" was
    * - **single-core SSVE streaming (LD1W/ST1W)**
      - **59.5**
-     - **the kernel roofline**
+     - the kernel roofline **at DRAM footprint**
    * - chip-wide (10 threads, NEON)
-     - 89.8
+     - 86.3
      - Sprint-5 threading target
 
 Two structural facts fall out:
@@ -532,9 +640,32 @@ Two structural facts fall out:
 - **Streaming mode has ~25 % less single-core bandwidth than NEON mode** on
   the M4 (59.5 vs 79.5 GiB/s).  The kernels were being judged against a
   ceiling they cannot physically reach in their execution mode.
-- **One core already sustains ~66 % of the chip-wide aggregate** (59.5 of
-  89.8 GiB/s).  Threading across rows (Sprint 5) can buy at most ~1.5x, not
-  10x — the M4's memory system saturates with very few cores.
+- **One core already sustains ~69 % of the chip-wide aggregate** (59.5 of
+  86.3 GiB/s) *at this footprint*.  Read at the time as "threading can buy at
+  most ~1.5x"; Sprint 5 measured **2.1×**, because that premise holds only
+  where a single core is near its own ceiling.  In the true-DRAM regime one
+  core reaches ~24 % of the chip figure, and the headroom is correspondingly
+  larger.
+
+.. admonition:: Completed in Sprint 6 — this section asked "peak of what?" and answered half of it
+   :class: important
+
+   2a settled the **execution-mode** half: NEON and streaming are different
+   ceilings, so measure the one the kernels actually run in.  It left the
+   **footprint** half unasked, and then treated the answer as a single
+   constant.  All three figures above were measured at 128 MiB per array, so
+   all three are **DRAM** ceilings.
+
+   Sprint 6 §1.2 swept the same probes across working-set sizes and found the
+   ceiling varies by ~2×: streaming reaches **115.6 GiB/s at a 16 MiB
+   footprint** against 59.5 at 256 MiB.  Every percentage this section
+   restated below is therefore correct only for DRAM-resident shapes, and the
+   cache-resident ones have been corrected again in the tables above.
+
+   It also changes the *first* structural fact: streaming costs ~25 % of NEON
+   only at DRAM.  In cache the two modes are within ~7 % of each other
+   (0.93×), so the "structural handicap" is specifically a DRAM-regime
+   handicap, not a property of streaming mode as such.
 
 Byte-counting convention (now stated explicitly)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -550,12 +681,20 @@ visible as a lower % of peak — which is exactly the gap the residency lever
 V0–V3 restated against the validated roofline
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Against the 59.5 GiB/s single-core streaming ceiling, the picture improves
+Against the 59.5 GiB/s single-core streaming ceiling, the picture improved
 from the interim "31–34 %" (which used the NEON figure):
 
 - large-N shapes (N ≥ 512): **42–46 % of the kernel roofline** (best ~27 GiB/s);
   in moved-bytes terms the kernel sustains ~40 GiB/s ≈ **67 % of the ceiling**
 - small-N shapes (N = 64): 31–43 % depending on M (see below)
+
+**Superseded by Sprint 6 §1.2.**  Both bullets divide by 59.5, but none of
+these shapes is DRAM-resident — they span 64 KiB to 16 MiB, where the ceiling
+is 104.7–117.2 GiB/s.  Corrected, the large-N shapes sit at **21–23 % useful /
+~32–35 % moved**, not 42–46 / 67 %.  The improvement 2a reported here was real
+as a *mode* correction and is reversed by the *footprint* correction: V0–V3 are
+further from their ceiling than either interim figure suggested, which is
+consistent with V4's +27–33 % and V6's +131 % still being available.
 
 Small-N regime: overhead quantified
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -688,7 +827,8 @@ group (the planned V6b batching, folded in), and pass 2 shares each
 ``LD1RW`` gamma broadcast across the four blocks.  Rows beyond the last
 full group take a predicated single-block tail.
 
-*Result (vs the 59.5 GiB/s single-core streaming roofline):*
+*Result (each shape against the streaming ceiling at its own footprint —
+Sprint 6 §1.2; the original table divided all three by 59.5 GiB/s):*
 
 .. list-table:: RMSNorm SSVE ablation, key rows (Apple M4)
    :header-rows: 1
@@ -697,37 +837,62 @@ full group take a predicated single-block tail.
      - V0
      - V4
      - **V6**
-     - V6 % roofline
-   * - M=128, N=2048 (2 MB)
+     - ceiling
+     - V6 % (useful)
+     - V6 % (moved)
+   * - M=128, N=2048 (2 MiB)
      - 25.1
      - 33.1
      - 32.1
-     - 54 %
-   * - M=1024, N=2048 (16 MB)
+     - 116.0
+     - 27.7 %
+     - 42 %
+   * - M=1024, N=2048 (16 MiB)
      - 24.6
      - 30.3
      - **37.7**
-     - **63 %**
-   * - M=4096, N=2048 (64 MB, true DRAM)
+     - 115.6
+     - **32.6 %**
+     - **49 %**
+   * - M=4096, N=2048 (64 MiB, true DRAM)
      - 11.1
      - 11.3
      - **25.6**
-     - 43 %
+     - 63.3
+     - 40.5 %
+     - 61 %
 
 In the true-DRAM regime V6 is **+131 % vs V0 / +126 % vs V4** — the access-
 density mechanism confirmed.  At M=128 it ties V4 (stride is only 512 B
 there; density was never the constraint), and it is never worse anywhere →
-**V6 is the final Sprint-2 incumbent**.  In moved-bytes terms (x1.5) the
-M=1024 figure is ~57 GiB/s ≈ **95 % of the streaming ceiling**: for
-cache-assisted shapes the two-pass SSVE kernel is essentially saturating
-its execution mode.
+**V6 is the final Sprint-2 incumbent**.  None of that depends on the
+denominator: they are kernel-to-kernel ratios.
+
+.. admonition:: The "95 % of the streaming ceiling" claim was wrong
+   :class: warning
+
+   This section originally concluded that in moved-bytes terms the M=1024
+   figure (~57 GiB/s) reached **~95 % of the streaming ceiling** — i.e. that
+   "for cache-assisted shapes the two-pass SSVE kernel is essentially
+   saturating its execution mode".  It divided by 59.5 GiB/s, the ceiling at a
+   256 MiB footprint, while the shape itself is 16 MiB and cache-resident.
+   Against the ceiling actually measured at 16 MiB (115.6 GiB/s) the figure is
+   **49 %**, not 95 %.
+
+   The kernel is unchanged; the claim that it was near-saturated is what fails.
+   Notably the *true-DRAM* row is the one closest to its ceiling (61 % moved),
+   which is the opposite of the original reading — and it is consistent with
+   Sprint 6's finding that the cache-resident shapes are limited by SSVE FP
+   issue rate rather than by bandwidth at all.
 
 Final Sprint-2b RMSNorm conclusion
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- **Best variant: V6** — 63 % of the single-core streaming roofline (useful
-  bytes) at 16 MB shapes, ~95 % in moved bytes; 43 % in the 64 MB true-DRAM
-  regime.
+- **Best variant: V6** — **32.6 %** of the streaming ceiling at its own
+  footprint (useful bytes) at 16 MiB shapes, **49 %** in moved bytes; **40.5 %
+  useful / 61 % moved** in the 64 MiB true-DRAM regime.  (Originally stated as
+  63 % / ~95 % / 43 %, all against the DRAM-footprint ceiling — see the
+  correction box above.)
 - **Exhausted levers:** ``inv_rms`` arithmetic (V1/V2: ≤ +6 %), branch
   overhead (V3: 0), load scheduling (V5: 0, OOO covers it), accumulator ILP
   (V4: +27–32 %, absorbed into V6), per-block residency (already present by
