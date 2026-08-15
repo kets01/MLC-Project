@@ -1,5 +1,9 @@
 #include "norm/norm.hpp"
-#include "week3/utility.hpp"  // cpu_supports_sme()
+#include "week3/utility.hpp"  // cpu_supports_sme(), cpu_supports_sme2()
+
+#include <cstdio>    // fprintf on the precondition path
+#include <cstdlib>   // abort
+#include <cstring>   // strstr
 
 // The assembly kernels are compiled as plain C functions (no C++ name mangling).
 extern "C" void layer_norm_ssve(const float*, float*, const float*, const float*,
@@ -52,48 +56,109 @@ extern "C" int64_t svl_fp32_lanes();
 
 namespace mini_jit::norm {
 
-// Guard: each wrapper returns silently when SME is absent (SMSTART traps on
-// hardware without SME), so callers can SKIP the test rather than get SIGILL.
+namespace {
+
+// Sprint 8.  These wrappers used to `return;` when SME was absent, which meant
+// a caller on an M1/M2 got no computation, no status and no diagnostic — it
+// could not distinguish success from a no-op, and would then read whatever was
+// in the output buffer.  CLAUDE.md §4 requires the opposite: fail fast and
+// clearly at the boundary rather than produce silent wrong numbers.
+//
+// So an ISA-specific entry point now aborts with a message naming itself and
+// the missing feature, and callers who want a result on any CPU use the
+// layer_norm()/rms_norm() dispatchers below.
+[[noreturn]] void isa_precondition_failed(const char* fn, const char* feature) {
+    std::fprintf(stderr,
+        "\nFATAL: %s requires %s, which this CPU does not report.\n"
+        "  This is an ISA-specific entry point with a hard precondition; it\n"
+        "  will not silently return an uncomputed buffer.\n"
+        "  Either guard the call with cpu_supports_sme(), or call\n"
+        "  mini_jit::norm::%s() instead, which dispatches to the best\n"
+        "  available implementation and falls back to the scalar reference.\n\n",
+        fn, feature,
+        std::strstr(fn, "layer") != nullptr ? "layer_norm" : "rms_norm");
+    std::abort();
+}
+
+inline void require_sme(const char* fn) {
+    if (!cpu_supports_sme()) isa_precondition_failed(fn, "FEAT_SME");
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Public dispatchers — always compute a correct result on any CPU.
+// ---------------------------------------------------------------------------
+
+void layer_norm(const float* a, float* b, const float* gamma, const float* beta,
+                int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
+    if (cpu_supports_sme2())
+        ::layer_norm_ssve_v7(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
+    else if (cpu_supports_sme())
+        ::layer_norm_ssve_v6(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
+    else
+        layer_norm_ref(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
+}
+
+void rms_norm(const float* a, float* b, const float* gamma,
+              int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
+    if (cpu_supports_sme2())
+        ::rms_norm_ssve_v7(a, b, gamma, m, n, ld_a, ld_b, epsilon);
+    else if (cpu_supports_sme())
+        ::rms_norm_ssve_v6(a, b, gamma, m, n, ld_a, ld_b, epsilon);
+    else
+        rms_norm_ref(a, b, gamma, m, n, ld_a, ld_b, epsilon);
+}
+
+const char* norm_dispatch_target() {
+    if (cpu_supports_sme2()) return "SME2 (V7 multi-vector)";
+    if (cpu_supports_sme())  return "SME (V6 contiguity-grouped SSVE)";
+    return "scalar reference (no SME on this CPU)";
+}
+
+// ---------------------------------------------------------------------------
+// ISA-specific entry points.  Precondition enforced, not concealed.
+// ---------------------------------------------------------------------------
 
 void layer_norm_ssve(const float* a, float* b, const float* gamma, const float* beta,
                      int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("layer_norm_ssve");
     ::layer_norm_ssve(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
 }
 
 void layer_norm_ssve_v1(const float* a, float* b, const float* gamma, const float* beta,
                         int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("layer_norm_ssve_v1");
     ::layer_norm_ssve_v1(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
 }
 
 void layer_norm_ssve_v2(const float* a, float* b, const float* gamma, const float* beta,
                         int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("layer_norm_ssve_v2");
     ::layer_norm_ssve_v2(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
 }
 
 void layer_norm_ssve_v4(const float* a, float* b, const float* gamma, const float* beta,
                         int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("layer_norm_ssve_v4");
     ::layer_norm_ssve_v4(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
 }
 
 void layer_norm_ssve_v5(const float* a, float* b, const float* gamma, const float* beta,
                         int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("layer_norm_ssve_v5");
     ::layer_norm_ssve_v5(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
 }
 
 void layer_norm_ssve_v6(const float* a, float* b, const float* gamma, const float* beta,
                         int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("layer_norm_ssve_v6");
     ::layer_norm_ssve_v6(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
 }
 
 void layer_norm_ssve_welford(const float* a, float* b, const float* gamma, const float* beta,
                               int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("layer_norm_ssve_welford");
     ::layer_norm_ssve_welford(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
 }
 
@@ -101,7 +166,7 @@ void layer_norm_ssve_welford(const float* a, float* b, const float* gamma, const
 // derived from, so the SME2 path stays a pure opt-in optimisation.
 void layer_norm_ssve_v7(const float* a, float* b, const float* gamma, const float* beta,
                         int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("layer_norm_ssve_v7");
     if (!cpu_supports_sme2()) {
         ::layer_norm_ssve_v6(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
         return;
@@ -111,7 +176,7 @@ void layer_norm_ssve_v7(const float* a, float* b, const float* gamma, const floa
 
 void layer_norm_za_sme2(const float* a, float* b, const float* gamma, const float* beta,
                         int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("layer_norm_za_sme2");
     if (!cpu_supports_sme2()) {
         ::layer_norm_ssve_v6(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
         return;
@@ -121,49 +186,49 @@ void layer_norm_za_sme2(const float* a, float* b, const float* gamma, const floa
 
 void layer_norm_za(const float* a, float* b, const float* gamma, const float* beta,
                    int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("layer_norm_za");
     ::layer_norm_za(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
 }
 
 void rms_norm_ssve(const float* a, float* b, const float* gamma,
                    int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("rms_norm_ssve");
     ::rms_norm_ssve(a, b, gamma, m, n, ld_a, ld_b, epsilon);
 }
 
 void rms_norm_ssve_v1(const float* a, float* b, const float* gamma,
                       int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("rms_norm_ssve_v1");
     ::rms_norm_ssve_v1(a, b, gamma, m, n, ld_a, ld_b, epsilon);
 }
 
 void rms_norm_ssve_v2(const float* a, float* b, const float* gamma,
                       int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("rms_norm_ssve_v2");
     ::rms_norm_ssve_v2(a, b, gamma, m, n, ld_a, ld_b, epsilon);
 }
 
 void rms_norm_ssve_v3(const float* a, float* b, const float* gamma,
                       int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("rms_norm_ssve_v3");
     ::rms_norm_ssve_v3(a, b, gamma, m, n, ld_a, ld_b, epsilon);
 }
 
 void rms_norm_ssve_v4(const float* a, float* b, const float* gamma,
                       int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("rms_norm_ssve_v4");
     ::rms_norm_ssve_v4(a, b, gamma, m, n, ld_a, ld_b, epsilon);
 }
 
 void rms_norm_ssve_v5(const float* a, float* b, const float* gamma,
                       int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("rms_norm_ssve_v5");
     ::rms_norm_ssve_v5(a, b, gamma, m, n, ld_a, ld_b, epsilon);
 }
 
 void rms_norm_ssve_v6(const float* a, float* b, const float* gamma,
                       int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("rms_norm_ssve_v6");
     ::rms_norm_ssve_v6(a, b, gamma, m, n, ld_a, ld_b, epsilon);
 }
 
@@ -174,7 +239,7 @@ void rms_norm_ssve_v6(const float* a, float* b, const float* gamma,
 // behind a FEAT_SME2 runtime check so it degrades to the SME1 kernel").
 void rms_norm_ssve_v7(const float* a, float* b, const float* gamma,
                       int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("rms_norm_ssve_v7");
     if (!cpu_supports_sme2()) {
         ::rms_norm_ssve_v6(a, b, gamma, m, n, ld_a, ld_b, epsilon);
         return;
@@ -184,7 +249,7 @@ void rms_norm_ssve_v7(const float* a, float* b, const float* gamma,
 
 void rms_norm_ssve_v7x2(const float* a, float* b, const float* gamma,
                         int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("rms_norm_ssve_v7x2");
     if (!cpu_supports_sme2()) {
         ::rms_norm_ssve_v6(a, b, gamma, m, n, ld_a, ld_b, epsilon);
         return;
@@ -194,7 +259,7 @@ void rms_norm_ssve_v7x2(const float* a, float* b, const float* gamma,
 
 void rms_norm_za_sme2(const float* a, float* b, const float* gamma,
                       int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("rms_norm_za_sme2");
     if (!cpu_supports_sme2()) {
         ::rms_norm_ssve_v6(a, b, gamma, m, n, ld_a, ld_b, epsilon);
         return;
@@ -204,12 +269,12 @@ void rms_norm_za_sme2(const float* a, float* b, const float* gamma,
 
 void rms_norm_za(const float* a, float* b, const float* gamma,
                  int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    if (!cpu_supports_sme()) return;
+    require_sme("rms_norm_za");
     ::rms_norm_za(a, b, gamma, m, n, ld_a, ld_b, epsilon);
 }
 
 void bw_probe_ssve(float* d, const float* s, int64_t n) {
-    if (!cpu_supports_sme()) return;
+    require_sme("bw_probe_ssve");
     ::bw_probe_ssve(d, s, n);
 }
 
@@ -218,17 +283,17 @@ void bw_probe_ssve(float* d, const float* s, int64_t n) {
 // in ONE thing (the transition), and a guard that applies to one but not the
 // other would reintroduce a difference into the control.
 void smstart_probe_pairs(int64_t iters) {
-    if (!cpu_supports_sme()) return;
+    require_sme("smstart_probe_pairs");
     ::smstart_probe_pairs(iters);
 }
 
 void smstart_probe_sm_only(int64_t iters) {
-    if (!cpu_supports_sme()) return;
+    require_sme("smstart_probe_sm_only");
     ::smstart_probe_sm_only(iters);
 }
 
 void smstart_probe_empty(int64_t iters) {
-    if (!cpu_supports_sme()) return;
+    require_sme("smstart_probe_empty");
     ::smstart_probe_empty(iters);
 }
 
