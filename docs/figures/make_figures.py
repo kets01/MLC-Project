@@ -149,12 +149,10 @@ def fig_ceiling():
 def fig_ablation():
     """Grouped bars plus the two jumps that actually mattered, called out."""
     n = len(ABL_STAGES)
-    f = Fig(width=900, height=490, pad_l=86, pad_t=74, pad_b=96)
+    f = Fig(width=900, height=470, pad_l=86, pad_t=64, pad_b=76)
     f.set_scales(0, n, 0, 28)
     f.frame("What each optimization bought — 256 MiB (true DRAM)",
-            "", "GiB/s  (useful bytes)",
-            "Every bar correctness-gated against the float64 reference before "
-            "it was timed (66/66 configurations).")
+            "", "GiB/s  (useful bytes)")
     f.yticks([0, 5, 10, 15, 20, 25])
 
     for i, stage in enumerate(ABL_STAGES):
@@ -162,18 +160,6 @@ def fig_ablation():
 
     f.add_legend("RMSNorm — 2 traversals (2R+1W)", BLUE)
     f.add_legend("LayerNorm — 3 traversals (3R+1W)", VERM)
-
-    # A "what this step bought" row under the labels, instead of floating
-    # callouts: it cannot collide with a bar, and it reads as a ladder.
-    gw = f.plot_w / n
-    notes = ["", "", "+4% vs V0", "+102% vs V4", "+18% vs V6",
-             "back to V0 level", "= V7, bit-identical"]
-    cols = [MUTED, MUTED, MUTED, GREEN, GREEN, VERM, MUTED]
-    for i, (note, col) in enumerate(zip(notes, cols)):
-        if not note:
-            continue
-        f.text(f.pl + i * gw + gw / 2, f.h - f.pb + 50, note, size=10,
-               anchor="middle", fill=col, weight="700", layer=f.fg)
 
     f.draw_legend(prefer=[(f.pl + 14, f.pt + 10)])
     f.footnote(["V6 (access density, 256 B per column touch) is the lever that "
@@ -277,7 +263,7 @@ def fig_crossover():
 def fig_baselines():
     """The inversion is the point, so it is marked on the figure."""
     n = len(BASE_LABELS)
-    f = Fig(width=840, height=480, pad_l=86, pad_t=74, pad_b=92)
+    f = Fig(width=840, height=470, pad_l=86, pad_t=74, pad_b=76)
     f.set_scales(0, n, 0, 28)
     f.frame("Against general-purpose frameworks — 256 MiB, single-threaded",
             "", "GiB/s  (useful bytes)",
@@ -285,20 +271,11 @@ def fig_baselines():
             "Every shape verified to compute the same function before timing.")
     f.yticks([0, 5, 10, 15, 20, 25])
 
-    centres = []
     for i, lab in enumerate(BASE_LABELS):
-        centres.append(
-            _bar_group(f, i, n, [(BASE_RMS[i], BLUE), (BASE_LN[i], VERM)], lab))
+        _bar_group(f, i, n, [(BASE_RMS[i], BLUE), (BASE_LN[i], VERM)], lab)
 
     f.add_legend("RMSNorm", BLUE)
     f.add_legend("LayerNorm", VERM)
-
-    # Mark the ordering within each implementation — that is the finding.
-    for i, c in enumerate(centres):
-        faster = "RMS" if BASE_RMS[i] > BASE_LN[i] else "LN"
-        col = BLUE if faster == "RMS" else VERM
-        f.text(c, f.h - f.pb + 47, f"{faster} faster", size=10,
-               anchor="middle", fill=col, weight="700", layer=f.fg)
 
     # Both callouts live in the empty band above the framework bars (which top
     # out at 7.3) and to the right of our tall bar, so neither covers a value.
