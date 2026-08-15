@@ -483,14 +483,50 @@ accumulator does and doesn't help a bandwidth-bound vector op.
 
 ---
 
-## Sprint 8 — Report & ship
+## Sprint 8 — Correctness, dispatch & provenance hardening
 
-- [ ] Final Sphinx report section: motivation (norm in every block, bandwidth-bound), the two norms, the SSVE/JIT/SME/TEIR path, correctness, the GiB/s ablation, the stability/overhead analysis.
+**Goal:** no new kernel and no new optimization — close the gap between "these numbers are true" and "these numbers are *demonstrably* true", and fix a real API defect found in review.
+
+- [x] **FIXED A SILENT NO-OP IN THE PUBLIC API.** Every ISA-specific entry point began `if (!cpu_supports_sme()) return;`, so on a non-SME host `layer_norm_ssve(a,b,...); use(b);` produced **no computation, no status and no diagnostic** — the caller could not tell success from a no-op and would consume stale/uninitialized memory. The guard existed so CI tests could skip, which is a real need, but it solved a test-harness problem by degrading the library's contract, and it contradicted this project's own rule to fail fast and clearly (CLAUDE.md §4). **Two-layer API now:** public `layer_norm()`/`rms_norm()` dispatch `FEAT_SME2 → V7`, `FEAT_SME → V6`, else the **scalar reference**, and always compute a correct result on any CPU; the 25 named kernels keep a documented hard precondition and **abort with a diagnostic naming the function and the missing feature** rather than returning an uncomputed buffer. `norm_dispatch_target()` reports which path a host takes.
+- [x] Dispatch tests are deliberately **not** SME-guarded — the fallback path only ever executes on a machine without SME, so guarding them would leave it untested on the one runner that exercises it. Includes a sentinel-based regression test for the original defect (fill output, call, require nothing survives).
+- [x] **GATE BEFORE TIMING, EVERYWHERE.** The ablation previously verified each row but still printed GiB/s beside an `ok = NO`. Now: run the exact function about to be timed, on the exact shape, compare the full output to the float64 reference, and **refuse to produce a timing on disagreement**. Run reports **66 / 66 configurations verified before timing**.
+- [x] **External baselines gated at every shape.** The drivers dumped one shape (128×64) while the table reported three — verifying one and publishing three is an inference, not a check. Both drivers now dump every benchmarked shape plus a manifest; the C++ checker walks it (**6/6 per baseline**, PyTorch 2.13.0 and ExecuTorch 1.4.1).
+- [x] **Best-case is no longer the only statistic.** Min is kept and labelled best-case envelope, with **median and p10–p90** from the same samples beside it. Result: they agree to ~1 %, so the best-case figures reported throughout this project **were** typical — previously an assumption, now shown.
+- [x] **Provenance printed with every run:** git SHA (**marked `-dirty` when the tree is modified**, since such a run is not reproducible from its SHA), build type, compiler, OS, CPU, `sysctl` FEAT_SME/FEAT_SME2, `cpu_supports_sme()/sme2()`, RDSVL streaming VL, dispatch target, thread count, QoS. The SME lines are **detected**, not quoted from a datasheet — these docs carried a stale "M4 is SME1" claim for several sprints while the hardware reported `FEAT_SME2 = 1`.
+- [x] Report section `docs/source/weeks/norm_sprint8.rst`, in the toctree. Suite green on M4: **137 cases, 780 264 assertions**. No kernel changed, so no performance number moved — and the tables reproduce the Sprint 6/7 values.
+
+**Done when:** the API cannot silently do nothing, every reported configuration is correctness-gated before timing, and every table carries the conditions that produced it. **DONE.**
+
+---
+
+## Sprint 9 — Reproducibility & the Apple BNNSGraph baseline
+
+- [ ] CMake presets: `debug` (sanitizers/tests), `release`, `release-submission` (the exact submitted benchmark configuration).
+- [ ] Pin baseline environments and check in the manifests produced by the drivers.
+- [ ] State explicitly which question "native layout" answers (*what can each implementation achieve in its preferred representation?*) versus the one it does not (*what does replacing a framework op with ours cost for the same incoming tensor layout?*).
+- [ ] **Apple BNNSGraph baseline** (replaces vDSP as the vendor comparison). macOS 15.2 and `bnns_graph.h` are present; `BNNSGraphCompileFromFile` is available since macOS 15.0. Flow: CoreML model containing the op → compile → `BNNSGraphCompileFromFile` → `BNNSGraphContextMake` → execute. Same harness rules: native layout, one thread, correctness-gated first. **Three things to verify in a feasibility spike before committing to it:** (a) BNNS exposes `BNNSFilterCreateLayerNormalization` but **no RMSNorm symbol at all**, so RMSNorm will decompose — and must be labelled *"a decomposition, not a BNNS RMSNorm kernel"*, which is exactly the §2.7 trap; (b) BNNSGraph may dispatch to **AMX rather than SME**, a different execution unit, which changes what the comparison means; (c) whether the context can be pinned to one thread.
+
+## Sprint 10 — Claim corrections & external validation
+
+- [ ] **Traversal language.** Replace "two-pass/single-pass" with explicit traversal counts: LayerNorm has **two reduction stages** (mean, variance) plus output generation → **three input traversals**; RMSNorm has **one reduction** plus output → **two traversals**. Scope `main_norm`'s byte-convention header per norm — as written ("the V0–V3 kernels move 2R+1W") it reads as covering both norms, and the 2R+1W model is RMSNorm's, not baseline LayerNorm's (3R+1W).
+- [ ] **Split the RMSNorm claim.** "~10–40 % faster at equal accuracy" is too broad and conflates two things. Literature: Zhang & Sennrich report **comparable task performance** and runtime reductions of roughly **7–64 %** depending on the experiment. Separately: kernel numerical agreement with an RMSNorm reference **is not** evidence that swapping LayerNorm for RMSNorm preserves model accuracy. Our own measurement (LN/RMS = 0.43–0.56 on the evaluated shapes) is a third, distinct statement.
+- [ ] **"Bandwidth-dominated for the measured shapes"** rather than "memory-bandwidth-bound", unless stronger evidence is given — at ~33 % useful / 50 % moved there is room for reduction dependency chains, instruction throughput, `rsqrt` and load structure to matter. Add operational intensity (flops/byte, bytes/output) and cite our own FP-issue-rate finding (cache-resident V7 is FP-issue-bound at 100 % of the SSVE issue ceiling).
+- [ ] **Reconcile +17 % vs +21.5 %** for the RMSNorm DRAM improvement — the A/B study (20.96 → 24.56) and the consolidated table (20.29 → 24.65) are different measurement sets; make the consolidated table authoritative and label the other.
+- [ ] **Update `context.md`'s stale SME1 assumption**; dedupe the `d8–d15` ABI narrative to one location.
+- [ ] **External validation against the tnzr.org *Hello SME* M4 microbenchmarks** — independent corroboration rather than only our own instrument: 512-bit SVL; **their SSVE FMLA 31 GFLOP/s against our measured 31.0 GFLOPS**; a sharp bandwidth reduction above ~8 MiB, which independently supports the footprint-matching correction; and **SME2 four-register `LD1W` reaching ~925 GiB/s vs ~376 for single-register**, which independently motivates V7 as a design decision rather than ISA trickery. Note that absolute numbers should *not* be expected to match — different instruction streams and traffic definitions — and that their multicore data (one P-core largely saturating the cluster's SME resource) is why sub-linear thread scaling is expected here.
+- [ ] Rewrite the Sprint 7.5 "honest limit" section around the BNNSGraph result, replacing the vDSP evidence.
+
+## Sprint 11 — Report & ship
+
+- [ ] **Restructure the report as synthesis, not chronology:** research question → system/hardware → algorithmic choices → variants/ablation → correctness → performance methodology → final results → external comparison → **threats to validity** → conclusion. The course asks for a report that is to the point; the sprint diary should not be the thing a reader must reconstruct the conclusion from.
+- [ ] Move the sprint chronology, `sprint*_errors.md` and debug logs to **appendices/developer documentation**. Keep the most illuminating failed experiments — ZA is the model case — in the main text, because they answer a genuine engineering question.
 - [ ] Final benchmark tables refreshed on M4; figures (roofline, ablation bars).
 - [ ] README updated; report deployed to GitHub Pages via the existing `docs.yml`.
-- [ ] Tidy CI: norm host-tests in the runnable group; SME tests clearly marked local-only (mirroring the commented-out week3 group).
+- [ ] Tidy CI: norm host-tests in the runnable group; SME tests clearly marked local-only.
+- [ ] **Fix the GenAI disclosure.** The course rule is "No GenAI in the project report! Limit usage to proof reading", with disclosure required. The current phrase — AI used for the "initial reStructuredText boilerplate" — is ambiguous. State explicitly what it covers (markup scaffolding: `.. toctree::` directives, list-table skeletons, heading underlines) and that prose is not AI-generated, or restate it to match what actually happened.
+- [ ] Frame the SME → SME2 arc as a **project-level extension beyond the course material**: SME was taught; SME2-specific multi-vector optimization was not, and was reached by hardware discovery (`sysctl` reporting `FEAT_SME2 = 1`) followed by a measured hypothesis.
 
-**Done when:** the report tells the full story and the integrated kernel is verified + measured.
+**Done when:** the report tells the full story as a synthesis, the integrated kernel is verified + measured, and every claim is scoped to what was actually shown.
 
 ---
 
