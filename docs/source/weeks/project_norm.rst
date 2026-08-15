@@ -25,13 +25,21 @@ The full target stack, built up one layer at a time:
 The two norms differ in reduction structure, which is itself a deliberate
 ablation axis (not a flag):
 
-- **LayerNorm** — two-pass (mean, then variance + normalize-scale-shift);
-  higher arithmetic intensity, numerically stable.
-- **RMSNorm** — single-pass (sum of squares, no mean, no β); ~10–40 % faster
-  at equal accuracy.
+- **LayerNorm** — **two reduction stages** (mean, then variance) plus output
+  generation → **three input traversals**, 3R+1W; higher arithmetic intensity,
+  numerically stable.
+- **RMSNorm** — **one reduction stage** (sum of squares, no mean, no β) plus
+  output generation → **two traversals**, 2R+1W.
 
-Both are bandwidth-bound; the evaluation metric throughout is **effective
-GiB/s** against a measured hardware roofline, never GFLOPS.
+The 1.33× traffic ratio is the structural source of RMSNorm's advantage; we
+measure 1.8–2.3× on our shapes. (Zhang & Sennrich report comparable task
+performance with 7–64 % runtime reductions — a different claim, about different
+code on different hardware, and not a statement about model accuracy after
+substituting one norm for the other.)
+
+Both are **bandwidth-dominated at the shapes measured**; the evaluation metric
+throughout is **effective GiB/s** against a measured, footprint-matched
+roofline, never GFLOPS.
 
 Sprint status
 -------------
