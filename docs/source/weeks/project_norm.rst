@@ -85,8 +85,12 @@ Three rules, each adopted after a measurement error forced it.
 produced for code that has not first matched the float64 reference *on that
 exact shape*. The gate runs the function about to be timed, compares its full
 output, and refuses to time it on disagreement. The current run reports
-**66 / 66 configurations verified before timing**, and the external baselines
-6/6 each.
+**66 / 66 configurations verified before timing**. For the external baselines,
+6 checks per framework (both norms at three shapes) were gated the same way,
+covering the eager PyTorch outputs and the delegated ExecuTorch outputs. The
+harness now writes one manifest row per *implementation*, so ``torch.compile``
+and the ExecuTorch portable path are gated separately as well; those figures
+must be regenerated on the pinned environment before they are quoted.
 
 **2. Bytes are counted one way, and moved bytes differ per norm.** All GiB/s
 figures count **useful bytes** = 1 read + 1 write per element. Moved bytes are
@@ -153,8 +157,9 @@ What each lever bought, and — as importantly — what it did not:
    * - **V7 SME2 multi-vector**
      - **+17.2 % RMSNorm at DRAM**, +2.7 % LayerNorm, ≈0 cache-resident.
    * - ZA tile residency
-     - **Loses**, by 39–68 %. Rebuilt on SME2 multi-vector ``MOVA`` for
-       +62 %/+114 % — and still loses.
+     - **Loses**, by 39–68 %. Rebuilding it on SME2 multi-vector ``MOVA``
+       improved the ZA variants by 62 % for RMSNorm and 114 % for LayerNorm,
+       but neither surpassed the SSVE implementation.
 
 Two results are worth more than the speed-ups.
 
@@ -165,12 +170,13 @@ hypothesis was written down before measuring and the outcome recorded rather
 than discarded. When SME2 made ``mova`` 4× cheaper, ZA got much faster and still
 lost — converting an extrapolation into a measurement.
 
-**V7's mechanism was falsified.** Two hypotheses predicted opposite LayerNorm
-outcomes; LayerNorm's +2.7 % killed the instruction-count explanation. A
-2-vector control then showed the gain *saturates* (4→2 loads captures 90 % of
-it), which killed the memory-level-parallelism explanation too. The supportable
-claim is narrower than either: a threshold effect on load-instruction count, in
-load-dominated loops, in the latency-exposed regime.
+**V7's mechanism is narrower than either hypothesis.** Two hypotheses predicted
+opposite LayerNorm outcomes; LayerNorm's +2.7 % does not support a simple
+proportional instruction-count explanation. A 2-vector control then showed the
+gain *saturates* (4→2 loads captures 90 % of it), which also rules out a simple
+monotonic memory-level-parallelism explanation. What the data supports is a
+threshold effect on load-instruction count, in load-dominated loops, in the
+latency-exposed regime; we do not claim to have identified the mechanism.
 
 Correctness and numerical behaviour
 -----------------------------------
@@ -188,10 +194,11 @@ dangerous version, so the claim had no counterexample. Sprint 7 supplied one.
   returns a **negative variance** — so a kernel built on it emits ``NaN``, not
   merely an inaccurate number. That is a qualitative failure, which is why
   stability is treated as part of correctness rather than a separate concern.
-* **Centred two-pass is flat across 12 orders of magnitude** of conditioning.
-  That immunity is exactly what LayerNorm's extra traversal buys.
-* **RMSNorm is flat at ~5e-6 throughout** — ~2300× better than LayerNorm at
-  shift 1e5 — because it never forms a mean and so never performs the cancelling
+* **The centred two-pass stays below ~3e-5 relative error across the tested
+  shift sweep**, i.e. it does not degrade with conditioning the way the naive
+  estimator does. That is what LayerNorm's extra traversal buys.
+* **RMSNorm stays below ~1.8e-5 across the sweep** — about 2300× better than
+  LayerNorm at shift 1e5 — because it never forms a mean and so never performs the cancelling
   subtraction. Its stability is structural, and it is the same property that
   makes it faster. Its own limit is elsewhere: :math:`\sum x^2` overflows FP32
   at :math:`|x| \approx \sqrt{\mathrm{FLT\_MAX}/N}`.
@@ -252,9 +259,12 @@ External comparison
 
 Against **PyTorch 2.13.0** and **ExecuTorch 1.4.1** (including the XNNPACK
 delegate), our kernels are **1.5–2.1× faster on LayerNorm** and **4.2–5.8× on
-RMSNorm**. The asymmetry is not about our kernels: profiling shows
-``torch.nn.LayerNorm`` dispatches to a single fused ``aten::native_layer_norm``,
-while ``torch.nn.RMSNorm`` on CPU decomposes into ``mul``/``pow``/``sum``/``div_``.
+RMSNorm**. The asymmetry is not about our kernels: in our PyTorch 2.13.0
+profiler trace on the M4, eager ``torch.nn.RMSNorm`` decomposes into multiple
+ATen operations (``mul``, ``pow``, ``sum``, ``div_``), whereas
+``torch.nn.LayerNorm`` uses the fused ``aten::native_layer_norm`` path. We did
+not obtain equivalent partitioning evidence for ExecuTorch, so we make no claim
+about what its delegate does internally.
 
 That produces a clean inversion. *Our* RMSNorm is faster than our LayerNorm, as
 the traffic ratio says it should be; *PyTorch's* LayerNorm is 2.7× faster than
@@ -283,14 +293,17 @@ Threats to validity
   are VLA precisely because SVL is not guaranteed to be 512 bits.
 * **Best-case reporting, now bounded.** Headline GiB/s is a best-of-N minimum —
   a ceiling estimate, not a typical value. Median and p10–p90 are now reported
-  alongside; they agree to ~1 %, so the best-case figures *were* typical. That
-  was an assumption until Sprint 8.
+  alongside. For the medium and large headline shapes the median is generally
+  close to the best case, so those figures are typical; the smallest tensors
+  show visibly greater relative timing variability. That was an assumption
+  until it was measured.
 * **No specialist vendor baseline.** The largest gap. Apple's BNNS was
   investigated and produced no number: on macOS 15.2 its LayerNorm entry point
-  is deprecated and could not be executed, and **there is no RMSNorm in BNNS on
-  this OS at all**. This report therefore makes **no claim** about how our
-  kernels compare to a specialist vendor implementation, in either direction.
-  Details in ``bnns_investigation.md``.
+  is deprecated and could not be executed, and **the Accelerate/BNNS API
+  available on that system does not expose a direct RMSNorm operation**. This
+  report therefore makes **no claim** about how our kernels compare to a
+  specialist vendor implementation, in either direction. Details in
+  ``docs/dev-notes/tooling/bnns_investigation.md``.
 * **Native-layout comparison answers one question, not two.** It answers *what
   each implementation achieves in its preferred representation*. It does **not**
   answer *what substituting our kernel into a framework's tensor layout would
