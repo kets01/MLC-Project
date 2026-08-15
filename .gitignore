@@ -45,6 +45,11 @@ mlc_env/
 
 #build files
 build/
+# CMakePresets.json build directories: `debug` (sanitizers) and
+# `release-submission` (kept separate so a submission run cannot pick up stale
+# objects from day-to-day work).
+build-debug/
+build-submission/
 # Sphinx output: docs/Makefile and docs/make.bat both set BUILDDIR=build (and
 # docs.yml publishes docs/build/html), so docs/build/ is what a local
 # `make html` actually produces; docs/_build/ is sphinx-quickstart's default,
