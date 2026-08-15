@@ -208,14 +208,14 @@ def fig_stability():
               tx=f.px(1.1e3), ty=f.py(6.4), target=(1e5, math.log10(1.02e4)),
               fill=ACCENT, size=11, weight="600")
     # Below every curve: the blue trace bottoms out near 1e-7, so -8.0 is clear.
-    f.callout(["two-pass is flat across 12 orders of κ — this immunity",
-               "is what LayerNorm's third traversal buys"],
+    f.callout(["two-pass stays below ~3e-5 across the sweep — that",
+               "insensitivity is what LayerNorm's third traversal buys"],
               tx=f.px(1.15), ty=f.py(-7.9), target=(1e3, math.log10(3.75e-7)),
               size=10.5, fill=BLUE)
 
     f.draw_legend(prefer=[(f.px(1.15), f.pt + 12)])
     f.footnote(["RMSNorm never forms a mean, so it never performs this "
-                "subtraction: its error is flat at ~5e-6 across the whole sweep."])
+                "subtraction: its error stays below ~1.8e-5 across the sweep."])
     return f.save(OUT / "stability.svg")
 
 
