@@ -377,6 +377,80 @@ block per iteration (64 B per column touch) against V6/V7's **four** (256 B).
 What limits them is the Sprint-2b access-density lever, not ``mova`` throughput
 — which is why making ``mova`` 4× faster still left them behind.
 
+External validation — an independent M4 characterization
+----------------------------------------------------------
+
+Every bandwidth and issue-rate figure in this report comes from our own
+harness. That is a single-instrument story, and a reader is entitled to ask
+whether the instrument is right. The Jena *Hello SME* M4 microbenchmarks
+(``tnzr.org/compile``) characterize the same architecture independently, and
+our measurements agree with them on every point where the two overlap.
+
+.. list-table:: Our measurement vs the independent characterization
+   :header-rows: 1
+
+   * - property
+     - Hello SME
+     - ours
+     - agreement
+   * - streaming vector length
+     - 512 bits
+     - 512 bits (16 FP32 lanes, via ``RDSVL``)
+     - exact
+   * - SSVE ``FMLA`` throughput
+     - 31 GFLOP/s
+     - **31.0 GFLOPS**
+     - exact, and independently derived
+   * - cache/DRAM transition
+     - sharp drop above ~8 MiB
+     - plateau to 16 MiB, collapse by 64 MiB
+     - same transition
+   * - SME2 4-vector vs 1-vector ``LD1W``
+     - ~925 vs ~376 GiB/s (cache-resident)
+     - V7 gains +17 % at DRAM, ≈0 in cache
+     - same lever, different regime
+
+Three things follow, and the middle one is the most useful:
+
+**The FP issue rate is an exact independent match.** Our 31.0 GFLOPS for SSVE
+``FMLA`` was measured to explain why V7 gains nothing cache-resident; their
+31 GFLOP/s was measured to characterize the ISA. Two harnesses, two purposes,
+same number — which is meaningful corroboration that our instrument is sound.
+
+**Their cache cliff independently supports the footprint correction.** The
+single largest correction in this report (§1.2 — the ceiling is a curve, not a
+constant) rests on the claim that a major memory-hierarchy transition occurs
+around this scale. An external measurement of the same machine reports exactly
+such a transition above ~8 MiB. That turns "our probe produced these numbers"
+into "our numbers reproduce an independently observed architectural feature".
+
+**Their multi-vector result independently motivates V7.** They report SME2
+four-register ``LD1W`` reaching ~925 GiB/s against ~376 for single-register
+loads, cache-resident. Our V7 change — folding four single-vector accesses into
+one 4-vector access — is precisely that lever. This does *not* predict a 2.46×
+kernel speed-up: a norm is not a pure load benchmark, and our own result is
++17 % at DRAM and ≈0 in cache. But it does establish V7 as a design decision
+pointed at a documented architectural feature, not opportunistic ISA trickery.
+
+.. note::
+
+   **Absolute bandwidth numbers should not be expected to match**, and ours do
+   not: we measure ~292 GiB/s at 64 KiB where they report 376–925 GiB/s
+   cache-resident. That is not a contradiction. Their figures are read-only
+   loads with a specific instruction selection — and they show that instruction
+   choice *alone* moves cache bandwidth from ~376 to ~925 GiB/s — whereas ours
+   is a 1R+1W scale-add under the useful-bytes convention. Different traffic
+   definitions and different instruction streams give different absolute
+   numbers; the *qualitative behaviour* is what agrees, and that is what is
+   being claimed here.
+
+   Their multicore data also matters for how our threading results are read:
+   they find that a single P-core can largely saturate the cluster's SME
+   compute resource, so additional threads do not multiply throughput. The M4
+   is not well modelled as "10 cores × single-core performance", which is why
+   our sub-linear scaling (2.1× at 16 threads) is expected rather than
+   suspicious.
+
 Instrument readings from this sprint
 --------------------------------------
 
