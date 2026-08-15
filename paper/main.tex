@@ -1,0 +1,1149 @@
+% =========================================================================
+% MLC-Norm — final project paper, Machine Learning Compilers Lab, FSU Jena.
+%
+% Build:   pdflatex main && pdflatex main      (twice, for cross-references)
+%   or:    latexmk -pdf main.tex
+%
+% Dependencies, all standard in TeX Live / Overleaf:
+%   IEEEtran, booktabs, amsmath, graphicx, hyperref, url
+%
+% Figures are PDFs under paper/figures/, generated from the same sources as
+% the HTML report's SVGs:
+%   python3 docs/figures/make_figures.py   # data -> SVG (docs/source/_static)
+%   python3 docs/figures/svg2pdf.py        # SVG  -> PDF (paper/figures)
+%
+% If IEEEtran is unavailable, replace the \documentclass line with
+%   \documentclass[10pt,twocolumn]{article}
+% and delete \IEEEpeerreviewmaketitle; everything else compiles unchanged.
+% =========================================================================
+\documentclass[conference,10pt]{IEEEtran}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+
+% Compact code style without extra package dependencies.
+\newcommand{\code}[1]{\texttt{\small #1}}
+
+\begin{document}
+
+\title{MLC-Norm: Hand-Written and JIT-Generated SME/SSVE\\
+       Kernels for LayerNorm and RMSNorm on Apple Silicon}
+
+\author{%
+\IEEEauthorblockN{Ketsia Kemkuini and Mariza Yamdjeu}
+\IEEEauthorblockA{Machine Learning Compilers Lab\\
+Friedrich-Schiller-Universit\"at Jena\\
+\url{https://github.com/kets01/MLC-Project}}
+}
+
+\maketitle
+
+\begin{abstract}
+Transformer normalization runs in every block, twice per layer, and touches
+every element of the activation tensor while doing very little arithmetic per
+element. It is therefore a data-movement problem. We ask how close hand-written
+and JIT-generated SME/Streaming-SVE kernels can bring LayerNorm and RMSNorm to
+the achievable memory bandwidth of an Apple M4, and---more usefully---what
+actually limits them.
+
+We take both norms from a scalar reference through seven vectorized variants, a
+Scalable Matrix Extension (ZA) variant, runtime code generation, and integration
+into a tiled-execution-IR runtime, verifying every configuration against a
+float64 oracle before it is timed. The best kernels reach 33\,\% of a
+footprint-matched bandwidth ceiling on useful bytes at cache-resident shapes and
+42\,\% in the DRAM regime, and outrun PyTorch 2.13 and ExecuTorch 1.4.1 by
+1.5--2.1$\times$ (LayerNorm) and 4.2--5.8$\times$ (RMSNorm) single-threaded.
+
+The negative and corrective results are the more transferable ones. Using the
+ZA matrix accumulator as a residency buffer \emph{loses} by 24--37\,\% even
+after an SME2 rebuild that made it 62--114\,\% faster, because it trades a
+memory read that was never a memory read for \code{mova} traffic. The
+streaming-mode transition costs 9.07\,ns, roughly a sixth of the per-call floor,
+so the small-tensor penalty is kernel group granularity rather than
+\code{SMSTART}. And our own roofline was mis-stated for five sprints: the
+bandwidth ceiling is a curve in working-set size, not a constant, and dividing
+cache-resident kernels by the DRAM figure had inflated our reported efficiency
+by about 2$\times$.
+\end{abstract}
+
+\begin{IEEEkeywords}
+SME, Streaming SVE, Apple silicon, LayerNorm, RMSNorm, roofline, JIT code
+generation, memory bandwidth.
+\end{IEEEkeywords}
+
+\IEEEpeerreviewmaketitle
+
+% =========================================================================
+\section{Introduction}
+
+Normalization is not an afterthought in a Transformer. A norm runs in every
+block, twice per layer, of the Transformer architecture~\cite{vaswani2017attention},
+in models built on LayerNorm~\cite{ba2016layernorm} (BERT, GPT-2/3) and on
+RMSNorm~\cite{zhang2019rmsnorm} (LLaMA~\cite{touvron2023llama}, Gemma, Mistral).
+Both read and write an entire activation tensor while performing only a handful
+of floating-point operations per element, which places them firmly on the
+bandwidth-dominated side of the roofline~\cite{williams2009roofline} at the
+shapes we measure. Making them fast is a data-movement problem.
+
+This paper reports an engineering study of that problem on one concrete target:
+the Arm Scalable Matrix Extension (SME) and its Streaming SVE (SSVE) mode as
+implemented on the Apple M4. The question we set out to answer has two halves:
+
+\begin{quote}
+\emph{How close to the machine's achievable memory bandwidth can hand-written
+and JIT-generated SME/SSVE kernels bring LayerNorm and RMSNorm, and what
+actually limits them?}
+\end{quote}
+
+The second half proved more valuable than the first. A GiB/s number is only
+meaningful against a correctly chosen ceiling, and a substantial part of what
+this project learned came from discovering that its own ceiling---and several of
+its own published claims---were wrong.
+
+\subsection*{Contributions}
+
+\begin{enumerate}
+\item \textbf{Two kernel families, fully ablated.} Seven SSVE variants and two
+ZA variants per norm, each isolating one lever, each verified against a float64
+reference before any throughput figure is produced (Sec.~\ref{sec:ablation}).
+The winning lever is \emph{access density}, not the residency we expected.
+
+\item \textbf{A measured negative result for the ZA tile.} Staging activations
+through the SME matrix accumulator to eliminate a pass loses decisively, and
+still loses after an SME2 rebuild that made the staging 4$\times$ cheaper. We
+report the mechanism and the retraction of our own earlier reasoning
+(Sec.~\ref{sec:za}).
+
+\item \textbf{A correction to our own roofline.} The single-core bandwidth
+ceiling varies roughly 2$\times$ with working-set size. Every ``\% of peak'' we
+had published for a cache-resident shape was divided by the DRAM ceiling and was
+therefore inflated (Sec.~\ref{sec:ceiling}).
+
+\item \textbf{Direct measurement of streaming-mode overhead}, replacing a figure
+that had been inferred from a curve fit and had silently absorbed an unrelated
+bug (Sec.~\ref{sec:crossover}).
+
+\item \textbf{Runtime code generation verified by encoding diff} against the
+linked hand-written kernels, and integration as a primitive in a tiled-execution
+IR runtime (Sec.~\ref{sec:jit}).
+
+\item \textbf{A correctness-gated external comparison} against PyTorch and
+ExecuTorch, in which the interesting finding concerns fusion rather than kernel
+quality (Sec.~\ref{sec:external}).
+\end{enumerate}
+
+% =========================================================================
+\section{Background and Target}
+
+\subsection{SME and Streaming SVE on the M4}
+
+SME adds a streaming execution mode (\code{PSTATE.SM}) with a streaming vector
+length (SVL) that is independent of any non-streaming vector length, plus a
+two-dimensional accumulator array, ZA. Our target reports
+\code{hw.optional.arm.FEAT\_SME} and \code{hw.optional.arm.FEAT\_SME2}, and
+SVL${}=512$ bits, i.e.\ 16 FP32 lanes, queried at run time with \code{RDSVL}.
+
+Three properties of this implementation shape every kernel below.
+
+\emph{No gather/scatter in streaming mode.} Vector-offset loads and stores
+require \code{FEAT\_SME\_FA64}, which Apple does not implement; using them
+inside a streaming region raises \code{SIGILL}. A strided row therefore cannot
+be loaded in one instruction.
+
+\emph{Streaming entry destroys register state.} \code{SMSTART}/\code{SMSTOP}
+zero the Z registers and hence \code{d8}--\code{d15}, which AAPCS64 makes
+callee-saved. Any value a kernel needs across the transition must live in
+memory, and a kernel that does not save all eight registers is
+ABI-nonconforming even when a standalone benchmark appears to work.
+
+\emph{The feature set must be detected, not assumed.} Our own project documents
+asserted ``the M4 is SME1'' for several sprints while the hardware reported
+\code{FEAT\_SME2}${}=1$. Every benchmark run now prints a provenance header
+containing the \code{sysctl} values, the git commit (marked \code{-dirty} on a
+modified tree), compiler and build type.
+
+\subsection{The two norms, stated precisely}
+
+Over a feature axis of size $N$, with $\varepsilon$ a small constant:
+\begin{align}
+\text{LayerNorm:}\quad & y = \gamma \odot \frac{x-\mu}{\sqrt{\sigma^2+\varepsilon}} + \beta \\
+\text{RMSNorm:}\quad   & y = \gamma \odot \frac{x}{\sqrt{\tfrac{1}{N}\sum_i x_i^2 + \varepsilon}}
+\end{align}
+
+The distinction that matters for bandwidth is \emph{reduction stages} versus
+\emph{input traversals}; the common shorthand ``two-pass / single-pass''
+conflates them. LayerNorm needs two reduction stages (mean, then variance from
+\emph{centred} values) plus output generation, hence three traversals of the
+input and 3R+1W of traffic. RMSNorm needs one reduction stage plus output,
+hence two traversals and 2R+1W (Fig.~\ref{fig:traversals}). That $4{:}3$ ratio
+is the structural source of
+RMSNorm's advantage and is why the 2R+1W model must not be applied to
+LayerNorm.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/traversals}
+\caption{Reduction stages versus input traversals. LayerNorm needs two
+reduction stages and therefore three traversals; RMSNorm needs one and therefore
+two. The resulting $4{:}3$ traffic ratio is structural.}
+\label{fig:traversals}
+\end{figure}
+
+\begin{table}[t]
+\caption{Per element of output. Operational intensity is computed against moved
+bytes. Reaching the M4's $\approx$1984\,GFLOPS FMOPA peak would require
+$\approx$31\,flop/B, about 100$\times$ more than either norm offers.}
+\label{tab:intensity}
+\centering
+\begin{tabular}{lcc}
+\toprule
+ & RMSNorm & LayerNorm \\
+\midrule
+reduction stages          & 1 ($\Sigma x^2$) & 2 (mean, variance) \\
+input traversals          & 2                & 3 \\
+traffic, moved            & 2R+1W = 12\,B    & 3R+1W = 16\,B \\
+traffic, useful (1R+1W)   & 8\,B             & 8\,B \\
+FP operations             & $\approx$3       & $\approx$5 \\
+operational intensity     & $\approx$0.25\,flop/B & $\approx$0.31\,flop/B \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We keep three claims separate throughout, because they are separate:
+\emph{semantics} (RMSNorm omits mean-centering, hence one fewer traversal);
+\emph{literature} (Zhang and Sennrich~\cite{zhang2019rmsnorm} report comparable
+task performance with runtime reductions of roughly 7--64\,\% across their
+experiments); and \emph{our measurement} (1.8--2.3$\times$ on the shapes
+evaluated here). Kernel numerical agreement is \emph{not} model accuracy: our
+tests show that our RMSNorm matches an \emph{RMSNorm} reference, which says
+nothing about whether substituting one norm for the other preserves accuracy in
+a network.
+
+% =========================================================================
+\section{Kernel Design}
+
+\subsection{Layout and loop order}
+
+Activations are stored column-major with an explicit leading dimension,
+\code{a[row + col*ld]}, following the surrounding lab code. A column is
+therefore contiguous and a row is strided.
+
+The natural loop order---outer over rows, inner reduction over the feature
+axis---would require gathering a strided row, which streaming mode cannot do
+(Sec.~II-A). We therefore transpose the loop order: the outer loop walks
+\emph{blocks of SVL rows} and the inner loop walks all $N$ columns. Each inner
+load is one contiguous \code{LD1W} covering SVL consecutive rows of a single
+column, and $\gamma$, $\beta$ enter through \code{LD1RW} broadcasts. This is the
+structural decision from which everything else follows: the reduction becomes
+\emph{vertical} across lanes, so each lane accumulates one row independently and
+no horizontal reduction instruction is needed at all.
+
+\subsection{Vector-length agnosticism}
+
+No kernel hard-codes SVL. \code{CNTW} supplies the lane count, \code{WHILELO}
+builds the row predicate so that full blocks and the final partial block share
+one code path, and \code{ADDVL}/\code{INCW} advance pointers and indices by one
+vector length. The row granularity of our winning variants is $4\times$SVL---64
+rows on this machine---but it is derived at run time, never written as a
+literal. The C++ harness obtains the same quantity through \code{RDSVL} rather
+than assuming~16.
+
+\subsection{One streaming region per call}
+
+The entire norm executes inside a single \code{SMSTART}/\code{SMSTOP} pair.
+Section~\ref{sec:crossover} quantifies what that decision is worth.
+
+\subsection{Precision and the reference}
+
+Kernels accumulate in FP32, the precision of the data. The reference
+implementation accumulates in double and is kept deliberately unoptimized: it is
+the correctness oracle, not a performance target. LayerNorm computes variance
+from centred values, never as $E[x^2]-\mu^2$; Sec.~\ref{sec:numerics} shows what
+that choice buys.
+
+% =========================================================================
+\section{Measurement Methodology}
+\label{sec:method}
+
+Three rules, each adopted after a measurement error forced it.
+
+\subsection{Correctness gates performance, per configuration}
+
+No throughput figure is produced for code that has not first matched the float64
+reference \emph{on that exact shape}. The gate runs the function that is about
+to be timed, compares its complete output, and refuses to produce a timing on
+disagreement. An earlier version verified each row but still printed GiB/s
+beside a failure flag, which a reader scanning the throughput column would never
+notice. The submitted run reports \textbf{66/66 configurations verified before
+timing}, and the external baselines 6/6 each.
+
+\subsection{Bytes are counted one way}
+
+All GiB/s figures count \emph{useful bytes}: one read and one write per element,
+the algorithm's minimum traffic, for kernels and bandwidth probes alike. Moved
+bytes are $1.5\times$ that for RMSNorm and $2.0\times$ for LayerNorm. Keeping
+the useful-bytes convention makes the extra traversal visible as a lower
+percentage of peak, which is exactly the gap the access-density lever attacks,
+rather than a number to hide.
+
+\subsection{The ceiling is a curve, not a constant}
+\label{sec:ceiling}
+
+This is the project's largest correction and it invalidated percentages across
+five report sections.
+
+Our roofline probe is a STREAM-style~\cite{mccalpin1995stream} scale-add
+executed the way the kernels access memory: one streaming region, contiguous \code{LD1W}/\code{ST1W},
+predicated tail. We originally measured it at a single 128\,MiB-per-array
+footprint, obtaining 59.5\,GiB/s, and then divided \emph{every} shape by that
+number.
+
+That figure is the \emph{DRAM} ceiling. Sweeping the same probe across
+working-set sizes (Fig.~\ref{fig:ceiling}) shows it reaching 115--117\,GiB/s
+between 512\,KiB and 16\,MiB. A cache-resident kernel never faces DRAM
+bandwidth, so dividing it by the DRAM ceiling credits it for a constraint it
+never met. The most-quoted number in our earlier drafts---RMSNorm V6 at
+``$\approx$95\,\% of the moved-bytes roofline''---is really $\approx$50\,\%.
+
+The methodological point on which the correction rests: at a small footprint
+both arrays stay resident after the first repetition, so the probe measures
+\emph{steady-state resident} bandwidth. That is a legitimate denominator only
+because the norm kernels are benchmarked identically, with repeated calls over
+the same buffers. Probe and kernel must sit in the same residency regime or
+their ratio is meaningless. The harness now sweeps the ceiling and each table
+divides by the ceiling measured at its own working set, so the numbers
+regenerate from the tree instead of depending on a constant that suits one
+regime.
+
+Two further readings fall out of the sweep. Streaming mode costs $\approx$25\,\%
+against NEON at DRAM but is nearly free in cache ($0.93\times$), so ``streaming
+is a structural handicap'' is a DRAM-regime statement rather than a property of
+the mode. And below $\approx$512\,KiB the SSVE figure stops being a bandwidth
+number at all: NEON climbs toward L1 speed while SSVE falls, because
+\code{SMSTART} becomes a visible share of a sub-microsecond pass.
+
+This is the same class of error we had ourselves named earlier in the project
+(``peak of \emph{what}?''), when we established that a NEON probe is the wrong
+ceiling for a streaming-mode kernel. That fixed the execution-mode half of the
+question and left the footprint half unasked.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/ceiling_curve}
+\caption{The bandwidth ceiling is a curve, not a constant. Apple M4, single
+core. Until this was measured, every ``\% of peak'' divided by the dotted line,
+which is the ceiling at a 256\,MiB footprint. The gap between the dotted line
+and the dashed curve over the cache-resident range is the $\approx$2$\times$
+error in our own published efficiency figures.}
+\label{fig:ceiling}
+\end{figure}
+
+\subsection{Reporting}
+
+Headline figures are the best of $N$ repetitions, an estimate of what the kernel
+does when nothing interferes. Because a minimum alone cannot distinguish a
+typical result from a lucky outlier, we report the median and the p10--p90 band
+from the same samples beside it. They agree to about 1\,\%, so the best-case
+figures this project has reported throughout \emph{were} typical---previously an
+assumption, now shown. Repetition counts scale with working-set size rather than
+being fixed: at a fixed count the smallest shape once reported a hand-written
+kernel 10\,\% below its own word-identical JIT twin, which is impossible for
+identical code and was therefore sampling noise.
+
+% =========================================================================
+\section{Optimization and Ablation}
+\label{sec:ablation}
+
+Both norms were taken through the same ladder, one lever per variant, each rung
+verified and measured on the same harness and the same shapes.
+
+\begin{table}[t]
+\caption{Consolidated ablation, useful bytes (1R+1W), best-of-$N$. Percentages
+are against the ceiling measured \emph{at each shape's own footprint}
+(115.35 and 59.45\,GiB/s respectively). Every row was verified against the
+float64 reference before it was timed.}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+& \multicolumn{2}{c}{RMSNorm} & \multicolumn{2}{c}{LayerNorm} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+stage & 16\,MiB & 256\,MiB & 16\,MiB & 256\,MiB \\
+\midrule
+scalar reference        & 1.03  & 0.67  & 0.97  & 0.53 \\
+V0 SSVE                 & 25.11 & 10.37 & 12.82 & 7.40 \\
+V1 \code{FRSQRTE}+NR    & 25.13 & 10.37 & 12.82 & 7.40 \\
+V2 hoisted $1/N$        & 25.14 & 10.36 & 14.42 & 7.57 \\
+V3 $2\times$ unroll     & 25.16 & 10.41 & ---   & --- \\
+V4 accumulator ILP      & 31.91 & 10.75 & 16.46 & 7.95 \\
+V5 load pipelining      & 31.99 & 10.78 & 16.47 & 7.95 \\
+\textbf{V6} access density & \textbf{38.47} & \textbf{20.97} & \textbf{16.49} & \textbf{13.21} \\
+\textbf{V7} SME2 multi-vector & \textbf{38.47} & \textbf{24.76} & \textbf{16.49} & \textbf{13.55} \\
+Welford (single stage)  & ---   & ---   & 12.14 & 6.75 \\
+ZA residency            & 25.14 & 10.37 & 14.41 & 7.51 \\
+JIT (automatic ISA)     & 38.46 & 24.76 & 16.49 & 13.47 \\
+\midrule
+\% of footprint ceiling (V7) & 33.3 & 41.6 & 14.3 & 22.8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{What each lever bought}
+
+\textbf{V1, reciprocal-square-root arithmetic} ($\approx$0). Replacing
+\code{FSQRT}+\code{FDIV} with \code{FRSQRTE} plus one Newton--Raphson step
+halves the latency of the inverse but changes nothing measurable: it is off the
+critical path.
+
+\textbf{V2, hoisting $1/N$} ($\approx$0 for RMSNorm, \textbf{+9--12\,\% for
+LayerNorm}). This is the one verdict that does \emph{not} transfer between the
+norms, and the asymmetry is structural. RMSNorm performs one division per row
+block, already amortized over the column loop. LayerNorm performs two, and both
+sit at serialization points \emph{between} its three passes---the mean gates
+pass 2, the variance gates pass 3---so they are a far larger share of runtime.
+
+\textbf{V3, unrolling} ($\approx$0). The out-of-order core already overlaps
+sequential column loads.
+
+\textbf{V4, accumulator ILP} (\textbf{+27--33\,\%}). Four independent
+accumulator chains replace one. This is the first real win, and it retroactively
+explains V3: unrolling without breaking the dependency chain cannot help,
+because the chain was the bottleneck. The four partial sums combine in tree
+order rather than the reference's sequential order, so V4 and V5 are verified at
+a documented wider tolerance rather than the strict one---an honest statement of
+the accuracy they meet, not a gate quietly widened.
+
+\textbf{V5, load pipelining} ($\approx$0 versus V4, as pre-registered). Register
+renaming already hoists the loads once the chains are broken. This closes the
+``more outstanding loads'' family; explicit prefetch works the same lever one
+step earlier and receives a reasoned skip.
+
+\textbf{V6, access density} (\textbf{+131\,\% RMSNorm, +71\,\% LayerNorm} versus
+V0 in the DRAM regime). This is the winning lever, and it is \emph{not} the one
+we planned. We had intended a residency optimization---keep the row on core so
+the second traversal reads from cache---and measured the premise first. Pass-2
+residency was \emph{already} satisfied: the reuse distance between traversals of
+one row block is only $64N$ bytes, L2-resident by construction. What actually
+collapses throughput is the \emph{density} of the column walk. Each column touch
+reads 64\,B out of every $4M$ bytes, and at an equal 32\,MB footprint the aspect
+ratio alone moves throughput from 31 to 18\,GiB/s.
+
+V6 therefore processes four consecutive SVL-row blocks per outer iteration, so
+each column touch becomes four back-to-back loads at consecutive
+\code{MUL VL} offsets---256 contiguous bytes, four times denser. One accumulator
+\emph{per row block} preserves V4's four independent chains while restoring the
+reference's sequential summation order, so V6 needs no reassociation tolerance.
+
+\textbf{V7, SME2 multi-vector accesses} (\textbf{+17.2\,\% RMSNorm at DRAM},
++2.7\,\% LayerNorm, $\approx$0 cache-resident). V6's group loop already touches
+four consecutive row blocks per column, which is exactly the operand shape of
+SME2's four-vector contiguous access, so V7 is V6 with four loads folded into
+one and four stores into one. Same addresses, same traffic, same arithmetic,
+same summation order: the only variable is instruction count, which makes it a
+clean test of whether V6 is issue-bound or memory-bound. Because no value
+changes, the correctness gate is \emph{bit-identity} with V6, not a tolerance.
+
+Folding the accesses also eliminates the separate tail path. V6 needs one
+because its group path is unpredicated, and that tail touches 64\,B per column
+instead of 256\,B---precisely the low density V6 exists to fix. SME2's
+predicate-as-counter (\code{WHILELO}\,\dots\,\code{VLx4}) describes
+$\min(M-i,\,4\cdot\mathrm{SVL})$ active elements \emph{across} the group, so one
+loop body serves full and final partial groups alike.
+
+\begin{figure}[t]
+\centering
+\small
+\begin{verbatim}
+V6 -- four accesses per column touch:
+  ld1w {z0.s},  p0/z, [x8]
+  ld1w {z24.s}, p0/z, [x8, #1, mul vl]
+  ld1w {z25.s}, p0/z, [x8, #2, mul vl]
+  ld1w {z26.s}, p0/z, [x8, #3, mul vl]
+  fmla z2.s,  p0/m, z0.s,  z0.s
+  fmla z16.s, p0/m, z24.s, z24.s
+  fmla z17.s, p0/m, z25.s, z25.s
+  fmla z18.s, p0/m, z26.s, z26.s
+
+V7 -- the same 256 B in one instruction:
+  ld1w {z0.s - z3.s}, pn8/z, [x8]
+  fmla z4.s, p0/m, z0.s, z0.s
+  fmla z5.s, p0/m, z1.s, z1.s
+  fmla z6.s, p0/m, z2.s, z2.s
+  fmla z7.s, p0/m, z3.s, z3.s
+\end{verbatim}
+\caption{The V6$\rightarrow$V7 transformation, reduction loop. Same addresses,
+same traffic, same arithmetic, same summation order; only the load-instruction
+count changes. Because no value changes, the correctness gate is bit-identity
+with V6 rather than a tolerance. The counter predicate \code{pn8}, built by
+\code{WHILELO}\,\dots\,\code{VLx4}, also governs the final partial group, which
+is what removes V6's separate tail path entirely.}
+\label{fig:v7}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/ablation_dram}
+\caption{The ablation in the true-DRAM regime (256\,MiB), where the levers
+separate most clearly. Access density (V6) is what moves the needle; SME2
+multi-vector accesses (V7) add to it. ZA residency lands back at V0 level
+despite moving strictly fewer bytes.}
+\label{fig:ablation}
+\end{figure}
+
+\subsection{The ZA tile: a measured, explained negative}
+\label{sec:za}
+
+SME's ZA array offers roughly 4\,KB of on-core storage beyond the 32 Z
+registers---enough to hold one SVL-row block of activations. Staging $x$ there
+during the reduction and reading it back afterwards converts RMSNorm's 2R+1W
+into 1R+1W, and LayerNorm's 3R+1W into 1R+1W. The traffic saving is real.
+
+Both lose, decisively: 39--65\,\% slower than V6 for RMSNorm and 51--68\,\% for
+LayerNorm. The mechanism is that each element now costs two (RMSNorm) or three
+(LayerNorm) additional \code{mova} operations, and \code{mova} throughput, not
+memory, is what binds at these shapes. The clinching observation is internal to
+the kernel: its own streaming \emph{fallback} path outruns its ZA-resident fast
+path. We also verified that no footprint rescues it---at 32--64\,MB the ZA path
+stays pinned near 10\,GiB/s while V6 delivers 22--25---because V6's grouping
+keeps the second traversal cache-resident even there. The DRAM read that ZA
+``saves'' was never a DRAM read.
+
+Two aspects of this result are worth more than the numbers.
+
+First, that LayerNorm loses by a \emph{larger} margin than RMSNorm was
+pre-registered before measuring: a 50\,\% traffic cut that costs three
+\code{mova} per element rather than two must clear a proportionally larger tax.
+The prediction was recorded, then confirmed, which is what makes it evidence
+rather than rationalization.
+
+Second, we later \emph{retracted our own reasoning}. We had declined to try SME2
+multi-vector \code{mova} on the argument that ``even a 2$\times$ speed-up only
+reaches a tie''. That rested on an untested factor: \code{mova} had never been
+characterized as issue-bound versus ZA-port-bound. Measured directly, the
+single-vector form reaches 3.88\,G\,vec/s and the four-vector form
+15.50---exactly $4.00\times$. It is issue-bound and the fold is $4{:}1$, so our
+own arithmetic did not hold. We built both kernels: they gain \textbf{+62\,\%}
+(RMSNorm) and \textbf{+114\,\%} (LayerNorm) and \emph{still} lose to V7 by
+37\,\% and 24\,\%. The verdict is unchanged but is now a measurement rather than
+an extrapolation, and the residual cause differs from our original diagnosis:
+the ZA kernels touch one row block per iteration (64\,B per column) against
+V6/V7's four (256\,B), so what limits them is the same access-density lever, not
+\code{mova}.
+
+\subsection{V7's mechanism was falsified}
+
+Two hypotheses explain V7's DRAM win and predict opposite LayerNorm outcomes.
+``Fewer instructions retire faster'' predicts a \emph{larger} gain for
+LayerNorm, which folds more accesses per element. ``Relieved memory-level
+parallelism''---one instruction requesting 256 contiguous bytes occupying less
+load-tracking capacity than four requesting 64---predicts a \emph{smaller} one,
+since LayerNorm does more FP work per byte and is less memory-starved.
+LayerNorm gained 2.7\,\% against RMSNorm's 17.2\,\%, which falsifies the
+instruction-count explanation.
+
+We then built a two-vector control: identical work, identical 256\,B per column,
+issued as two 128\,B accesses instead of one 256\,B access, so
+bytes-per-instruction is the only variable. A proportional
+memory-level-parallelism model predicts it lands halfway. It does not
+(Table~\ref{tab:v7x2}): the curve \emph{saturates}, with $4\!\to\!2$ capturing
+90\,\% of the win and $2\!\to\!1$ adding 1.5\,\%. That is inconsistent with our
+own pre-registered model \emph{and} with a ``256\,B burst matches the
+prefetcher'' model. Both explanations are dead. What survives is narrower than
+either: a threshold effect on load-instruction count, in load-dominated loops,
+in the latency-exposed regime only. Why the threshold sits between four and two
+is not established here and would need microarchitectural counters this harness
+does not read.
+
+\begin{table}[t]
+\caption{The two-vector control. RMSNorm, 256\,MiB. The gain saturates, which
+falsifies both pre-registered explanations.}
+\label{tab:v7x2}
+\centering
+\begin{tabular}{lccr}
+\toprule
+variant & load insns/column & GiB/s & vs V6 \\
+\midrule
+V6   & 4 ($4\times$64\,B)  & 20.94 & --- \\
+V7x2 & 2 ($2\times$128\,B) & 24.31 & +16.1\,\% \\
+V7   & 1 ($1\times$256\,B) & 24.67 & +17.9\,\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{What binds, and where}
+
+Combining the ablation with issue-rate measurements gives a regime-dependent
+answer rather than a single one. We measured the SSVE floating-point issue
+ceiling at 0.97\,G vector instructions/s (equivalently 31.0\,GFLOPS for
+\code{FMLA}), and \code{FMUL} issues at exactly the same rate. At 16\,MiB,
+RMSNorm~V7 sustains \emph{100\,\%} of that ceiling; at 256\,MiB it reaches
+67\,\%. Cache-resident, the kernel is FP-issue-bound, not memory-bound---which
+is precisely why V7's multi-vector loads buy nothing there and 17\,\% at DRAM.
+
+This is why we describe these kernels as \emph{bandwidth-dominated for the
+shapes measured} rather than flatly memory-bound. Against footprint-matched
+ceilings the best kernel reaches $\approx$33\,\% useful / $\approx$50\,\% moved,
+not $\approx$95\,\%, and reduction dependency chains, FP issue rate,
+load-instruction count and reciprocal-square-root latency all appear in the
+ablation.
+
+% =========================================================================
+\section{Numerical Behaviour}
+\label{sec:numerics}
+
+The project asserted from the outset that single-pass variance is dangerous and
+that LayerNorm's centred formulation avoids it---but never implemented the
+dangerous version, so the claim had no counterexample. We supplied one: the
+naive $E[x^2]-\mu^2$, the centred two-pass, and Welford's recurrence, all
+accumulating in FP32 (the kernels' precision; a float64 demonstrator would prove
+nothing about them) against a float64 oracle. The stress axis is a shift, which
+leaves the variance untouched but scales the condition number
+$\kappa = 1 + \mu^2/\sigma^2$ by roughly $s^2$, isolating conditioning from
+every other property of the data. Summation order is trustworthy because the
+build sets no fast-math flags, so IEEE semantics forbid reassociating the
+reductions.
+
+\begin{table}[t]
+\caption{FP32 relative error against a float64 oracle, $N=512$, identical input.
+Past shift $10^5$ the naive estimator returns a \emph{negative} variance, so a
+kernel built on it emits \code{NaN}.}
+\label{tab:stability}
+\centering
+\begin{tabular}{lrrr}
+\toprule
+shift & naive 1-stage & two-pass & Welford \\
+\midrule
+$0$      & 5.09e--07 & 3.89e--07 & 2.07e--07 \\
+$10^{1}$ & 1.39e--04 & 3.98e--07 & 1.98e--07 \\
+$10^{2}$ & 8.52e--03 & 1.18e--07 & 4.16e--07 \\
+$10^{3}$ & 1.25e+00 & 3.75e--07 & 4.73e--06 \\
+$10^{4}$ & 1.59e+02 & 2.81e--05 & 5.41e--05 \\
+$10^{5}$ & 1.02e+04$^{\dagger}$ & 1.51e--07 & 8.94e--05 \\
+$10^{6}$ & 6.80e+06$^{\dagger}$ & 7.43e--07 & 6.71e--03 \\
+\bottomrule
+\multicolumn{4}{l}{\footnotesize $^{\dagger}$ negative variance; $\sqrt{\cdot}$ is \code{NaN}.}
+\end{tabular}
+\end{table}
+
+Three results follow. \emph{Naive error tracks $\kappa$}: each row multiplies
+the shift by ten and hence $\kappa$ by about a hundred, and the naive column
+rises by the same factor---the classical conditioning result reproduced on this
+hardware. \emph{The failure is qualitative, not gradual}: from shift $10^5$ the
+estimate goes negative, and a negative variance has no square root, so the
+kernel produces \code{NaN} rather than an inaccurate number. That is why we
+treat stability as part of correctness rather than as a separate concern.
+\emph{Centred two-pass is flat across twelve orders of magnitude of $\kappa$},
+and that immunity is exactly what LayerNorm's third traversal buys---accuracy
+bought with bandwidth, priced.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/stability}
+\caption{Where each FP32 variance formulation breaks, $N=512$. Above the dotted
+line the error exceeds the quantity being estimated. The naive estimator's error
+tracks the condition number and returns a \emph{negative} variance from shift
+$10^5$; the centred two-pass is flat across twelve orders of magnitude, and that
+immunity is what LayerNorm's third traversal buys.}
+\label{fig:stability}
+\end{figure}
+
+\begin{table}[t]
+\caption{The shipped kernels on the same stress data, $M=64$, $N=512$;
+max$|$error$|$ against the float64-accumulating reference. V0 uses exact
+\code{FSQRT}, V6 uses \code{FRSQRTE}+NR.}
+\label{tab:kernelacc}
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+shift & LN V0 & LN V6 & LN Welford & RMS V6 \\
+\midrule
+$0$      & 7.15e--07 & 1.72e--05 & 1.72e--05 & 1.73e--05 \\
+$10^{2}$ & 1.30e--04 & 1.30e--04 & 1.02e--04 & 6.79e--06 \\
+$10^{4}$ & 5.37e--03 & 5.38e--03 & 2.16e--02 & 3.10e--06 \\
+$10^{5}$ & 1.23e--02 & 1.23e--02 & 2.14e--01 & 5.25e--06 \\
+$10^{6}$ & 2.07e--03 & 2.08e--03 & 3.02e--01 & 5.19e--06 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Scalar estimators prove nothing about SSVE kernels, so we placed the shipped
+kernels on the same axis (Table~\ref{tab:kernelacc}). Three findings refine the
+story. The
+\code{FRSQRTE}+NR substitution costs accuracy---about $24\times$ at shift
+0---but only where the problem is already well conditioned; from shift $10^2$
+upward the exact-\code{FSQRT} and approximate variants are indistinguishable.
+What limits LayerNorm on hard data is therefore \emph{not the variance at all}:
+the residual error lives in the output expression $(x-\mu)$, where FP32 carries
+the difference of two large numbers in only a handful of bits. At shift $10^5$
+the predicted ULP is 1.6e--2 relative to a unit signal and the measured error is
+1.2e--2; that the exact and approximate kernels coincide there is the evidence
+that the square-root arithmetic is not the binding constraint. Finally,
+\textbf{RMSNorm is flat at $\approx$5e--6 across the whole sweep}, about
+$2300\times$ better than LayerNorm at shift $10^5$, because it never forms a
+mean and so never performs the cancelling subtraction---in the reduction or in
+the output. Its stability is structural, and it is the same property that makes
+it faster. Accuracy and throughput point the same way here, which is unusual
+enough to be worth stating.
+
+The honest counterpart: RMSNorm has its own limit. $\sum x^2$ must fit in FP32,
+so the reduction overflows once $N x^2 > \textsc{flt\_max}$, i.e.\ at
+$|x|\approx\sqrt{\textsc{flt\_max}/N}$. A test straddles that boundary at
+$\pm$10\,\% to show the failure is where the arithmetic says it is.
+
+We also corrected a claim of our own here. We had reported Welford as
+``$\approx$100$\times$ less accurate'' than two-pass. Re-measured across more
+shift magnitudes, that holds at exactly one shift (and the factor is
+$\approx$46$\times$), is a wash at two others, and \emph{reverses} at $10^5$
+where Welford is $2.5\times$ better. The stated mechanism was wrong too:
+Welford's \emph{variance} is the more accurate of the two, and its extra output
+error comes from the running \emph{mean}, which updates at full input magnitude
+every element. What does not change is the decision---two-pass remains the
+incumbent because Welford is 25--30\,\% slower for a measured reason, a
+per-column scalar division that serializes the loop, despite moving 25\,\% fewer
+bytes. That is a speed argument and it is unaffected.
+
+% =========================================================================
+\section{Code Generation and Integration}
+\label{sec:jit}
+
+The kernels are generated at run time and invoked through a tiled-execution-IR
+(TEIR) runtime, which is the point of the exercise: the kernel is a leaf the
+compiler schedules, not a standalone program.
+
+\subsection{Verification by encoding diff}
+
+A generator can emit correct instruction words that its author does not
+understand, and ``it assembles'' is not ``it is the instruction you meant''.
+Each emitter is a one-to-one transcription of a hand-written kernel---same
+registers, same order---and the generated buffer is compared word by word
+against the \emph{linked} hand-written kernel, read from its function address at
+run time so the reference can never go stale. The diff is green at 157/157 and
+208/208 words for the SME1 variants and 110/144 for the SME2 variants, so the
+generated kernel inherits the verification of one that already passed the full
+suite instead of re-earning it.
+
+Building the encoders this way---golden words extracted from the toolchain
+first, every encoder pinned to one---also surfaced two latent defects in
+pre-existing lab code that behavioural tests had passed over for weeks: a
+predicate constructor that emitted a byte-element predicate where it documented
+a word-element one (functionally masked, since an all-true predicate of either
+kind governs the same operations), and a streaming-mode entry helper that
+enabled ZA as well as SM contrary to its name. An encoding diff checks what code
+\emph{is}; behavioural tests check what it \emph{does}, and the first catches a
+class of error the second structurally cannot.
+
+\subsection{Feature-dependent emission}
+
+The generator takes an ISA parameter. With \code{automatic}---what a real caller
+gets---it emits the SME2 variant where \code{FEAT\_SME2} is present and the SME1
+variant otherwise; explicit values let the tests pin either path regardless of
+build host. Emission costs $\approx$4\,$\mu$s once, against per-call execution
+times from 0.4 to 135\,$\mu$s, and the returned pointer is reused.
+
+\subsection{Loop-nest integration and threading}
+
+The norms are registered as TEIR primitives that the runtime places in a
+generated loop nest, honouring strides and leading dimensions. Marking the row
+axis parallel gives thread scaling without touching the kernel, which remains
+single-tile (Table~\ref{tab:threading}).
+
+Two integration findings are worth recording. First, this is where the
+\code{d8}--\code{d15} ABI violation stopped being latent: our benchmark harness
+had masked it caller-side with \code{volatile}, and a generated loop nest has no
+such workaround. Fixing it properly---saving the full callee-saved range around
+the streaming region, in both the assembly and the generator, then re-running
+the encoding diff to confirm the two stay bit-identical---was a prerequisite for
+integration rather than cleanup.
+
+Second, work distribution interacts with kernel granularity. A naive
+$M/\text{threads}$ split hands every thread a partial group whenever the
+quotient is not a multiple of the 64-row granularity, and those thread counts
+measured $\approx$45\,\% slower than their neighbours. We first attributed this
+to core heterogeneity; isolating the effects showed partial groups cost nothing
+by themselves, and the cliff persisted after deleting the tail path entirely.
+Distributing in whole row-blocks removes it empirically---+39\,\% at six threads
+and +42\,\% at ten, and 0\,\% at thread counts that were already aligned, which
+is the control that rules out a generic ``aligned is faster'' explanation. We
+record that the underlying mechanism remains \emph{unidentified}: a
+cache-line-aligned base offset is still 11\,\% slower than the allocation start,
+so it is not simply line alignment. The fix is justified by its control, not by
+our explanation.
+
+\begin{table}[t]
+\caption{TEIR-invoked, OpenMP row-parallel, 256\,MiB working set. Every
+configuration verified against the reference before its figure is reported. The
+chip-wide ceiling is 85.50\,GiB/s.}
+\label{tab:threading}
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+& \multicolumn{2}{c}{RMSNorm} & \multicolumn{2}{c}{LayerNorm} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+threads & GiB/s & \% chip & GiB/s & \% chip \\
+\midrule
+1  & 24.67 & 28.8 & 13.52 & 15.8 \\
+2  & 29.30 & 34.2 & 18.14 & 21.2 \\
+4  & 35.87 & 41.9 & 22.82 & 26.6 \\
+8  & 41.07 & 48.0 & 25.03 & 29.2 \\
+16 & 43.40 & 50.7 & 26.51 & 31.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Scaling saturates well before the ceiling---$1.75\times$ and $1.96\times$ at 16
+threads. This is expected rather than suspicious: an independent
+characterization of the same machine finds that a single performance core can
+largely saturate the cluster's SME resource, so the M4 is not well modelled as
+ten cores times single-core throughput.
+
+% =========================================================================
+\section{When the Kernel Is Worth Using}
+\label{sec:crossover}
+
+Every per-call cost this project had quoted was \emph{inferred}, from the
+intercept of a linear fit. That instrument had already failed once: we read
+$t_0\approx1\,\mu$s from it, and later found that about 70\,\% of that was an
+uncached feature-detection syscall in a wrapper, not streaming cost at all. The
+fit had silently absorbed an unrelated bug.
+
+We therefore measured the transition directly, against an identical
+transition-free loop as a control so that loop overhead is subtracted rather
+than attributed. One round trip through streaming mode costs \textbf{9.07\,ns},
+and the SM+ZA form is indistinguishable from SM-only---so managing the ZA state
+is free, and the ZA kernels' problem was never the transition. The per-call
+floor, measured rather than fitted at the smallest possible call and timed in
+batches because a single call sits at clock resolution, is 46--57\,ns depending
+on run, of which the transition is roughly one sixth.
+
+A linear fit is deliberately \emph{not} used here: over these sizes it returns a
+negative intercept, which is the model announcing that it does not apply.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/crossover}
+\caption{Crossover against the scalar reference at $N=512$. The SME kernel's
+time is flat until the group is full, which is what sets the crossover.}
+\label{fig:crossover}
+\end{figure}
+
+\begin{table}[t]
+\caption{RMSNorm at $N=512$, sweeping rows. The SME kernel's time is flat from
+$M=1$ to $M=64$ because that is one group; at $M=256$ it is exactly
+$4\times$ the $M=64$ time.}
+\label{tab:crossover}
+\centering
+\begin{tabular}{rrrrr}
+\toprule
+$M$ & scalar ($\mu$s) & V7 ($\mu$s) & speedup & groups \\
+\midrule
+1   & 0.250   & 7.791  & 0.03$\times$ & 1 \\
+4   & 2.166   & 6.208  & 0.35$\times$ & 1 \\
+8   & 4.375   & 6.084  & 0.72$\times$ & 1 \\
+\textbf{16}  & 8.875 & 6.208 & \textbf{1.43$\times$} & 1 \\
+64  & 66.000  & 6.291  & 10.49$\times$ & 1 \\
+256 & 378.667 & 25.292 & 14.97$\times$ & 4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The crossover against the scalar reference is at $M\approx16$ rows
+(Fig.~\ref{fig:crossover}), and the
+cause is \emph{not} streaming overhead. A 9\,ns transition cannot explain a
+6\,$\mu$s plateau; group granularity explains it exactly. Our winning variants
+process four SVL-row blocks at a time---64 rows here---and a partially filled
+group costs the same as a full one, because unused lanes are predicated off
+rather than skipped. At $M=1$ the kernel performs 64 rows of work to produce one
+row of result.
+
+This also quantifies a design decision previously taken on intuition. The
+alternative to one streaming region per call is one per row, which at $M=128$
+costs $128\times9.07\,\text{ns}\approx1.16\,\mu$s---about twenty times the
+entire per-call floor. The decision is right, and now right by a measured
+margin. But the constant is 9\,ns: \emph{``streaming mode is expensive'' is true
+per row and false per call}, and only the second is what these kernels do.
+
+% =========================================================================
+\section{External Comparison}
+\label{sec:external}
+
+\subsection{Method, and why it is this strict}
+
+An earlier vendor comparison in this project produced four wrong claims at once:
+a ``vendor RMSNorm'' that was our own composition of two primitives, an
+equivalence between a library routine and LayerNorm that ignored $\varepsilon$,
+$\gamma$ and $\beta$, and a headline speed-up that measured a \emph{layout
+mismatch}---the library forced to walk our column-major matrix with a
+cache miss per element. Given its own contiguous layout, that library was in
+fact faster than us. Every rule below exists because of one of those failures.
+
+\emph{Native layout for everyone.} Our kernels are column-major over a strided
+feature axis; the libraries normalize the last, contiguous axis of a row-major
+tensor. Both are efficient in their own layout, so each is measured in its own,
+and the transpose lives only in the correctness checker, never in a timed path.
+This answers \emph{what throughput each implementation achieves given the layout
+it was designed for}, and explicitly not \emph{what it would cost to substitute
+our kernel for a framework operator on the framework's own representation},
+which would have to include boundary conversion.
+
+\emph{Correctness gates the comparison.} Every library output is dumped and
+verified against our float64 reference before its throughput is quoted; all
+agree to $\le$3.1e--6, so the numbers compare implementations of the same
+function. Both drivers dump every benchmarked shape and write a manifest that
+the checker walks, so the set of shapes timed and the set gated cannot drift
+apart.
+
+\emph{One thread, same shapes, same byte convention, pinned versions.}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/baselines}
+\caption{Against general-purpose frameworks at the 256\,MiB shape,
+single-threaded, each implementation in its native layout.}
+\label{fig:baselines}
+\end{figure}
+
+\begin{table}[t]
+\caption{Single-threaded, useful bytes, each implementation in its native
+layout, every shape verified to compute the same function before timing.
+PyTorch~\cite{pytorch} 2.13.0, ExecuTorch~\cite{executorch} 1.4.1 including
+the XNNPACK delegate.}
+\label{tab:external}
+\centering
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+ & \textbf{ours} & torch & torch & ET & ET \\
+shape & \textbf{(V7)} & eager & compile & portable & XNNPACK \\
+\midrule
+\multicolumn{6}{l}{\emph{LayerNorm}} \\
+1024$\times$2048 & \textbf{16.49} & 7.89 & 4.63 & 6.17 & 6.06 \\
+4096$\times$8192 & \textbf{13.54} & 7.35 & 4.44 & 5.92 & 5.93 \\
+\midrule
+\multicolumn{6}{l}{\emph{RMSNorm}} \\
+1024$\times$2048 & \textbf{38.46} & 3.44 & 6.65 & 4.27 & 6.64 \\
+4096$\times$8192 & \textbf{24.65} & 2.77 & 5.90 & 3.26 & 4.19 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{The result is about fusion, not kernel quality}
+
+We are ahead of both baselines at every shape (Fig.~\ref{fig:baselines}):
+LayerNorm by 1.5--2.1$\times$ and
+RMSNorm by 4.2--5.8$\times$. The asymmetry is the interesting part, and it is
+not about our kernels. Profiling what each module dispatches to on CPU shows
+\code{torch.nn.LayerNorm} reaching a single fused kernel, while
+\code{torch.nn.RMSNorm} decomposes into elementwise multiply, power, sum and
+divide---each pass reading and writing the whole tensor. A fused RMSNorm exists
+at the dispatcher level, but CPU eager still decomposes; compiling the module
+fuses it and roughly doubles its throughput.
+
+That produces a clean inversion. Within our implementation RMSNorm is
+1.8--2.3$\times$ faster than LayerNorm, exactly as the traffic ratio says it
+should be. Within PyTorch eager the ordering \emph{flips}, and its LayerNorm is
+$2.7\times$ faster than its RMSNorm---purely because the cheaper operation is
+the one without a fused CPU kernel. \emph{A fused implementation of the
+expensive norm beats a decomposed implementation of the cheap one}, which is the
+clearest argument in this report for why writing the kernel was worth doing.
+
+\subsection{What this comparison does not establish}
+
+Beating two general-purpose frameworks is not being state of the art, and we do
+not claim it. No specialist vendor kernel was measured. We investigated Apple's
+BNNS and obtained no number: on this OS its LayerNorm entry point is a
+deprecated generic constructor we could create but not execute, and there is no
+RMSNorm in BNNS at all---every ``RMS'' symbol in the headers is the optimizer.
+Current Accelerate does expose both operations, but they post-date this OS
+release. We therefore make \emph{no claim} about how our kernels compare with a
+specialist vendor implementation, in either direction. An earlier draft did make
+such a claim, citing a figure from our own error log that had never passed the
+correctness-gated harness; it is withdrawn rather than restated.
+
+Framework margins are also version statements. On the previous stack the same
+harness would have made our RMSNorm margin read 8--13$\times$ instead of
+4.2--5.8$\times$. The kernels did not change; the baseline did. Versions are
+pinned and the run manifests are checked in.
+
+% =========================================================================
+\section{External Validation}
+
+Every figure above comes from our own harness, which is a single-instrument
+story, and a reader is entitled to ask whether the instrument is right. An
+independent characterization of the same architecture agrees wherever the two
+overlap: the streaming vector length matches exactly; their SSVE \code{FMLA}
+throughput of 31\,GFLOP/s matches our independently derived 31.0\,GFLOPS, from a
+different harness built for a different purpose; and their sharply reduced
+bandwidth above $\approx$8\,MiB independently corroborates the footprint
+correction of Sec.~\ref{sec:ceiling}, turning ``our probe produced these
+numbers'' into ``our numbers reproduce an independently observed architectural
+feature''. Their report that SME2 four-register loads reach $\approx$925\,GiB/s
+against $\approx$376 for single-register loads independently motivates V7 as a
+lever aimed at a documented feature rather than opportunistic ISA trickery.
+
+Absolute bandwidth figures should \emph{not} be expected to match, and ours do
+not: their measurements are read-only loads with a specific instruction
+selection, ours a 1R+1W scale-add under the useful-bytes convention. Different
+traffic definitions give different absolute numbers; the qualitative behaviour
+is what agrees, and that is what is claimed.
+
+% =========================================================================
+\section{Threats to Validity}
+
+\textbf{One machine, one OS.} Every number is from a single M4 on one macOS
+release. Nothing here establishes behaviour on other SME implementations; the
+kernels are vector-length-agnostic precisely because SVL is not guaranteed to be
+512 bits.
+
+\textbf{Best-case reporting, now bounded.} Headline figures are minima. Median
+and p10--p90 are reported alongside and agree to $\approx$1\,\%, so the
+best-case figures were typical---but that was an assumption until we measured
+it.
+
+\textbf{No specialist vendor baseline}, so no claim is made in either direction
+(Sec.~\ref{sec:external}).
+
+\textbf{The native-layout comparison answers one question, not two.} It does not
+measure the cost of substituting our kernel into a framework's tensor layout.
+
+\textbf{Framework margins are version statements}, and ExecuTorch figures
+include per-invocation runtime dispatch---honest for an on-device comparison,
+but not a pure kernel number.
+
+\textbf{Single-threaded except where stated.} The frameworks parallelize by
+default; our threaded results are reported separately against a chip ceiling.
+
+\textbf{Group granularity distorts small shapes.} Below 64 rows the kernel does
+a full group's work regardless, so small-$M$ figures reflect that rather than
+bandwidth.
+
+\textbf{One mechanism remains unidentified}: the base-offset sensitivity behind
+the threading cliff (Sec.~\ref{sec:jit}). The mitigation is justified by a
+control, not by an explanation.
+
+% =========================================================================
+\section{Related Work}
+
+LayerNorm~\cite{ba2016layernorm} and RMSNorm~\cite{zhang2019rmsnorm} define the
+operators; the latter reports comparable task quality at reduced cost, a
+modelling claim our kernel-level measurements neither support nor contradict.
+The roofline model~\cite{williams2009roofline} frames the analysis, and our
+central methodological correction is essentially a statement that the roofline's
+memory ceiling is itself a function of working-set size, which is standard in
+principle and easy to violate in practice. Production CPU implementations of
+LayerNorm commonly use Welford's recurrence to escape the naive formulation;
+our measurements agree that Welford is far better than naive while being
+comparable to, not dominated by, the centred two-pass---and slower on SIMD for a
+reason specific to vectorization. Arm's architecture reference
+manual~\cite{armarm} is the authority for SME/SSVE encodings, and we verified
+every encoder against toolchain-assembled golden words rather than against
+recollection.
+
+% =========================================================================
+\section{Conclusion}
+
+We took both Transformer normalization primitives from a scalar reference to
+JIT-generated SME kernels invoked through a compiler runtime, verifying each
+step against a float64 oracle. The best kernels reach $\approx$33\,\% of a
+footprint-matched ceiling on useful bytes ($\approx$50\,\% on moved bytes) at
+cache-resident shapes and $\approx$42\,\% at DRAM, and beat two general-purpose
+frameworks by 1.5--5.8$\times$.
+
+The more useful outcomes are the negative and corrective ones. The ZA tile is
+the wrong tool for a bandwidth-dominated horizontal reduction, and it took a
+measurement---twice, since our first reasoned skip rested on an untested
+factor---to say so. SME2 helps, but not for either reason we predicted. The
+streaming transition is 9\,ns rather than the dominant per-call cost, and the
+real small-tensor penalty is a granularity decision of our own making. And our
+own roofline was mis-stated for five sprints in a way that inflated our results
+by about 2$\times$.
+
+The pattern behind every one of those errors is the same, and it is the finding
+we would carry to the next project: each came from reasoning about a mechanism
+instead of measuring it. The claims that survived contact were the ones written
+down as a prediction \emph{before} the measurement, which is also the only
+reason the errors were caught at all.
+
+Scope note: SME was course material; SME2-specific multi-vector optimization was
+not, and was reached here by detecting the hardware's actual feature set and
+then testing a hypothesis against it.
+
+% =========================================================================
+\appendices
+
+\section{Reproducibility}
+
+\begin{verbatim}
+cmake --preset release-submission
+cmake --build build-submission -j
+./build-submission/src/norm/main_norm
+\end{verbatim}
+
+The benchmark prints its own provenance header---git commit (marked
+\code{-dirty} on a modified tree), build type, compiler, OS, CPU, detected
+\code{FEAT\_SME}/\code{FEAT\_SME2}, streaming vector length, dispatch target,
+thread count---so no table can be separated from the conditions that produced
+it. The captured output behind every figure and table here is checked into the
+repository, as are the pinned external-baseline environment and the run
+manifests. Correctness runs with \code{ctest}; the norm suite is 137 cases and
+780{,}264 assertions, and passes cleanly under AddressSanitizer and
+UndefinedBehaviorSanitizer. Continuous integration builds every kernel and runs
+the host-portable tests, but the runners have no SME: green CI cannot execute a
+single SME kernel, and SME coverage is local to the target machine.
+
+\section*{Acknowledgment}
+
+We thank the Machine Learning Compilers Lab at Friedrich-Schiller-Universit\"at
+Jena. Generative AI assistance was used for implementation support, for review
+of our claims and measurements against the hardware, and for drafting text that
+we subsequently rewrote; it is disclosed in full in the project repository.
+
+\begin{thebibliography}{9}
+
+\bibitem{ba2016layernorm}
+J.~L. Ba, J.~R. Kiros, and G.~E. Hinton, ``Layer normalization,''
+\emph{arXiv:1607.06450}, 2016.
+
+\bibitem{zhang2019rmsnorm}
+B.~Zhang and R.~Sennrich, ``Root mean square layer normalization,'' in
+\emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2019.
+
+\bibitem{vaswani2017attention}
+A.~Vaswani \emph{et al.}, ``Attention is all you need,'' in
+\emph{Advances in Neural Information Processing Systems (NIPS)}, 2017.
+
+\bibitem{touvron2023llama}
+H.~Touvron \emph{et al.}, ``LLaMA: Open and efficient foundation language
+models,'' \emph{arXiv:2302.13971}, 2023.
+
+\bibitem{williams2009roofline}
+S.~Williams, A.~Waterman, and D.~Patterson, ``Roofline: An insightful visual
+performance model for multicore architectures,'' \emph{Communications of the
+ACM}, vol.~52, no.~4, pp.~65--76, 2009.
+
+\bibitem{armarm}
+Arm Ltd., \emph{Arm Architecture Reference Manual for A-profile architecture},
+SME and Streaming SVE chapters.
+
+\bibitem{pytorch}
+A.~Paszke \emph{et al.}, ``PyTorch: An imperative style, high-performance deep
+learning library,'' in \emph{NeurIPS}, 2019.
+
+\bibitem{executorch}
+Meta AI, ``ExecuTorch: On-device inference runtime,''
+\url{https://pytorch.org/executorch/}.
+
+\bibitem{mccalpin1995stream}
+J.~D. McCalpin, ``Memory bandwidth and machine balance in current high
+performance computers,'' \emph{IEEE TCCA Newsletter}, pp.~19--25, 1995.
+
+\end{thebibliography}
+
+\end{document}
