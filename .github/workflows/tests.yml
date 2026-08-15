@@ -6,45 +6,88 @@ on:
   pull_request:
     branches: [ main ]
 
+# WHAT THIS WORKFLOW CAN AND CANNOT PROVE
+#
+# GitHub's Apple Silicon runners are M1/M2: they have no SME. So this workflow
+# proves that everything BUILDS (including the SME/SME2 assembly, which only
+# needs an assembler that knows the encodings) and that every host-portable
+# test PASSES. It cannot execute a single SME kernel.
+#
+# SME coverage is therefore LOCAL-ONLY, on the M4:
+#
+#     cmake --preset release && cmake --build build -j
+#     ./build/src/norm/test_norm          # 137 cases, ~780k assertions
+#     ./build/src/norm/main_norm          # benchmarks + provenance header
+#
+# Green CI does not mean the SME path works. Run the suite on the M4 before
+# merging anything that touches a kernel, the JIT, or the TEIR integration.
+
 jobs:
+  # ── Correctness ────────────────────────────────────────────────────────────
   test-apple-silicon:
-    # Runs on GitHub's Apple Silicon runners (M1/M2 — no SME).
-    # All tests build; SME-executing sections are guarded with
-    # cpu_supports_sme() and skip gracefully on this runner.
-    # Run the full suite locally on M4 before merging SME/JIT work.
+    name: Build + tests (M1/M2 runner, no SME)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure CMake
-        run: |
-          mkdir build && cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Debug
+      - name: Configure (release preset)
+        # Uses CMakePresets.json rather than a hand-written cmake line, so CI
+        # exercises the same configuration contributors use — and so an empty
+        # CMAKE_BUILD_TYPE can never slip through (that defect once had the C++
+        # probes compiled at -O0 against optimized assembly; see README).
+        run: cmake --preset release
 
       - name: Build
-        run: cmake --build build
+        run: cmake --build build -j
 
-      # ── Host-portable (no SME needed) ─────────────────────────────────────
-      - name: Run Week 1 Tests
+      # ── Host-portable: these EXECUTE real work on this runner ──────────────
+      - name: Week 1 tests
         run: ./build/src/week1/test_week1
 
-      - name: Run Week 2 Tests
+      - name: Week 2 tests
         run: ./build/src/week2/test_week2
 
-      - name: Run Norm Tests
+      - name: Norm tests
+        # test_norm is in the host-portable group deliberately: the reference,
+        # the Sprint-7a numerical-stability cases and the Sprint-8 dispatch
+        # cases all run here. The dispatch tests are the important ones — they
+        # exercise the SCALAR FALLBACK, which is the path taken precisely when
+        # SME is absent, so this runner is the only place it is covered.
         run: ./build/src/norm/test_norm
 
-      # ── SME-guarded (SME sections skip on M1/M2, run fully on M4) ─────────
+      # ── SME-guarded: every SME section SKIPS here; they run only on M4 ─────
       # --allow-running-no-tests suppresses Catch2 exit code 4, which fires
-      # when every test case is skipped (zero assertions executed).
-      - name: Run Week 3 Tests
+      # when every case in a binary is skipped (zero assertions executed).
+      - name: Week 3 tests (SME sections skipped)
         run: ./build/src/week3/test_week3 --allow-running-no-tests
 
-      - name: Run Week 5 Tests
+      - name: Week 5 tests (SME sections skipped)
         run: ./build/src/week5/test_week5 --allow-running-no-tests
 
-      - name: Run Week 6 Tests
+      - name: Week 6 tests (SME sections skipped)
         run: ./build/src/week6/test_week6 --allow-running-no-tests
 
-      - name: Run Week 7 Tests
+      - name: Week 7 tests (SME sections skipped)
         run: ./build/src/week7/test_week7 --allow-running-no-tests
+
+  # ── Sanitizers ─────────────────────────────────────────────────────────────
+  sanitizers:
+    name: Sanitizers (ASan + UBSan, norm module)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (debug preset — ASan + UBSan)
+        run: cmake --preset debug
+
+      - name: Build
+        run: cmake --build build-debug -j
+
+      - name: Norm tests under sanitizers
+        # CLAUDE.md §7 asks for sanitizer runs when a layout bug is suspected;
+        # this makes it continuous rather than remembered. Cheap on this runner
+        # because the SME sections skip. The full suite (including every SME
+        # kernel) runs clean under the same preset on the M4.
+        run: ./build-debug/src/norm/test_norm
+        env:
+          ASAN_OPTIONS: detect_leaks=0
