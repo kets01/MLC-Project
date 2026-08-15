@@ -14,8 +14,22 @@ pre-existing defects that the integration exposed. Each is recorded below with
 how it was found, because in every case the *test that should have caught it*
 was structurally incapable of doing so.
 
+.. _d8-d15-canonical:
+
 Prerequisite — the d8–d15 AAPCS64 violation
 --------------------------------------------
+
+.. admonition:: The canonical account of this defect
+   :class: note
+
+   This bug recurs across Sprints 3–8 and **this section is the single full
+   explanation of it**; later sprints reference it rather than restate it.
+   In brief, for readers arriving from elsewhere: AArch64's procedure-call
+   standard makes the low 64 bits of ``v8–v15`` (i.e. ``d8–d15``)
+   callee-saved, so a kernel that clobbers them without saving/restoring is
+   **ABI-nonconforming even if a standalone benchmark appears to work**. It
+   was found and fixed here; the concerning part is how long it survived, which
+   is why the history is kept rather than tidied away.
 
 Both frozen V6 kernels saved and restored only ``d8``, while
 ``smstart``/``smstop`` clobber the whole callee-saved ``d8–d15`` range (they
