@@ -1827,8 +1827,15 @@ int main() {
     std::cout <<
         "Byte convention: all GiB/s count USEFUL bytes = 1 read + 1 write per\n"
         "element (the algorithm's minimum), for kernels AND probes alike.\n"
-        "The V0-V3 kernels as implemented move 2R+1W (both passes read x);\n"
-        "their moved-bytes figure is 1.5x the printed one.\n\n";
+        "\n"
+        "MOVED bytes differ PER NORM, and the two must not be conflated:\n"
+        "  RMSNorm   1 reduction stage  (sum of squares) + output generation\n"
+        "            -> 2 input traversals, 2R+1W, moved = 1.5x the printed figure\n"
+        "  LayerNorm 2 reduction stages (mean, then variance) + output generation\n"
+        "            -> 3 input traversals, 3R+1W, moved = 2.0x the printed figure\n"
+        "The 1.33x traffic ratio between them is structural and is the main reason\n"
+        "RMSNorm outruns LayerNorm here.  (An earlier version of this header quoted\n"
+        "2R+1W without saying which norm, which reads as if it applied to both.)\n\n";
 
     const bool have_sme = cpu_supports_sme();
     if (!have_sme)
