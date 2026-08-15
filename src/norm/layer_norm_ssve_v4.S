@@ -1,14 +1,17 @@
-// layer_norm_ssve_v4.S — LayerNorm SSVE Sprint 2c ablation V4
+// layer_norm_ssve_v4.S — LayerNorm V4: four accumulator chains per pass.
 //
-// Change vs V2: four independent accumulator chains in BOTH reduction passes
-// (pass 1 = mean, pass 2 = variance) to expose instruction-level parallelism.
-// A 4-column main loop issues loads for columns j, j+1, j+2, j+3 in each
-// iteration and dispatches them to four separate FADD/FMLA chains (z8/z16/z17/z18
-// for mean, z9/z10/z11/z12 for variance).  After each pass the four partial
-// sums are folded into one register before the final multiply.
-// Pass 3 (normalize + scale + shift) is unchanged from V2.
+// Both reduction passes (mean, variance) run four independent chains over a
+// 4-column main loop, folded back into one register before the final multiply:
+//   mean:     z8  z16 z17 z18
+//   variance: z9  z10 z11 z12
+// Pass 3 is unchanged from V2.  Measured +26-28%, transferring cleanly from
+// RMSNorm's +27-32% — accumulating two statistics does not blunt the lever.
 //
-// C signature: same as layer_norm_ssve_v2.
+// x8 and x12 (= x8 + stride) each advance by 2*stride per pair; x13 holds
+// 2*stride_a.
+//
+// C signature: identical to layer_norm_ssve (layer_norm_ssve.S).
+//   (a, b, gamma, beta, m, n, ld_a, ld_b) in x0-x7, eps in s0.
 
 #ifdef __APPLE__
     #define SYM(s) _##s
@@ -50,10 +53,6 @@ SYM(layer_norm_ssve_v4):
     str  d13,      [sp, #104]
     str  d14,      [sp, #112]
     str  d15,      [sp, #120]
-                                // (Sprint 6: the Sprint-5 d8-d15 AAPCS64 fix,
-                                // extended from the two V6 winners to every
-                                // kernel -- smstart/smstop zero all of d8-d15,
-                                // so a caller's d9-d15 were silently destroyed)
 
     mov   x19, x0
     mov   x20, x1
@@ -65,9 +64,6 @@ SYM(layer_norm_ssve_v4):
     lsl   x26, x7, #2
     fmov  s8, s0
     str   s0, [sp, #128]            // dedicated eps stash, stored BEFORE smstart
-                                    // (streaming-mode entry clobbers D8 too, not
-                                    // just D9-D15 — memory survives smstart, no
-                                    // register does; verified empirically)
 
     cbz   x23, .Ldone_v4
 

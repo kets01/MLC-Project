@@ -1,16 +1,14 @@
-// layer_norm_ssve_v5.S — LayerNorm SSVE Sprint 2c ablation V5
+// layer_norm_ssve_v5.S — LayerNorm V5: V4 with software-pipelined loads.
 //
-// Change vs V4: software-pipelined loads in both reduction passes.
-// Within each pass a group of four columns (z0/z24/z25/z26) is preloaded
-// before the steady-state loop; the loop issues the next four loads
-// (z27/z28/z29/z30) while the FP compute for the current group executes.
-// After the FP ops, the B group is moved into A positions via four MOV
-// z.d instructions before the next iteration.  The expected throughput gain
-// on an M4 out-of-order core is ~0 % because the hardware already reorders
-// memory and FP operations.  The ablation is included for completeness.
-// Pass 3 is unchanged from V2.
+// Each reduction pass preloads a group of four columns, then issues the next
+// four (z27-z30) while the current group's FP work runs, moving B into A with
+// four MOV z.d before the next iteration.  Pass 3 is unchanged from V2.
 //
-// C signature: same as layer_norm_ssve_v2.
+// Expected and measured ~0: the M4 already reorders memory against FP work
+// once V4 has broken the dependency chain.  Kept as the ablation row.
+//
+// C signature: identical to layer_norm_ssve (layer_norm_ssve.S).
+//   (a, b, gamma, beta, m, n, ld_a, ld_b) in x0-x7, eps in s0.
 
 #ifdef __APPLE__
     #define SYM(s) _##s
@@ -36,10 +34,6 @@ SYM(layer_norm_ssve_v5):
     str  d13,      [sp, #104]
     str  d14,      [sp, #112]
     str  d15,      [sp, #120]
-                                // (Sprint 6: the Sprint-5 d8-d15 AAPCS64 fix,
-                                // extended from the two V6 winners to every
-                                // kernel -- smstart/smstop zero all of d8-d15,
-                                // so a caller's d9-d15 were silently destroyed)
 
     mov   x19, x0
     mov   x20, x1
@@ -51,9 +45,6 @@ SYM(layer_norm_ssve_v5):
     lsl   x26, x7, #2
     fmov  s8, s0
     str   s0, [sp, #128]            // dedicated eps stash, stored BEFORE smstart
-                                    // (streaming-mode entry clobbers D8 too, not
-                                    // just D9-D15 — memory survives smstart, no
-                                    // register does; verified empirically)
 
     cbz   x23, .Ldone_v5
 

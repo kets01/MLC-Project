@@ -1,13 +1,10 @@
-# Sprint 9 — pinned baseline environment.
-#
-# These are the EXACT versions that produced the external-baseline numbers in
-# the report (docs/source/weeks/norm_sprint7_5.rst).  They are pinned rather
-# than floated because a "N x faster than library X" margin is a statement
-# about a specific version on a specific day, not a property of our kernels:
-# on the previous stack (torch 2.4.0 / executorch 0.3.0) the same harness gave
-# torch.compile RMSNorm 3.02 GiB/s against 5.90 here, which would have made our
-# reported margin 8-13x instead of 4.2-5.8x.  The kernels did not change; the
-# baseline did.
+# Pinned baseline environment: the EXACT versions behind the external-baseline
+# numbers in the report.  Pinned rather than floated because an "N x faster
+# than library X" margin is a statement about a specific version, not a
+# property of our kernels — on torch 2.4.0 / executorch 0.3.0 the same harness
+# gave torch.compile RMSNorm 3.02 GiB/s against 5.90 here, which would have
+# made the reported margin 8-13x instead of 4.2-5.8x.  The kernels did not
+# change; the baseline did.
 #
 # REQUIRES PYTHON >= 3.10.  ExecuTorch's XNNPACK partitioner cannot be imported
 # on 3.9 (`TypeError: 'staticmethod' object is not callable` — staticmethod

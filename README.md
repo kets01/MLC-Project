@@ -16,7 +16,9 @@ This repository contains the implementation for the Machine Learning Compiler La
 
 ## Requirements
 * **Compiler:** GCC/Clang with AArch64 support.
-* **Build System:** CMake 3.10+ (3.19+ to use the presets below).
+* **Build System:** CMake 3.10+ to configure manually; **CMake 3.21+** to use
+  the presets below (`CMakePresets.json` uses schema version 3, which CMake
+  introduced in 3.21).
 * **Testing Framework:** Catch2 (integrated via FetchContent).
 * **Documentation:** Sphinx with `furo`.
 * **SME kernels:** run on SME hardware (Apple M4). They *build* anywhere; the

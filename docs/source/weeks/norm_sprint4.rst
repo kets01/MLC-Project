@@ -61,7 +61,7 @@ What the exactness found: two latent InstGen bugs
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Preparing the golden words surfaced two week-6 encoder bugs that every
-behavioral test had passed over (full detail in ``sprint4_errors.md``):
+behavioral test had passed over (full detail in ``docs/dev-notes/sprint-errors/sprint4_errors.md``):
 
 - ``sve_ptrue_all(fp32)`` emitted ``PTRUE P.B`` (size bits 00), not the
   ``PTRUE P.S`` its own comment promised — functionally masked because an
@@ -166,6 +166,16 @@ near that regime.  The parity conclusion is untouched — it rests on the hand-v
 Parity within noise at every shape — exactly what a word-identical kernel
 must show once the call paths are equalized.  The mmap'd JIT page vs the
 executable's text section makes no measurable difference.
+
+.. note::
+
+   **What this section measures today.**  The table above is the Sprint-4
+   measurement, when the generator emitted V6.  ``main_norm`` now asks for
+   ``isa_t::automatic`` — what a real caller gets — so on an SME2 host it emits
+   **V7** and benchmarks it against the hand-written **V7**.  Until that was
+   fixed the hand-written side stayed V6 regardless, which showed up as a
+   ~10 % "JIT speed-up" in the DRAM regime that was really V7 vs V6.  The
+   parity conclusion is unchanged: word-identical code, parity within noise.
 
 Sprint 4 status
 ~~~~~~~~~~~~~~~

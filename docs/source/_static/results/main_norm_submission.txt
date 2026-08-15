@@ -15,7 +15,7 @@ RMSNorm outruns LayerNorm here.  (An earlier version of this header quoted
 ================================================================================================
 RUN PROVENANCE — the conditions every number below was produced under
 ================================================================================================
-  git commit        : d947b7e-dirty
+  git commit        : 98c5e79
   build type        : Release
   compiler          : AppleClang 16.0.0.16000026
   C++ standard      : 201703
@@ -31,9 +31,9 @@ RUN PROVENANCE — the conditions every number below was produced under
 ================================================================================================
 
 Measuring ceilings (128 MiB arrays, best-of-10)...
-  single-core NEON  (compiler-vectorized scale-add) :   79.57 GiB/s
-  single-core SSVE  (streaming LD1W/ST1W probe)      :   59.47 GiB/s  <- kernel roofline
-  chip-wide         (10 threads, NEON)              :   85.50 GiB/s  <- Sprint-5 threading target
+  single-core NEON  (compiler-vectorized scale-add) :   77.71 GiB/s
+  single-core SSVE  (streaming LD1W/ST1W probe)      :   59.03 GiB/s  <- kernel roofline
+  chip-wide         (10 threads, NEON)              :   84.30 GiB/s  <- Sprint-5 threading target
 
 
 ==============================================================================
@@ -46,25 +46,25 @@ Sub-MiB rows are overhead-contaminated (a pass is < 1 us, so SMSTART and
 the timing calls are a visible share) — not pure bandwidth.  See 7b.
 
   working set         NEON        SSVE     SSVE/NEON
-  64 KiB            293.44      104.51         0.356
-  128 KiB           225.64       97.66         0.433
-  256 KiB           162.76      101.05         0.621
-  512 KiB           126.01      117.21         0.930
-  1 MiB             125.34      116.04         0.926
-  2 MiB             124.34      116.03         0.933
-  4 MiB             124.01      115.88         0.934
-  8 MiB             123.84      115.67         0.934
-  16 MiB            118.67      115.35         0.972
-  32 MiB            100.52       96.13         0.956
-  64 MiB             85.01       63.11         0.742
-  128 MiB            81.27       60.17         0.740
-  256 MiB            79.28       59.45         0.750
+  64 KiB            244.14      104.69         0.429
+  128 KiB           225.22       97.66         0.434
+  256 KiB           158.43      117.21         0.740
+  512 KiB           110.57      117.21         1.060
+  1 MiB             109.53      116.04         1.059
+  2 MiB             109.27      116.03         1.062
+  4 MiB             108.76      115.74         1.064
+  8 MiB             108.82      115.60         1.062
+  16 MiB            105.57      115.60         1.095
+  32 MiB             92.26       91.25         0.989
+  64 MiB             82.22       62.16         0.756
+  128 MiB            79.35       59.46         0.749
+  256 MiB            78.08       58.78         0.753
 
 Denominator restatement for the consolidated-ablation shapes:
   shape                              footprint  old (DRAM)footprint-matched
-  128x64    (per-call overhead)         0.06 MiB       59.47        104.51
-  1024x2048 (cache-assisted)           16.00 MiB       59.47        115.35
-  4096x8192 (true DRAM)               256.00 MiB       59.47         59.45
+  128x64    (per-call overhead)         0.06 MiB       59.03        104.69
+  1024x2048 (cache-assisted)           16.00 MiB       59.03        115.60
+  4096x8192 (true DRAM)               256.00 MiB       59.03         58.78
 
 
 ================================================================================================
@@ -147,38 +147,38 @@ the control: identical branch structure and counter, transition removed, so
 the difference is the transition rather than the loop.
 
   variant                           ns/iteration       minus control
-  empty loop (control)                     0.226                   -
-  smstart + smstop (SM+ZA)                 9.292               9.066
-  smstart sm + smstop sm (SM only)         9.298               9.072
+  empty loop (control)                     0.254                   -
+  smstart + smstop (SM+ZA)                 9.289               9.035
+  smstart sm + smstop sm (SM only)         9.292               9.038
 
-Two results here.  First, ONE round trip through streaming mode costs about 9.1 ns.
-Second, SM+ZA and SM-only are the same to within noise (9.066 vs 9.072), so managing
+Two results here.  First, ONE round trip through streaming mode costs about 9.0 ns.
+Second, SM+ZA and SM-only are the same to within noise (9.035 vs 9.038), so managing
 PSTATE.ZA is free — the ZA kernels' problem was never the transition.
 
 The per-call floor (RMSNorm V7 at its smallest possible call, M=1, N=1):
 
-  measured floor                     :     57.4 ns/call
-  of which the streaming transition  :      9.1 ns  (15.8 % of the floor)
-  everything else                    :     48.3 ns
+  measured floor                     :     45.8 ns/call
+  of which the streaming transition  :      9.0 ns  (19.7 % of the floor)
+  everything else                    :     36.8 ns
 
 Note this is measured, not fitted. A linear fit over these sizes returns a
 NEGATIVE intercept because the sweep crosses cache levels, so the model does
 not hold — which is precisely how the inferred t0 went wrong before.
 
 The transition is about a FIFTH of the floor — real, but not the thing that
-makes a small call expensive. The other ~48 ns is prologue/epilogue (this project
+makes a small call expensive. The other ~37 ns is prologue/epilogue (this project
 saves d8-d15 on every call — the AAPCS64 fix from Sprints 5/6), pointer
 setup, and the inv_rms serialization.
 
 Worth comparing against the inferred figures this replaces: Sprint 2a read
 t0 ~ 1000 ns from a fit and Sprint 4 corrected it to ~400 ns after removing a
-syscall. The measured floor is 57 ns. Those are not the same quantity — the fits
+syscall. The measured floor is 46 ns. Those are not the same quantity — the fits
 were at M=128, which pays more setup than this M=1 minimum — but the gap is
 large enough to say the intercept was never a clean read of fixed cost.
 
 What the 'one streaming region per call' decision (context.md §8) is worth,
 quantified: the alternative costs one transition per row. At M=128 that is
-128 x 9.1 ns = 1.16 us/call against a single 9.1 ns — about 20x the entire
+128 x 9.0 ns = 1.16 us/call against a single 9.0 ns — about 25x the entire
 per-call floor. So the decision is right, and now it is right by a measured
 margin rather than by assumption. But the constant itself is 9 ns: 'streaming
 mode is expensive' is true per ROW and false per CALL, and only the second of
@@ -188,13 +188,13 @@ Crossover: at what size does the SME kernel beat the scalar reference?
 (RMSNorm, N=512 — a realistic transformer feature dimension — sweeping rows)
 
   M rows       scalar us         V7 us     speedup  groups touched
-  1                0.250         7.791        0.03x              1
-  2                1.041         6.500        0.16x              1
-  4                2.166         6.208        0.35x              1
-  8                4.375         6.084        0.72x              1
-  16               8.875         6.208        1.43x              1
-  64              66.000         6.291       10.49x              1
-  256            378.667        25.292       14.97x              4
+  1                0.250         9.291        0.03x              1
+  2                1.166         6.708        0.17x              1
+  4                2.416         6.291        0.38x              1
+  8                4.916         6.209        0.79x              1
+  16               9.916         6.250        1.59x              1
+  64              74.833         6.166       12.14x              1
+  256            422.208        25.250       16.72x              4
 
 The crossover is at M ~ 16 rows, and the reason is NOT streaming overhead.
 Look at the last column: V7's time is flat from M=1 to M=64 because that is
@@ -216,9 +216,9 @@ SPRINT 6 - CONSOLIDATED ABLATION (scalar -> SSVE levers -> ZA -> JIT -> TEIR+Ope
 ==========================================================================================================
 Bytes: USEFUL (1 read + 1 write per element) for every row, kernels and probes alike.
 %1core is against the ceiling measured AT EACH SHAPE'S FOOTPRINT (see the curve
-above), not the single 59.47 GiB/s DRAM figure — a cache-resident kernel never faces
+above), not the single 59.03 GiB/s DRAM figure — a cache-resident kernel never faces
 DRAM bandwidth, so dividing by it credits the kernel for a constraint it never met.
-Chip-wide ceiling 85.50 GiB/s (threading target).
+Chip-wide ceiling 84.30 GiB/s (threading target).
 Every row is verified against the C++ reference before its GiB/s is reported;
 max|dev| is the largest absolute deviation observed on that row's output.
 JIT emission on this host: SME2 (V7 multi-vector) — the feature-dependent emission decision, made at generate() time.
@@ -226,89 +226,89 @@ JIT emission on this host: SME2 (V7 multi-vector) — the feature-dependent emis
 Shape M=128 N=64  (0.1 MiB working set)
 stage                 lever                             GiB/s   median       p10-p90   %1core   %chip  vs scalar    max|dev|   ok
 ------------------------------------------------------------------------------------------------------------------------------
-  regime: small / per-call-overhead regime   |  ceiling at this footprint: 104.51 GiB/s  (DRAM constant would have been 59.47)
+  regime: small / per-call-overhead regime   |  ceiling at this footprint: 104.69 GiB/s  (DRAM constant would have been 59.03)
 RMSNorm (single-pass, 2R+1W)
-scalar reference      C++ oracle, double accum           6.66     6.60       6.6-6.6     6.4%    7.8%       1.0x    0.00e+00  yes
-V0 SSVE               VLA streaming, 1 accumulator      29.90    28.72     28.2-29.3    28.6%   35.0%       4.5x    4.77e-07  yes
-V1                    FRSQRTE+NR replaces FSQRT/FDIV    29.90    29.29     28.7-29.3    28.6%   35.0%       4.5x    1.62e-05  yes
-V2                    + pre-computed 1/N                29.90    29.29     28.7-29.3    28.6%   35.0%       4.5x    1.62e-05  yes
-V3                    + 2x column unroll                30.52    29.89     29.3-29.9    29.2%   35.7%       4.6x    1.62e-05  yes
-V4                    + 4 accumulator chains (ILP)      38.56    36.61     35.7-37.6    36.9%   45.1%       5.8x    1.61e-05  yes
-V5                    + software-pipelined loads        37.56    36.61     35.7-37.6    35.9%   43.9%       5.6x    1.61e-05  yes
-V6 (incumbent)        4-row-block contiguity            38.56    37.56     36.6-37.6    36.9%   45.1%       5.8x    1.62e-05  yes
-V7 (SME2)             4-vector LD1W/ST1W, same traffic    38.56    37.56     36.6-37.6    36.9%   45.1%       5.8x    1.62e-05  yes
-ZA residency          ZA staging, 1R+1W                 11.81    11.63     11.4-11.7    11.3%   13.8%       1.8x    1.62e-05  yes
-JIT (auto ISA)        emitted: V7 on SME2, else V6      38.56    37.56     36.6-37.6    36.9%   45.1%       5.8x    1.62e-05  yes
+scalar reference      C++ oracle, double accum           5.93     5.88       5.9-5.9     5.7%    7.0%       1.0x    0.00e+00  yes
+V0 SSVE               VLA streaming, 1 accumulator      30.52    28.72     28.7-29.3    29.1%   36.2%       5.1x    4.77e-07  yes
+V1                    FRSQRTE+NR replaces FSQRT/FDIV    29.90    29.30     28.7-29.3    28.6%   35.5%       5.0x    1.62e-05  yes
+V2                    + pre-computed 1/N                29.90    29.30     28.7-29.3    28.6%   35.5%       5.0x    1.62e-05  yes
+V3                    + 2x column unroll                30.52    29.89     29.3-29.9    29.1%   36.2%       5.1x    1.62e-05  yes
+V4                    + 4 accumulator chains (ILP)      38.56    36.64     36.6-37.6    36.8%   45.7%       6.5x    1.61e-05  yes
+V5                    + software-pipelined loads        37.56    36.64     36.6-37.6    35.9%   44.6%       6.3x    1.61e-05  yes
+V6 (incumbent)        4-row-block contiguity            38.56    37.56     37.6-37.6    36.8%   45.7%       6.5x    1.62e-05  yes
+V7 (SME2)             4-vector LD1W/ST1W, same traffic    39.58    37.56     37.6-37.6    37.8%   47.0%       6.7x    1.62e-05  yes
+ZA residency          ZA staging, 1R+1W                 12.11    11.72     11.6-11.7    11.6%   14.4%       2.0x    1.62e-05  yes
+JIT (auto ISA)        emitted: V7 on SME2, else V6      39.58    37.56     37.6-37.6    37.8%   47.0%       6.7x    1.62e-05  yes
 LayerNorm (two-pass, 3R+1W)
-scalar reference      C++ oracle, double accum           4.09     4.07       4.1-4.1     3.9%    4.8%       1.0x    0.00e+00  yes
-V0 SSVE               VLA streaming, 1 accumulator      12.74    12.52     12.4-12.6    12.2%   14.9%       3.1x    5.96e-07  yes
-V1                    FRSQRTE+NR replaces FSQRT/FDIV    12.85    12.52     12.4-12.6    12.3%   15.0%       3.1x    1.24e-05  yes
-V2                    + pre-computed 1/N (2 FDIVs)      14.36    14.09     14.0-14.2    13.7%   16.8%       3.5x    1.24e-05  yes
-V4                    + 4 accumulator chains (ILP)      16.10    15.75     15.8-15.9    15.4%   18.8%       3.9x    1.24e-05  yes
-V5                    + software-pipelined loads        16.10    15.75     15.8-15.9    15.4%   18.8%       3.9x    1.24e-05  yes
-V6 (incumbent)        4-row-block contiguity            16.46    16.28     16.1-16.3    15.7%   19.3%       4.0x    1.24e-05  yes
-V7 (SME2)             4-vector LD1W/ST1W, same traffic    16.65    16.28     16.1-16.3    15.9%   19.5%       4.1x    1.24e-05  yes
-Welford               online single-pass, 2R+1W         12.41    12.21     12.2-12.3    11.9%   14.5%       3.0x    1.24e-05  yes
-ZA residency          ZA staging, 1R+1W                  5.31     5.27       5.2-5.3     5.1%    6.2%       1.3x    1.24e-05  yes
-JIT (auto ISA)        emitted: V7 on SME2, else V6      16.64    16.28     16.1-16.3    15.9%   19.5%       4.1x    1.24e-05  yes
+scalar reference      C++ oracle, double accum           3.56     3.54       3.5-3.5     3.4%    4.2%       1.0x    0.00e+00  yes
+V0 SSVE               VLA streaming, 1 accumulator      12.74    12.52     12.5-12.6    12.2%   15.1%       3.6x    5.96e-07  yes
+V1                    FRSQRTE+NR replaces FSQRT/FDIV    12.85    12.52     12.5-12.6    12.3%   15.2%       3.6x    1.24e-05  yes
+V2                    + pre-computed 1/N (2 FDIVs)      14.36    14.22     14.1-14.2    13.7%   17.0%       4.0x    1.24e-05  yes
+V4                    + 4 accumulator chains (ILP)      16.10    15.92     15.8-15.9    15.4%   19.1%       4.5x    1.24e-05  yes
+V5                    + software-pipelined loads        16.10    15.92     15.8-15.9    15.4%   19.1%       4.5x    1.24e-05  yes
+V6 (incumbent)        4-row-block contiguity            17.03    16.28     16.3-16.3    16.3%   20.2%       4.8x    1.24e-05  yes
+V7 (SME2)             4-vector LD1W/ST1W, same traffic    16.84    16.28     16.3-16.3    16.1%   20.0%       4.7x    1.24e-05  yes
+Welford               online single-pass, 2R+1W         12.63    12.31     12.2-12.3    12.1%   15.0%       3.5x    1.24e-05  yes
+ZA residency          ZA staging, 1R+1W                  5.31     5.29       5.3-5.3     5.1%    6.3%       1.5x    1.24e-05  yes
+JIT (auto ISA)        emitted: V7 on SME2, else V6      16.64    16.28     16.3-16.3    15.9%   19.7%       4.7x    1.24e-05  yes
 
 Shape M=1024 N=2048  (16.0 MiB working set)
 stage                 lever                             GiB/s   median       p10-p90   %1core   %chip  vs scalar    max|dev|   ok
 ------------------------------------------------------------------------------------------------------------------------------
-  regime: 16 MiB, cache-assisted   |  ceiling at this footprint: 115.35 GiB/s  (DRAM constant would have been 59.47)
+  regime: 16 MiB, cache-assisted   |  ceiling at this footprint: 115.60 GiB/s  (DRAM constant would have been 59.03)
 RMSNorm (single-pass, 2R+1W)
-scalar reference      C++ oracle, double accum           1.03     1.03       1.0-1.0     0.9%    1.2%       1.0x    0.00e+00  yes
-V0 SSVE               VLA streaming, 1 accumulator      25.11    25.08     24.6-25.1    21.8%   29.4%      24.3x    1.07e-06  yes
-V1                    FRSQRTE+NR replaces FSQRT/FDIV    25.13    25.06     24.1-25.1    21.8%   29.4%      24.3x    1.72e-05  yes
-V2                    + pre-computed 1/N                25.14    24.99     24.2-25.1    21.8%   29.4%      24.4x    1.72e-05  yes
-V3                    + 2x column unroll                25.16    25.11     24.6-25.1    21.8%   29.4%      24.4x    1.72e-05  yes
-V4                    + 4 accumulator chains (ILP)      31.91    31.86     31.0-31.9    27.7%   37.3%      30.9x    1.63e-05  yes
-V5                    + software-pipelined loads        31.99    31.89     31.3-32.0    27.7%   37.4%      31.0x    1.63e-05  yes
-V6 (incumbent)        4-row-block contiguity            38.47    38.42     37.6-38.5    33.3%   45.0%      37.3x    1.72e-05  yes
-V7 (SME2)             4-vector LD1W/ST1W, same traffic    38.47    38.44     37.6-38.5    33.3%   45.0%      37.3x    1.72e-05  yes
-ZA residency          ZA staging, 1R+1W                 25.14    25.01     24.5-25.1    21.8%   29.4%      24.3x    1.72e-05  yes
-JIT (auto ISA)        emitted: V7 on SME2, else V6      38.46    38.44     37.6-38.5    33.3%   45.0%      37.3x    1.72e-05  yes
+scalar reference      C++ oracle, double accum           0.90     0.89       0.9-0.9     0.8%    1.1%       1.0x    0.00e+00  yes
+V0 SSVE               VLA streaming, 1 accumulator      24.87    24.70     24.5-24.8    21.5%   29.5%      27.6x    1.07e-06  yes
+V1                    FRSQRTE+NR replaces FSQRT/FDIV    24.88    24.78     24.4-24.9    21.5%   29.5%      27.6x    1.72e-05  yes
+V2                    + pre-computed 1/N                24.82    24.69     24.3-24.8    21.5%   29.4%      27.5x    1.72e-05  yes
+V3                    + 2x column unroll                24.84    24.72     24.4-24.8    21.5%   29.5%      27.6x    1.72e-05  yes
+V4                    + 4 accumulator chains (ILP)      31.37    31.10     30.6-31.3    27.1%   37.2%      34.8x    1.63e-05  yes
+V5                    + software-pipelined loads        31.35    31.04     30.3-31.2    27.1%   37.2%      34.8x    1.63e-05  yes
+V6 (incumbent)        4-row-block contiguity            38.46    38.43     37.6-38.5    33.3%   45.6%      42.7x    1.72e-05  yes
+V7 (SME2)             4-vector LD1W/ST1W, same traffic    38.45    38.43     38.0-38.4    33.3%   45.6%      42.7x    1.72e-05  yes
+ZA residency          ZA staging, 1R+1W                 24.86    24.80     24.6-24.9    21.5%   29.5%      27.6x    1.72e-05  yes
+JIT (auto ISA)        emitted: V7 on SME2, else V6      38.46    38.43     38.0-38.5    33.3%   45.6%      42.7x    1.72e-05  yes
 LayerNorm (two-pass, 3R+1W)
-scalar reference      C++ oracle, double accum           0.97     0.95       0.9-1.0     0.8%    1.1%       1.0x    0.00e+00  yes
-V0 SSVE               VLA streaming, 1 accumulator      12.82    12.72     12.5-12.8    11.1%   15.0%      13.3x    4.53e-06  yes
-V1                    FRSQRTE+NR replaces FSQRT/FDIV    12.82    12.72     12.6-12.8    11.1%   15.0%      13.3x    4.53e-06  yes
-V2                    + pre-computed 1/N (2 FDIVs)      14.42    14.33     14.1-14.4    12.5%   16.9%      14.9x    4.53e-06  yes
-V4                    + 4 accumulator chains (ILP)      16.46    16.36     16.1-16.4    14.3%   19.3%      17.0x    1.31e-06  yes
-V5                    + software-pipelined loads        16.47    16.25     16.1-16.4    14.3%   19.3%      17.0x    1.31e-06  yes
-V6 (incumbent)        4-row-block contiguity            16.49    16.43     16.2-16.5    14.3%   19.3%      17.1x    4.53e-06  yes
-V7 (SME2)             4-vector LD1W/ST1W, same traffic    16.49    16.43     16.2-16.5    14.3%   19.3%      17.1x    4.53e-06  yes
-Welford               online single-pass, 2R+1W         12.14    12.02     11.9-12.1    10.5%   14.2%      12.6x    2.74e-06  yes
-ZA residency          ZA staging, 1R+1W                 14.41    14.27     14.2-14.4    12.5%   16.9%      14.9x    4.53e-06  yes
-JIT (auto ISA)        emitted: V7 on SME2, else V6      16.49    16.37     16.1-16.5    14.3%   19.3%      17.1x    4.53e-06  yes
+scalar reference      C++ oracle, double accum           0.84     0.83       0.8-0.8     0.7%    1.0%       1.0x    0.00e+00  yes
+V0 SSVE               VLA streaming, 1 accumulator      12.82    12.75     12.6-12.8    11.1%   15.2%      15.3x    4.53e-06  yes
+V1                    FRSQRTE+NR replaces FSQRT/FDIV    12.79    12.75     12.6-12.8    11.1%   15.2%      15.2x    4.53e-06  yes
+V2                    + pre-computed 1/N (2 FDIVs)      14.40    14.33     14.2-14.4    12.5%   17.1%      17.1x    4.53e-06  yes
+V4                    + 4 accumulator chains (ILP)      16.36    16.29     15.8-16.3    14.2%   19.4%      19.5x    1.31e-06  yes
+V5                    + software-pipelined loads        16.35    16.26     16.1-16.3    14.1%   19.4%      19.5x    1.31e-06  yes
+V6 (incumbent)        4-row-block contiguity            16.47    16.41     16.2-16.5    14.2%   19.5%      19.6x    4.53e-06  yes
+V7 (SME2)             4-vector LD1W/ST1W, same traffic    16.47    16.42     16.3-16.5    14.2%   19.5%      19.6x    4.53e-06  yes
+Welford               online single-pass, 2R+1W         12.07    11.98     11.9-12.0    10.4%   14.3%      14.4x    2.74e-06  yes
+ZA residency          ZA staging, 1R+1W                 14.41    14.31     14.3-14.4    12.5%   17.1%      17.2x    4.53e-06  yes
+JIT (auto ISA)        emitted: V7 on SME2, else V6      16.48    16.42     16.3-16.5    14.3%   19.6%      19.6x    4.53e-06  yes
 
 Shape M=4096 N=8192  (256.0 MiB working set)
 stage                 lever                             GiB/s   median       p10-p90   %1core   %chip  vs scalar    max|dev|   ok
 ------------------------------------------------------------------------------------------------------------------------------
-  regime: 256 MiB, true DRAM (probe-matched)   |  ceiling at this footprint: 59.45 GiB/s  (= the DRAM constant 59.47)
+  regime: 256 MiB, true DRAM (probe-matched)   |  ceiling at this footprint: 58.78 GiB/s  (= the DRAM constant 59.03)
 RMSNorm (single-pass, 2R+1W)
-scalar reference      C++ oracle, double accum           0.67     0.67       0.7-0.7     1.1%    0.8%       1.0x    0.00e+00  yes
-V0 SSVE               VLA streaming, 1 accumulator      10.37    10.36     10.3-10.4    17.4%   12.1%      15.4x    2.38e-06  yes
-V1                    FRSQRTE+NR replaces FSQRT/FDIV    10.37    10.37     10.3-10.4    17.4%   12.1%      15.4x    8.82e-06  yes
-V2                    + pre-computed 1/N                10.36    10.36     10.3-10.4    17.4%   12.1%      15.4x    8.82e-06  yes
-V3                    + 2x column unroll                10.41    10.39     10.3-10.4    17.5%   12.2%      15.5x    8.82e-06  yes
-V4                    + 4 accumulator chains (ILP)      10.75    10.75     10.7-10.8    18.1%   12.6%      16.0x    7.75e-06  yes
-V5                    + software-pipelined loads        10.78    10.77     10.7-10.8    18.1%   12.6%      16.1x    7.75e-06  yes
-V6 (incumbent)        4-row-block contiguity            20.97    20.96     20.9-21.0    35.3%   24.5%      31.2x    8.82e-06  yes
-V7 (SME2)             4-vector LD1W/ST1W, same traffic    24.76    24.67     24.5-24.8    41.6%   29.0%      36.9x    8.82e-06  yes
-ZA residency          ZA staging, 1R+1W                 10.37    10.36     10.3-10.4    17.4%   12.1%      15.4x    8.82e-06  yes
-JIT (auto ISA)        emitted: V7 on SME2, else V6      24.76    24.67     24.6-24.8    41.6%   29.0%      36.9x    8.82e-06  yes
+scalar reference      C++ oracle, double accum           0.59     0.59       0.6-0.6     1.0%    0.7%       1.0x    0.00e+00  yes
+V0 SSVE               VLA streaming, 1 accumulator      10.04    10.03     10.0-10.0    17.1%   11.9%      16.9x    2.38e-06  yes
+V1                    FRSQRTE+NR replaces FSQRT/FDIV    10.06    10.04     10.0-10.1    17.1%   11.9%      16.9x    8.82e-06  yes
+V2                    + pre-computed 1/N                10.29    10.26     10.2-10.3    17.5%   12.2%      17.3x    8.82e-06  yes
+V3                    + 2x column unroll                10.34    10.30     10.3-10.3    17.6%   12.3%      17.4x    8.82e-06  yes
+V4                    + 4 accumulator chains (ILP)      10.67    10.62     10.5-10.7    18.2%   12.7%      17.9x    7.75e-06  yes
+V5                    + software-pipelined loads        10.65    10.63     10.6-10.7    18.1%   12.6%      17.9x    7.75e-06  yes
+V6 (incumbent)        4-row-block contiguity            21.05    20.91     20.6-21.0    35.8%   25.0%      35.4x    8.82e-06  yes
+V7 (SME2)             4-vector LD1W/ST1W, same traffic    24.63    24.58     24.4-24.6    41.9%   29.2%      41.4x    8.82e-06  yes
+ZA residency          ZA staging, 1R+1W                 10.29    10.25     10.2-10.3    17.5%   12.2%      17.3x    8.82e-06  yes
+JIT (auto ISA)        emitted: V7 on SME2, else V6      24.68    24.59     24.5-24.7    42.0%   29.3%      41.5x    8.82e-06  yes
 LayerNorm (two-pass, 3R+1W)
-scalar reference      C++ oracle, double accum           0.53     0.53       0.5-0.5     0.9%    0.6%       1.0x    0.00e+00  yes
-V0 SSVE               VLA streaming, 1 accumulator       7.40     7.39       7.4-7.4    12.4%    8.7%      13.9x    1.87e-05  yes
-V1                    FRSQRTE+NR replaces FSQRT/FDIV     7.40     7.39       7.4-7.4    12.5%    8.7%      13.9x    1.88e-05  yes
-V2                    + pre-computed 1/N (2 FDIVs)       7.57     7.38       7.1-7.6    12.7%    8.9%      14.3x    1.88e-05  yes
-V4                    + 4 accumulator chains (ILP)       7.95     7.94       7.9-8.0    13.4%    9.3%      15.0x    3.93e-06  yes
-V5                    + software-pipelined loads         7.95     7.93       7.9-8.0    13.4%    9.3%      15.0x    3.93e-06  yes
-V6 (incumbent)        4-row-block contiguity            13.21    13.17     13.1-13.2    22.2%   15.4%      24.9x    1.88e-05  yes
-V7 (SME2)             4-vector LD1W/ST1W, same traffic    13.55    13.53     13.5-13.5    22.8%   15.8%      25.5x    1.88e-05  yes
-Welford               online single-pass, 2R+1W          6.75     6.71       6.7-6.7    11.4%    7.9%      12.7x    1.08e-05  yes
-ZA residency          ZA staging, 1R+1W                  7.51     7.50       7.5-7.5    12.6%    8.8%      14.1x    1.88e-05  yes
-JIT (auto ISA)        emitted: V7 on SME2, else V6      13.47    13.45     13.4-13.5    22.7%   15.8%      25.4x    1.88e-05  yes
+scalar reference      C++ oracle, double accum           0.47     0.47       0.5-0.5     0.8%    0.6%       1.0x    0.00e+00  yes
+V0 SSVE               VLA streaming, 1 accumulator       7.38     7.37       7.4-7.4    12.6%    8.8%      15.8x    1.87e-05  yes
+V1                    FRSQRTE+NR replaces FSQRT/FDIV     7.38     7.36       7.3-7.4    12.6%    8.8%      15.7x    1.88e-05  yes
+V2                    + pre-computed 1/N (2 FDIVs)       7.39     7.38       7.4-7.4    12.6%    8.8%      15.8x    1.88e-05  yes
+V4                    + 4 accumulator chains (ILP)       7.69     7.69       7.7-7.7    13.1%    9.1%      16.4x    3.93e-06  yes
+V5                    + software-pipelined loads         7.56     7.56       7.6-7.6    12.9%    9.0%      16.1x    3.93e-06  yes
+V6 (incumbent)        4-row-block contiguity            13.09    13.05     13.1-13.1    22.3%   15.5%      27.9x    1.88e-05  yes
+V7 (SME2)             4-vector LD1W/ST1W, same traffic    13.52    13.47     13.4-13.5    23.0%   16.0%      28.8x    1.88e-05  yes
+Welford               online single-pass, 2R+1W          6.67     6.65       6.5-6.7    11.4%    7.9%      14.2x    1.08e-05  yes
+ZA residency          ZA staging, 1R+1W                  7.39     7.39       7.4-7.4    12.6%    8.8%      15.8x    1.88e-05  yes
+JIT (auto ISA)        emitted: V7 on SME2, else V6      13.49    13.46     13.3-13.5    23.0%   16.0%      28.8x    1.88e-05  yes
 
 ------------------------------------------------------------------------------------------------------------------------------
 Correctness gate: 66 / 66 configurations verified against the float64 reference BEFORE timing.
@@ -319,205 +319,205 @@ from the same samples, so a best case that is not typical is visible.
 --- Reference vs V0 baseline ---
 kernel                  rows   feat    GiB/s  (% of 1-core SSVE peak)
 ----------------------------------------------------------------------
-layer_norm_ref          M=128    N=64     4.09    GiB/s  (3.9% of the 104.5 GiB/s ceiling at this footprint)
-layer_norm_ssve         M=128    N=64     12.63   GiB/s  (12.1% of the 104.5 GiB/s ceiling at this footprint)
-layer_norm_ssve_v1      M=128    N=64     12.63   GiB/s  (12.1% of the 104.5 GiB/s ceiling at this footprint)
-rms_norm_ref            M=128    N=64     6.63    GiB/s  (6.3% of the 104.5 GiB/s ceiling at this footprint)
-rms_norm_ssve           M=128    N=64     29.30   GiB/s  (28.0% of the 104.5 GiB/s ceiling at this footprint)
+layer_norm_ref          M=128    N=64     3.54    GiB/s  (3.4% of the 104.7 GiB/s ceiling at this footprint)
+layer_norm_ssve         M=128    N=64     12.63   GiB/s  (12.1% of the 104.7 GiB/s ceiling at this footprint)
+layer_norm_ssve_v1      M=128    N=64     12.63   GiB/s  (12.1% of the 104.7 GiB/s ceiling at this footprint)
+rms_norm_ref            M=128    N=64     5.88    GiB/s  (5.6% of the 104.7 GiB/s ceiling at this footprint)
+rms_norm_ssve           M=128    N=64     29.30   GiB/s  (28.0% of the 104.7 GiB/s ceiling at this footprint)
 
-layer_norm_ref          M=128    N=512    2.41    GiB/s  (2.1% of the 117.2 GiB/s ceiling at this footprint)
-layer_norm_ssve         M=128    N=512    12.82   GiB/s  (10.9% of the 117.2 GiB/s ceiling at this footprint)
-layer_norm_ssve_v1      M=128    N=512    12.82   GiB/s  (10.9% of the 117.2 GiB/s ceiling at this footprint)
-rms_norm_ref            M=128    N=512    3.41    GiB/s  (2.9% of the 117.2 GiB/s ceiling at this footprint)
+layer_norm_ref          M=128    N=512    2.15    GiB/s  (1.8% of the 117.2 GiB/s ceiling at this footprint)
+layer_norm_ssve         M=128    N=512    12.84   GiB/s  (11.0% of the 117.2 GiB/s ceiling at this footprint)
+layer_norm_ssve_v1      M=128    N=512    12.85   GiB/s  (11.0% of the 117.2 GiB/s ceiling at this footprint)
+rms_norm_ref            M=128    N=512    3.03    GiB/s  (2.6% of the 117.2 GiB/s ceiling at this footprint)
 rms_norm_ssve           M=128    N=512    29.08   GiB/s  (24.8% of the 117.2 GiB/s ceiling at this footprint)
 
-layer_norm_ref          M=128    N=2048   2.23    GiB/s  (1.9% of the 116.0 GiB/s ceiling at this footprint)
+layer_norm_ref          M=128    N=2048   2.01    GiB/s  (1.7% of the 116.0 GiB/s ceiling at this footprint)
 layer_norm_ssve         M=128    N=2048   12.83   GiB/s  (11.1% of the 116.0 GiB/s ceiling at this footprint)
-layer_norm_ssve_v1      M=128    N=2048   12.83   GiB/s  (11.1% of the 116.0 GiB/s ceiling at this footprint)
-rms_norm_ref            M=128    N=2048   3.27    GiB/s  (2.8% of the 116.0 GiB/s ceiling at this footprint)
-rms_norm_ssve           M=128    N=2048   28.90   GiB/s  (24.9% of the 116.0 GiB/s ceiling at this footprint)
+layer_norm_ssve_v1      M=128    N=2048   12.84   GiB/s  (11.1% of the 116.0 GiB/s ceiling at this footprint)
+rms_norm_ref            M=128    N=2048   2.90    GiB/s  (2.5% of the 116.0 GiB/s ceiling at this footprint)
+rms_norm_ssve           M=128    N=2048   27.74   GiB/s  (23.9% of the 116.0 GiB/s ceiling at this footprint)
 
-layer_norm_ref          M=1024   N=64     1.25    GiB/s  (1.1% of the 117.2 GiB/s ceiling at this footprint)
-layer_norm_ssve         M=1024   N=64     12.51   GiB/s  (10.7% of the 117.2 GiB/s ceiling at this footprint)
-layer_norm_ssve_v1      M=1024   N=64     12.52   GiB/s  (10.7% of the 117.2 GiB/s ceiling at this footprint)
-rms_norm_ref            M=1024   N=64     1.43    GiB/s  (1.2% of the 117.2 GiB/s ceiling at this footprint)
-rms_norm_ssve           M=1024   N=64     28.65   GiB/s  (24.4% of the 117.2 GiB/s ceiling at this footprint)
+layer_norm_ref          M=1024   N=64     0.97    GiB/s  (0.8% of the 117.2 GiB/s ceiling at this footprint)
+layer_norm_ssve         M=1024   N=64     12.55   GiB/s  (10.7% of the 117.2 GiB/s ceiling at this footprint)
+layer_norm_ssve_v1      M=1024   N=64     12.55   GiB/s  (10.7% of the 117.2 GiB/s ceiling at this footprint)
+rms_norm_ref            M=1024   N=64     1.11    GiB/s  (0.9% of the 117.2 GiB/s ceiling at this footprint)
+rms_norm_ssve           M=1024   N=64     28.72   GiB/s  (24.5% of the 117.2 GiB/s ceiling at this footprint)
 
-layer_norm_ref          M=1024   N=512    1.39    GiB/s  (1.2% of the 115.9 GiB/s ceiling at this footprint)
-layer_norm_ssve         M=1024   N=512    12.79   GiB/s  (11.0% of the 115.9 GiB/s ceiling at this footprint)
-layer_norm_ssve_v1      M=1024   N=512    12.80   GiB/s  (11.0% of the 115.9 GiB/s ceiling at this footprint)
-rms_norm_ref            M=1024   N=512    1.63    GiB/s  (1.4% of the 115.9 GiB/s ceiling at this footprint)
-rms_norm_ssve           M=1024   N=512    26.82   GiB/s  (23.1% of the 115.9 GiB/s ceiling at this footprint)
+layer_norm_ref          M=1024   N=512    1.11    GiB/s  (1.0% of the 115.7 GiB/s ceiling at this footprint)
+layer_norm_ssve         M=1024   N=512    12.80   GiB/s  (11.1% of the 115.7 GiB/s ceiling at this footprint)
+layer_norm_ssve_v1      M=1024   N=512    12.80   GiB/s  (11.1% of the 115.7 GiB/s ceiling at this footprint)
+rms_norm_ref            M=1024   N=512    1.30    GiB/s  (1.1% of the 115.7 GiB/s ceiling at this footprint)
+rms_norm_ssve           M=1024   N=512    25.31   GiB/s  (21.9% of the 115.7 GiB/s ceiling at this footprint)
 
-layer_norm_ref          M=1024   N=2048   0.96    GiB/s  (0.8% of the 115.3 GiB/s ceiling at this footprint)
-layer_norm_ssve         M=1024   N=2048   12.82   GiB/s  (11.1% of the 115.3 GiB/s ceiling at this footprint)
-layer_norm_ssve_v1      M=1024   N=2048   12.81   GiB/s  (11.1% of the 115.3 GiB/s ceiling at this footprint)
-rms_norm_ref            M=1024   N=2048   1.04    GiB/s  (0.9% of the 115.3 GiB/s ceiling at this footprint)
-rms_norm_ssve           M=1024   N=2048   25.13   GiB/s  (21.8% of the 115.3 GiB/s ceiling at this footprint)
+layer_norm_ref          M=1024   N=2048   0.84    GiB/s  (0.7% of the 115.6 GiB/s ceiling at this footprint)
+layer_norm_ssve         M=1024   N=2048   12.82   GiB/s  (11.1% of the 115.6 GiB/s ceiling at this footprint)
+layer_norm_ssve_v1      M=1024   N=2048   12.79   GiB/s  (11.1% of the 115.6 GiB/s ceiling at this footprint)
+rms_norm_ref            M=1024   N=2048   0.92    GiB/s  (0.8% of the 115.6 GiB/s ceiling at this footprint)
+rms_norm_ssve           M=1024   N=2048   24.67   GiB/s  (21.3% of the 115.6 GiB/s ceiling at this footprint)
 
 
 --- RMSNorm SSVE ablation: V0 → V3 ---
 variant                   rows   feat    GiB/s  (% of 1-core SSVE peak)  vs V0
 ------------------------------------------------------------------------------
-V0 (FSQRT+FDIV)           M=128    N=64     29.30   GiB/s  (28.0% of 104.5)
-V1 (FRSQRTE+NR)           M=128    N=64     29.30   GiB/s  (28.0% of 104.5)  +0.0% vs V0
-V2 (V1 + inv_N)           M=128    N=64     29.90   GiB/s  (28.6% of 104.5)  +2.1% vs V0
-V3 (V2 + unroll-2)        M=128    N=64     29.90   GiB/s  (28.6% of 104.5)  +2.1% vs V0
-V4 (4-acc ILP)            M=128    N=64     37.56   GiB/s  (35.9% of 104.5)  +28.2% vs V0
-V5 (V4 + load pipe)       M=128    N=64     37.56   GiB/s  (35.9% of 104.5)  +28.2% vs V0
-V6 (4-block contig)       M=128    N=64     38.56   GiB/s  (36.9% of 104.5)  +31.6% vs V0
+V0 (FSQRT+FDIV)           M=128    N=64     29.89   GiB/s  (28.6% of 104.7)
+V1 (FRSQRTE+NR)           M=128    N=64     29.89   GiB/s  (28.6% of 104.7)  +0.0% vs V0
+V2 (V1 + inv_N)           M=128    N=64     29.90   GiB/s  (28.6% of 104.7)  +0.0% vs V0
+V3 (V2 + unroll-2)        M=128    N=64     30.52   GiB/s  (29.1% of 104.7)  +2.1% vs V0
+V4 (4-acc ILP)            M=128    N=64     37.56   GiB/s  (35.9% of 104.7)  +25.7% vs V0
+V5 (V4 + load pipe)       M=128    N=64     37.56   GiB/s  (35.9% of 104.7)  +25.7% vs V0
+V6 (4-block contig)       M=128    N=64     38.56   GiB/s  (36.8% of 104.7)  +29.0% vs V0
 
 V0 (FSQRT+FDIV)           M=128    N=2048   28.92   GiB/s  (24.9% of 116.0)
-V1 (FRSQRTE+NR)           M=128    N=2048   28.92   GiB/s  (24.9% of 116.0)  -0.0% vs V0
-V2 (V1 + inv_N)           M=128    N=2048   28.94   GiB/s  (24.9% of 116.0)  +0.1% vs V0
-V3 (V2 + unroll-2)        M=128    N=2048   28.94   GiB/s  (24.9% of 116.0)  +0.1% vs V0
-V4 (4-acc ILP)            M=128    N=2048   38.52   GiB/s  (33.2% of 116.0)  +33.2% vs V0
+V1 (FRSQRTE+NR)           M=128    N=2048   28.92   GiB/s  (24.9% of 116.0)  +0.0% vs V0
+V2 (V1 + inv_N)           M=128    N=2048   28.92   GiB/s  (24.9% of 116.0)  +0.0% vs V0
+V3 (V2 + unroll-2)        M=128    N=2048   28.95   GiB/s  (25.0% of 116.0)  +0.1% vs V0
+V4 (4-acc ILP)            M=128    N=2048   38.55   GiB/s  (33.2% of 116.0)  +33.3% vs V0
 V5 (V4 + load pipe)       M=128    N=2048   38.49   GiB/s  (33.2% of 116.0)  +33.1% vs V0
 V6 (4-block contig)       M=128    N=2048   38.52   GiB/s  (33.2% of 116.0)  +33.2% vs V0
 
-V0 (FSQRT+FDIV)           M=1024   N=2048   25.16   GiB/s  (21.8% of 115.3)
-V1 (FRSQRTE+NR)           M=1024   N=2048   25.16   GiB/s  (21.8% of 115.3)  +0.0% vs V0
-V2 (V1 + inv_N)           M=1024   N=2048   25.16   GiB/s  (21.8% of 115.3)  +0.0% vs V0
-V3 (V2 + unroll-2)        M=1024   N=2048   25.18   GiB/s  (21.8% of 115.3)  +0.1% vs V0
-V4 (4-acc ILP)            M=1024   N=2048   32.06   GiB/s  (27.8% of 115.3)  +27.4% vs V0
-V5 (V4 + load pipe)       M=1024   N=2048   32.05   GiB/s  (27.8% of 115.3)  +27.4% vs V0
-V6 (4-block contig)       M=1024   N=2048   38.45   GiB/s  (33.3% of 115.3)  +52.8% vs V0
+V0 (FSQRT+FDIV)           M=1024   N=2048   24.87   GiB/s  (21.5% of 115.6)
+V1 (FRSQRTE+NR)           M=1024   N=2048   24.88   GiB/s  (21.5% of 115.6)  +0.0% vs V0
+V2 (V1 + inv_N)           M=1024   N=2048   24.89   GiB/s  (21.5% of 115.6)  +0.1% vs V0
+V3 (V2 + unroll-2)        M=1024   N=2048   24.98   GiB/s  (21.6% of 115.6)  +0.4% vs V0
+V4 (4-acc ILP)            M=1024   N=2048   31.53   GiB/s  (27.3% of 115.6)  +26.8% vs V0
+V5 (V4 + load pipe)       M=1024   N=2048   31.26   GiB/s  (27.0% of 115.6)  +25.7% vs V0
+V6 (4-block contig)       M=1024   N=2048   38.47   GiB/s  (33.3% of 115.6)  +54.7% vs V0
 
-V0 (FSQRT+FDIV)           M=4096   N=2048   11.07   GiB/s  (17.5% of 63.1)
-V1 (FRSQRTE+NR)           M=4096   N=2048   11.16   GiB/s  (17.7% of 63.1)  +0.8% vs V0
-V2 (V1 + inv_N)           M=4096   N=2048   11.17   GiB/s  (17.7% of 63.1)  +0.9% vs V0
-V3 (V2 + unroll-2)        M=4096   N=2048   11.14   GiB/s  (17.6% of 63.1)  +0.6% vs V0
-V4 (4-acc ILP)            M=4096   N=2048   11.36   GiB/s  (18.0% of 63.1)  +2.6% vs V0
-V5 (V4 + load pipe)       M=4096   N=2048   11.38   GiB/s  (18.0% of 63.1)  +2.8% vs V0
-V6 (4-block contig)       M=4096   N=2048   25.24   GiB/s  (40.0% of 63.1)  +128.0% vs V0
+V0 (FSQRT+FDIV)           M=4096   N=2048   10.90   GiB/s  (17.5% of 62.2)
+V1 (FRSQRTE+NR)           M=4096   N=2048   10.92   GiB/s  (17.6% of 62.2)  +0.2% vs V0
+V2 (V1 + inv_N)           M=4096   N=2048   10.95   GiB/s  (17.6% of 62.2)  +0.5% vs V0
+V3 (V2 + unroll-2)        M=4096   N=2048   10.93   GiB/s  (17.6% of 62.2)  +0.3% vs V0
+V4 (4-acc ILP)            M=4096   N=2048   11.13   GiB/s  (17.9% of 62.2)  +2.2% vs V0
+V5 (V4 + load pipe)       M=4096   N=2048   11.19   GiB/s  (18.0% of 62.2)  +2.7% vs V0
+V6 (4-block contig)       M=4096   N=2048   24.71   GiB/s  (39.7% of 62.2)  +126.7% vs V0
 
 
 --- RMSNorm ZA residency vs SSVE V6 (Sprint 3) ---
 variant                   rows   feat    GiB/s  (% of 1-core SSVE peak)  vs V6
 ------------------------------------------------------------------------------
-V6 (2R+1W, SSVE)          M=128    N=16     45.68   GiB/s  (43.7% of 104.5)
-ZA residency              M=128    N=16     13.09   GiB/s  (12.5% of 104.5)  -71.4% vs V6
+V6 (2R+1W, SSVE)          M=128    N=16     45.82   GiB/s  (43.8% of 104.7)
+ZA residency              M=128    N=16     13.09   GiB/s  (12.5% of 104.7)  -71.4% vs V6
 
-V6 (2R+1W, SSVE)          M=128    N=32     38.53   GiB/s  (36.9% of 104.5)
-ZA residency              M=128    N=32     14.09   GiB/s  (13.5% of 104.5)  -63.4% vs V6
+V6 (2R+1W, SSVE)          M=128    N=32     36.64   GiB/s  (35.0% of 104.7)
+ZA residency              M=128    N=32     14.09   GiB/s  (13.5% of 104.7)  -61.5% vs V6
 
-V6 (2R+1W, SSVE)          M=128    N=64     38.56   GiB/s  (36.9% of 104.5)
-ZA residency              M=128    N=64     11.72   GiB/s  (11.2% of 104.5)  -69.6% vs V6
+V6 (2R+1W, SSVE)          M=128    N=64     38.56   GiB/s  (36.8% of 104.7)
+ZA residency              M=128    N=64     11.81   GiB/s  (11.3% of 104.7)  -69.4% vs V6
 
 V6 (2R+1W, SSVE)          M=1024   N=64     37.32   GiB/s  (31.8% of 117.2)
 ZA residency              M=1024   N=64     11.67   GiB/s  (10.0% of 117.2)  -68.7% vs V6
 
-V6 (2R+1W, SSVE)          M=4096   N=64     37.17   GiB/s  (32.0% of 116.0)
-ZA residency              M=4096   N=64     11.66   GiB/s  (10.0% of 116.0)  -68.6% vs V6
+V6 (2R+1W, SSVE)          M=4096   N=64     37.23   GiB/s  (32.1% of 116.0)
+ZA residency              M=4096   N=64     11.64   GiB/s  (10.0% of 116.0)  -68.7% vs V6
 
 V6 (2R+1W, SSVE)          M=128    N=2048   38.52   GiB/s  (33.2% of 116.0)
-ZA residency              M=128    N=2048   28.94   GiB/s  (24.9% of 116.0)  -24.9% vs V6
+ZA residency              M=128    N=2048   28.92   GiB/s  (24.9% of 116.0)  -24.9% vs V6
 
-V6 (2R+1W, SSVE)          M=1024   N=2048   38.47   GiB/s  (33.3% of 115.3)
-ZA residency              M=1024   N=2048   25.18   GiB/s  (21.8% of 115.3)  -34.5% vs V6
+V6 (2R+1W, SSVE)          M=1024   N=2048   38.46   GiB/s  (33.3% of 115.6)
+ZA residency              M=1024   N=2048   24.89   GiB/s  (21.5% of 115.6)  -35.3% vs V6
 
-V6 (2R+1W, SSVE)          M=131072  N=64     22.45   GiB/s  (35.6% of 63.1)
-ZA residency              M=131072  N=64     10.13   GiB/s  (16.1% of 63.1)  -54.9% vs V6
+V6 (2R+1W, SSVE)          M=131072  N=64     22.77   GiB/s  (36.6% of 62.2)
+ZA residency              M=131072  N=64     10.18   GiB/s  (16.4% of 62.2)  -55.3% vs V6
 
-V6 (2R+1W, SSVE)          M=262144  N=64     22.82   GiB/s  (37.9% of 60.2)
-ZA residency              M=262144  N=64     10.11   GiB/s  (16.8% of 60.2)  -55.7% vs V6
+V6 (2R+1W, SSVE)          M=262144  N=64     22.59   GiB/s  (38.0% of 59.5)
+ZA residency              M=262144  N=64     10.10   GiB/s  (17.0% of 59.5)  -55.3% vs V6
 
-V6 (2R+1W, SSVE)          M=4096   N=2048   25.14   GiB/s  (39.8% of 63.1)
-ZA residency              M=4096   N=2048   11.16   GiB/s  (17.7% of 63.1)  -55.6% vs V6
+V6 (2R+1W, SSVE)          M=4096   N=2048   25.18   GiB/s  (40.5% of 62.2)
+ZA residency              M=4096   N=2048   10.91   GiB/s  (17.6% of 62.2)  -56.7% vs V6
 
-V6 (2R+1W, SSVE)          M=8192   N=2048   23.56   GiB/s  (39.2% of 60.2)
-ZA residency              M=8192   N=2048   11.13   GiB/s  (18.5% of 60.2)  -52.8% vs V6
+V6 (2R+1W, SSVE)          M=8192   N=2048   23.87   GiB/s  (40.2% of 59.5)
+ZA residency              M=8192   N=2048   11.03   GiB/s  (18.6% of 59.5)  -53.8% vs V6
 
 
 --- LayerNorm ZA residency vs SSVE V6 (Sprint 3, gated) ---
 variant                   rows   feat    GiB/s  (% of 1-core SSVE peak)  vs V6
 ------------------------------------------------------------------------------
-V6 (3R+1W, SSVE)          M=128    N=16     16.64   GiB/s  (15.9% of 104.5)
-ZA residency              M=128    N=16     5.63    GiB/s  (5.4% of 104.5)  -66.1% vs V6
+V6 (3R+1W, SSVE)          M=128    N=16     15.93   GiB/s  (15.2% of 104.7)
+ZA residency              M=128    N=16     5.63    GiB/s  (5.4% of 104.7)  -64.6% vs V6
 
-V6 (3R+1W, SSVE)          M=128    N=32     16.64   GiB/s  (15.9% of 104.5)
-ZA residency              M=128    N=32     5.63    GiB/s  (5.4% of 104.5)  -66.1% vs V6
+V6 (3R+1W, SSVE)          M=128    N=32     16.28   GiB/s  (15.5% of 104.7)
+ZA residency              M=128    N=32     5.59    GiB/s  (5.3% of 104.7)  -65.6% vs V6
 
-V6 (3R+1W, SSVE)          M=128    N=64     16.46   GiB/s  (15.7% of 104.5)
-ZA residency              M=128    N=64     5.31    GiB/s  (5.1% of 104.5)  -67.8% vs V6
+V6 (3R+1W, SSVE)          M=128    N=64     16.46   GiB/s  (15.7% of 104.7)
+ZA residency              M=128    N=64     5.31    GiB/s  (5.1% of 104.7)  -67.8% vs V6
 
-V6 (3R+1W, SSVE)          M=1024   N=64     16.25   GiB/s  (13.9% of 117.2)
-ZA residency              M=1024   N=64     5.28    GiB/s  (4.5% of 117.2)  -67.5% vs V6
+V6 (3R+1W, SSVE)          M=1024   N=64     16.32   GiB/s  (13.9% of 117.2)
+ZA residency              M=1024   N=64     5.28    GiB/s  (4.5% of 117.2)  -67.7% vs V6
 
-V6 (3R+1W, SSVE)          M=4096   N=64     16.22   GiB/s  (14.0% of 116.0)
-ZA residency              M=4096   N=64     5.28    GiB/s  (4.5% of 116.0)  -67.5% vs V6
+V6 (3R+1W, SSVE)          M=4096   N=64     16.23   GiB/s  (14.0% of 116.0)
+ZA residency              M=4096   N=64     5.27    GiB/s  (4.5% of 116.0)  -67.5% vs V6
 
 V6 (3R+1W, SSVE)          M=128    N=2048   16.51   GiB/s  (14.2% of 116.0)
 ZA residency              M=128    N=2048   14.44   GiB/s  (12.4% of 116.0)  -12.5% vs V6
 
-V6 (3R+1W, SSVE)          M=1024   N=2048   16.49   GiB/s  (14.3% of 115.3)
-ZA residency              M=1024   N=2048   14.43   GiB/s  (12.5% of 115.3)  -12.5% vs V6
+V6 (3R+1W, SSVE)          M=1024   N=2048   16.48   GiB/s  (14.3% of 115.6)
+ZA residency              M=1024   N=2048   14.43   GiB/s  (12.5% of 115.6)  -12.5% vs V6
 
 
 --- LayerNorm SSVE ablation: V0 → V6 + Welford ---
 variant                   rows   feat    GiB/s  (% of 1-core SSVE peak)  vs V0
 ------------------------------------------------------------------------------
-LN V0 (FSQRT+FDIV)        M=128    N=64     12.74   GiB/s  (12.2% of 104.5)
-LN V1 (FRSQRTE+NR)        M=128    N=64     12.63   GiB/s  (12.1% of 104.5)  -0.9% vs V0
-LN V2 (inv_N)             M=128    N=64     14.36   GiB/s  (13.7% of 104.5)  +12.7% vs V0
-LN V4 (4-acc ILP)         M=128    N=64     15.92   GiB/s  (15.2% of 104.5)  +25.0% vs V0
-LN V5 (load-pipe)         M=128    N=64     16.10   GiB/s  (15.4% of 104.5)  +26.3% vs V0
-LN V6 (4-blk contig)      M=128    N=64     16.46   GiB/s  (15.7% of 104.5)  +29.2% vs V0
-LN Welford (2R+1W)        M=128    N=64     12.31   GiB/s  (11.8% of 104.5)  -3.4% vs V0
+LN V0 (FSQRT+FDIV)        M=128    N=64     12.85   GiB/s  (12.3% of 104.7)
+LN V1 (FRSQRTE+NR)        M=128    N=64     12.74   GiB/s  (12.2% of 104.7)  -0.9% vs V0
+LN V2 (inv_N)             M=128    N=64     14.36   GiB/s  (13.7% of 104.7)  +11.8% vs V0
+LN V4 (4-acc ILP)         M=128    N=64     16.10   GiB/s  (15.4% of 104.7)  +25.3% vs V0
+LN V5 (load-pipe)         M=128    N=64     16.10   GiB/s  (15.4% of 104.7)  +25.3% vs V0
+LN V6 (4-blk contig)      M=128    N=64     16.46   GiB/s  (15.7% of 104.7)  +28.1% vs V0
+LN Welford (2R+1W)        M=128    N=64     12.42   GiB/s  (11.9% of 104.7)  -3.4% vs V0
 
-LN V0 (FSQRT+FDIV)        M=128    N=2048   12.83   GiB/s  (11.1% of 116.0)
+LN V0 (FSQRT+FDIV)        M=128    N=2048   12.84   GiB/s  (11.1% of 116.0)
 LN V1 (FRSQRTE+NR)        M=128    N=2048   12.83   GiB/s  (11.1% of 116.0)  -0.0% vs V0
-LN V2 (inv_N)             M=128    N=2048   14.45   GiB/s  (12.5% of 116.0)  +12.6% vs V0
-LN V4 (4-acc ILP)         M=128    N=2048   16.51   GiB/s  (14.2% of 116.0)  +28.7% vs V0
-LN V5 (load-pipe)         M=128    N=2048   16.50   GiB/s  (14.2% of 116.0)  +28.6% vs V0
-LN V6 (4-blk contig)      M=128    N=2048   16.51   GiB/s  (14.2% of 116.0)  +28.6% vs V0
-LN Welford (2R+1W)        M=128    N=2048   12.48   GiB/s  (10.8% of 116.0)  -2.7% vs V0
+LN V2 (inv_N)             M=128    N=2048   14.44   GiB/s  (12.4% of 116.0)  +12.5% vs V0
+LN V4 (4-acc ILP)         M=128    N=2048   16.49   GiB/s  (14.2% of 116.0)  +28.5% vs V0
+LN V5 (load-pipe)         M=128    N=2048   16.51   GiB/s  (14.2% of 116.0)  +28.6% vs V0
+LN V6 (4-blk contig)      M=128    N=2048   16.50   GiB/s  (14.2% of 116.0)  +28.5% vs V0
+LN Welford (2R+1W)        M=128    N=2048   12.49   GiB/s  (10.8% of 116.0)  -2.7% vs V0
 
-LN V0 (FSQRT+FDIV)        M=1024   N=2048   12.82   GiB/s  (11.1% of 115.3)
-LN V1 (FRSQRTE+NR)        M=1024   N=2048   12.82   GiB/s  (11.1% of 115.3)  +0.0% vs V0
-LN V2 (inv_N)             M=1024   N=2048   14.43   GiB/s  (12.5% of 115.3)  +12.5% vs V0
-LN V4 (4-acc ILP)         M=1024   N=2048   16.47   GiB/s  (14.3% of 115.3)  +28.4% vs V0
-LN V5 (load-pipe)         M=1024   N=2048   16.47   GiB/s  (14.3% of 115.3)  +28.4% vs V0
-LN V6 (4-blk contig)      M=1024   N=2048   16.49   GiB/s  (14.3% of 115.3)  +28.6% vs V0
-LN Welford (2R+1W)        M=1024   N=2048   12.23   GiB/s  (10.6% of 115.3)  -4.6% vs V0
+LN V0 (FSQRT+FDIV)        M=1024   N=2048   12.82   GiB/s  (11.1% of 115.6)
+LN V1 (FRSQRTE+NR)        M=1024   N=2048   12.76   GiB/s  (11.0% of 115.6)  -0.5% vs V0
+LN V2 (inv_N)             M=1024   N=2048   14.40   GiB/s  (12.5% of 115.6)  +12.3% vs V0
+LN V4 (4-acc ILP)         M=1024   N=2048   16.31   GiB/s  (14.1% of 115.6)  +27.2% vs V0
+LN V5 (load-pipe)         M=1024   N=2048   16.19   GiB/s  (14.0% of 115.6)  +26.3% vs V0
+LN V6 (4-blk contig)      M=1024   N=2048   16.49   GiB/s  (14.3% of 115.6)  +28.6% vs V0
+LN Welford (2R+1W)        M=1024   N=2048   12.12   GiB/s  (10.5% of 115.6)  -5.5% vs V0
 
-LN V0 (FSQRT+FDIV)        M=4096   N=2048   8.32    GiB/s  (13.2% of 63.1)
-LN V1 (FRSQRTE+NR)        M=4096   N=2048   8.39    GiB/s  (13.3% of 63.1)  +0.9% vs V0
-LN V2 (inv_N)             M=4096   N=2048   8.36    GiB/s  (13.2% of 63.1)  +0.5% vs V0
-LN V4 (4-acc ILP)         M=4096   N=2048   8.44    GiB/s  (13.4% of 63.1)  +1.4% vs V0
-LN V5 (load-pipe)         M=4096   N=2048   8.55    GiB/s  (13.5% of 63.1)  +2.8% vs V0
-LN V6 (4-blk contig)      M=4096   N=2048   14.40   GiB/s  (22.8% of 63.1)  +73.1% vs V0
-LN Welford (2R+1W)        M=4096   N=2048   8.10    GiB/s  (12.8% of 63.1)  -2.6% vs V0
+LN V0 (FSQRT+FDIV)        M=4096   N=2048   8.25    GiB/s  (13.3% of 62.2)
+LN V1 (FRSQRTE+NR)        M=4096   N=2048   8.28    GiB/s  (13.3% of 62.2)  +0.3% vs V0
+LN V2 (inv_N)             M=4096   N=2048   8.24    GiB/s  (13.3% of 62.2)  -0.2% vs V0
+LN V4 (4-acc ILP)         M=4096   N=2048   8.25    GiB/s  (13.3% of 62.2)  -0.1% vs V0
+LN V5 (load-pipe)         M=4096   N=2048   8.42    GiB/s  (13.6% of 62.2)  +2.1% vs V0
+LN V6 (4-blk contig)      M=4096   N=2048   14.34   GiB/s  (23.1% of 62.2)  +73.8% vs V0
+LN Welford (2R+1W)        M=4096   N=2048   7.88    GiB/s  (12.7% of 62.2)  -4.5% vs V0
 
 
 --- LayerNorm vs RMSNorm (best variants, same shapes) ---
-variant                   rows   feat    GiB/s  (% peak)  LN/RMS ratio
-----------------------------------------------------------------------
-LN V6 (best)              M=128    N=64     16.46   GiB/s  (27.7% peak)
-RMS V6 (best)             M=128    N=64     38.53   GiB/s  (64.8% peak)  LN/RMS = 0.43
+variant                   rows   feat    GiB/s  (% of the ceiling at this footprint)  LN/RMS
+------------------------------------------------------------------------------
+LN V6 (best)              M=128    N=64     16.46   GiB/s  (15.7% of 104.7)
+RMS V6 (best)             M=128    N=64     37.56   GiB/s  (35.9% of 104.7)  LN/RMS = 0.44
 
-LN V6 (best)              M=128    N=2048   16.53   GiB/s  (27.8% peak)
-RMS V6 (best)             M=128    N=2048   38.52   GiB/s  (64.8% peak)  LN/RMS = 0.43
+LN V6 (best)              M=128    N=2048   16.52   GiB/s  (14.2% of 116.0)
+RMS V6 (best)             M=128    N=2048   38.52   GiB/s  (33.2% of 116.0)  LN/RMS = 0.43
 
-LN V6 (best)              M=1024   N=2048   16.49   GiB/s  (27.7% peak)
-RMS V6 (best)             M=1024   N=2048   38.46   GiB/s  (64.7% peak)  LN/RMS = 0.43
+LN V6 (best)              M=1024   N=2048   16.45   GiB/s  (14.2% of 115.6)
+RMS V6 (best)             M=1024   N=2048   38.43   GiB/s  (33.2% of 115.6)  LN/RMS = 0.43
 
-LN V6 (best)              M=4096   N=2048   14.38   GiB/s  (24.2% peak)
-RMS V6 (best)             M=4096   N=2048   25.20   GiB/s  (42.4% peak)  LN/RMS = 0.57
+LN V6 (best)              M=4096   N=2048   14.35   GiB/s  (23.1% of 62.2)
+RMS V6 (best)             M=4096   N=2048   25.26   GiB/s  (40.6% of 62.2)  LN/RMS = 0.57
 
 
 --- Small-N regime: fixed overhead vs streaming work (V1 kernel) ---
 M=128:
   N          us/call       GiB/s     ceiling    % of it
-  16           0.416       36.68      104.51       35.1 %
-  32           1.042       29.29      104.51       28.0 %
-  64           2.041       29.90      104.51       28.6 %
+  16           0.416       36.68      104.69       35.0 %
+  32           1.042       29.29      104.69       28.0 %
+  64           2.041       29.90      104.69       28.6 %
   128          4.166       29.30       97.66       30.0 %
-  256          8.375       29.15      101.05       28.8 %
+  256          8.333       29.30      117.21       25.0 %
   512         16.792       29.08      117.21       24.8 %
-  1024        33.708       28.97      116.04       25.0 %
-  2048        67.500       28.94      116.03       24.9 %
-  4096       135.125       28.91      115.88       24.9 %
+  1024        33.667       29.01      116.04       25.0 %
+  2048        67.542       28.92      116.03       24.9 %
+  4096       135.166       28.90      115.74       25.0 %
   fit t(N) = t0 + b*N: INVALID (t0 < 0) — throughput is not
   constant in N: the sweep enters the true-DRAM regime (total
   footprint exceeds L2; see the Sprint-2b density diagnostic).
@@ -526,65 +526,65 @@ M=128:
 M=1024:
   N          us/call       GiB/s     ceiling    % of it
   16           3.708       32.92       97.66       33.7 %
-  32           8.416       29.01      101.05       28.7 %
-  64          16.875       28.94      117.21       24.7 %
-  128         34.000       28.72      116.04       24.8 %
-  256         72.875       26.80      116.03       23.1 %
-  512        152.750       25.57      115.88       22.1 %
-  1024       309.083       25.28      115.67       21.9 %
-  2048       622.458       25.10      115.35       21.8 %
-  4096      1673.625       18.67       96.13       19.4 %
+  32           8.375       29.15      117.21       24.9 %
+  64          17.125       28.51      117.21       24.3 %
+  128         36.292       26.91      116.04       23.2 %
+  256         75.541       25.86      116.03       22.3 %
+  512        154.125       25.34      115.74       21.9 %
+  1024       310.416       25.17      115.60       21.8 %
+  2048       625.959       24.96      115.60       21.6 %
+  4096      1784.542       17.51       91.25       19.2 %
   fit t(N) = t0 + b*N: INVALID (t0 < 0) — throughput is not
   constant in N: the sweep enters the true-DRAM regime (total
   footprint exceeds L2; see the Sprint-2b density diagnostic).
   Overhead statement only valid for the M=128 sweep.
 
 
---- Sprint 4: JIT-emitted V6 vs hand-written V6 ---
-emission (one-time):  rms 2.1 us (110 words),  layer 4.2 us (144 words)
+--- Sprint 4: JIT-emitted V7 vs hand-written V7 ---
+emission (one-time):  rms 4.5 us (110 words),  layer 4.5 us (144 words)
 
-variant                   rows   feat    GiB/s  (% of 1-core SSVE peak)  vs hand-written
---------------------------------------------------------------------------------
-RMS V6 hand-written       M=128    N=64     38.56   GiB/s  (36.9% of 104.5)
-RMS V6 JIT-emitted        M=128    N=64     37.56   GiB/s  (35.9% of 104.5)  -2.6% vs hand
-LN  V6 hand-written       M=128    N=64     16.46   GiB/s  (15.7% of 104.5)
-LN  V6 JIT-emitted        M=128    N=64     16.64   GiB/s  (15.9% of 104.5)  +1.1% vs hand
+variant                   rows   feat    GiB/s  (% of the ceiling at this footprint)  vs hand-written
+--------------------------------------------------------------------------------------
+RMS V7 hand-written       M=128    N=64     39.58   GiB/s  (37.8% of 104.7)
+RMS V7 JIT-emitted        M=128    N=64     38.56   GiB/s  (36.8% of 104.7)  -2.6% vs hand
+LN  V7 hand-written       M=128    N=64     16.46   GiB/s  (15.7% of 104.7)
+LN  V7 JIT-emitted        M=128    N=64     16.46   GiB/s  (15.7% of 104.7)  +0.0% vs hand
 
-RMS V6 hand-written       M=128    N=2048   38.52   GiB/s  (33.2% of 116.0)
-RMS V6 JIT-emitted        M=128    N=2048   38.58   GiB/s  (33.3% of 116.0)  +0.2% vs hand
-LN  V6 hand-written       M=128    N=2048   16.51   GiB/s  (14.2% of 116.0)
-LN  V6 JIT-emitted        M=128    N=2048   16.52   GiB/s  (14.2% of 116.0)  +0.1% vs hand
+RMS V7 hand-written       M=128    N=2048   38.64   GiB/s  (33.3% of 116.0)
+RMS V7 JIT-emitted        M=128    N=2048   38.58   GiB/s  (33.3% of 116.0)  -0.2% vs hand
+LN  V7 hand-written       M=128    N=2048   16.52   GiB/s  (14.2% of 116.0)
+LN  V7 JIT-emitted        M=128    N=2048   16.51   GiB/s  (14.2% of 116.0)  -0.0% vs hand
 
-RMS V6 hand-written       M=1024   N=2048   38.46   GiB/s  (33.3% of 115.3)
-RMS V6 JIT-emitted        M=1024   N=2048   38.46   GiB/s  (33.3% of 115.3)  +0.0% vs hand
-LN  V6 hand-written       M=1024   N=2048   16.49   GiB/s  (14.3% of 115.3)
-LN  V6 JIT-emitted        M=1024   N=2048   16.49   GiB/s  (14.3% of 115.3)  +0.0% vs hand
+RMS V7 hand-written       M=1024   N=2048   38.45   GiB/s  (33.3% of 115.6)
+RMS V7 JIT-emitted        M=1024   N=2048   38.45   GiB/s  (33.3% of 115.6)  +0.0% vs hand
+LN  V7 hand-written       M=1024   N=2048   16.48   GiB/s  (14.3% of 115.6)
+LN  V7 JIT-emitted        M=1024   N=2048   16.48   GiB/s  (14.3% of 115.6)  -0.0% vs hand
 
-RMS V6 hand-written       M=4096   N=2048   25.14   GiB/s  (39.8% of 63.1)
-RMS V6 JIT-emitted        M=4096   N=2048   27.77   GiB/s  (44.0% of 63.1)  +10.4% vs hand
-LN  V6 hand-written       M=4096   N=2048   14.37   GiB/s  (22.8% of 63.1)
-LN  V6 JIT-emitted        M=4096   N=2048   14.62   GiB/s  (23.2% of 63.1)  +1.7% vs hand
+RMS V7 hand-written       M=4096   N=2048   27.23   GiB/s  (43.8% of 62.2)
+RMS V7 JIT-emitted        M=4096   N=2048   27.19   GiB/s  (43.7% of 62.2)  -0.2% vs hand
+LN  V7 hand-written       M=4096   N=2048   14.59   GiB/s  (23.5% of 62.2)
+LN  V7 JIT-emitted        M=4096   N=2048   14.58   GiB/s  (23.5% of 62.2)  -0.1% vs hand
 
 
 --- True DRAM regime (128 MiB/array, matches roofline probe footprint) ---
 variant                   rows   feat    GiB/s  (% of 1-core SSVE peak)
 ----------------------------------------------------------------------
-rms_norm_ref            M=4096   N=8192   0.68    GiB/s  (1.1% of the 59.5 GiB/s ceiling at this footprint)
-rms_norm_ssve_v6        M=4096   N=8192   21.03   GiB/s  (35.4% of the 59.5 GiB/s ceiling at this footprint)
-rms_norm_za             M=4096   N=8192   10.38   GiB/s  (17.5% of the 59.5 GiB/s ceiling at this footprint)
-rms_norm_jit            M=4096   N=8192   24.75   GiB/s  (41.6% of the 59.5 GiB/s ceiling at this footprint)
+rms_norm_ref            M=4096   N=8192   0.59    GiB/s  (1.0% of the 58.8 GiB/s ceiling at this footprint)
+rms_norm_ssve_v6        M=4096   N=8192   21.07   GiB/s  (35.9% of the 58.8 GiB/s ceiling at this footprint)
+rms_norm_za             M=4096   N=8192   10.31   GiB/s  (17.5% of the 58.8 GiB/s ceiling at this footprint)
+rms_norm_jit            M=4096   N=8192   24.70   GiB/s  (42.0% of the 58.8 GiB/s ceiling at this footprint)
 
-layer_norm_ref          M=4096   N=8192   0.53    GiB/s  (0.9% of the 59.5 GiB/s ceiling at this footprint)
-layer_norm_ssve_v6      M=4096   N=8192   13.25   GiB/s  (22.3% of the 59.5 GiB/s ceiling at this footprint)
-layer_norm_za           M=4096   N=8192   7.50    GiB/s  (12.6% of the 59.5 GiB/s ceiling at this footprint)
-layer_norm_jit          M=4096   N=8192   13.55   GiB/s  (22.8% of the 59.5 GiB/s ceiling at this footprint)
+layer_norm_ref          M=4096   N=8192   0.47    GiB/s  (0.8% of the 58.8 GiB/s ceiling at this footprint)
+layer_norm_ssve_v6      M=4096   N=8192   13.35   GiB/s  (22.7% of the 58.8 GiB/s ceiling at this footprint)
+layer_norm_za           M=4096   N=8192   7.53    GiB/s  (12.8% of the 58.8 GiB/s ceiling at this footprint)
+layer_norm_jit          M=4096   N=8192   13.52   GiB/s  (23.0% of the 58.8 GiB/s ceiling at this footprint)
 
 
 ================================================================================================
 SPRINT 6 - OpenMP ROW-PARALLEL SCALING, PER VARIANT
 ================================================================================================
 Shape M=4096 N=8192 (256 MiB), useful bytes (1R+1W).
-Ceilings: 1-core SSVE 59.5, chip-wide 85.5 GiB/s.
+Ceilings: 1-core SSVE 59.0, chip-wide 84.3 GiB/s.
 This M4 is 4 P-cores + 6 E-cores, so 10 threads is full occupancy
 and 16 is deliberate oversubscription.
 'moved' = physical traffic (RMSNorm 2R+1W = 1.5x useful, LayerNorm 3R+1W = 2x).
@@ -592,102 +592,102 @@ and 16 is deliberate oversubscription.
 RMSNorm V0 (baseline)   (moved = 1.50x useful)
 threads       GiB/s   speedup     %1core      %chip  moved %chip  correct
 -------------------------------------------------------------------------
-1             10.34     1.00x      17.4%      12.1%        18.1%      yes
-2             12.20     1.18x      20.5%      14.3%        21.4%      yes
-4             14.93     1.44x      25.1%      17.5%        26.2%      yes
-6             19.43     1.88x      32.7%      22.7%        34.1%      yes
-8             20.29     1.96x      34.1%      23.7%        35.6%      yes
-10            18.33     1.77x      30.8%      21.4%        32.2%      yes
-16            21.80     2.11x      36.7%      25.5%        38.2%      yes
+1             10.05     1.00x      17.0%      11.9%        17.9%      yes
+2             12.16     1.21x      20.6%      14.4%        21.6%      yes
+4             14.88     1.48x      25.2%      17.7%        26.5%      yes
+6             19.83     1.97x      33.6%      23.5%        35.3%      yes
+8             19.95     1.98x      33.8%      23.7%        35.5%      yes
+10            18.55     1.85x      31.4%      22.0%        33.0%      yes
+16            20.86     2.08x      35.3%      24.7%        37.1%      yes
 
 RMSNorm V6 (SME1)   (moved = 1.50x useful)
 threads       GiB/s   speedup     %1core      %chip  moved %chip  correct
 -------------------------------------------------------------------------
-1             20.21     1.00x      34.0%      23.6%        35.5%      yes
-2             25.57     1.27x      43.0%      29.9%        44.9%      yes
-4             34.14     1.69x      57.4%      39.9%        59.9%      yes
-6             38.75     1.92x      65.2%      45.3%        68.0%      yes
-8             38.74     1.92x      65.1%      45.3%        68.0%      yes
-10            40.49     2.00x      68.1%      47.4%        71.0%      yes
-16            42.57     2.11x      71.6%      49.8%        74.7%      yes
+1             21.07     1.00x      35.7%      25.0%        37.5%      yes
+2             26.24     1.25x      44.4%      31.1%        46.7%      yes
+4             34.31     1.63x      58.1%      40.7%        61.1%      yes
+6             38.29     1.82x      64.9%      45.4%        68.1%      yes
+8             39.22     1.86x      66.4%      46.5%        69.8%      yes
+10            40.18     1.91x      68.1%      47.7%        71.5%      yes
+16            42.52     2.02x      72.0%      50.4%        75.7%      yes
 
 RMSNorm V7 (SME2)   (moved = 1.50x useful)
 threads       GiB/s   speedup     %1core      %chip  moved %chip  correct
 -------------------------------------------------------------------------
-1             24.58     1.00x      41.3%      28.7%        43.1%      yes
-2             29.30     1.19x      49.3%      34.3%        51.4%      yes
-4             35.86     1.46x      60.3%      41.9%        62.9%      yes
-6             42.01     1.71x      70.6%      49.1%        73.7%      yes
-8             40.72     1.66x      68.5%      47.6%        71.4%      yes
-10            41.99     1.71x      70.6%      49.1%        73.7%      yes
-16            43.78     1.78x      73.6%      51.2%        76.8%      yes
+1             24.64     1.00x      41.7%      29.2%        43.8%      yes
+2             29.23     1.19x      49.5%      34.7%        52.0%      yes
+4             35.64     1.45x      60.4%      42.3%        63.4%      yes
+6             41.20     1.67x      69.8%      48.9%        73.3%      yes
+8             40.56     1.65x      68.7%      48.1%        72.2%      yes
+10            41.20     1.67x      69.8%      48.9%        73.3%      yes
+16            42.23     1.71x      71.5%      50.1%        75.1%      yes
 
 Work-distribution alignment (RMSNorm V7, identical work, only chunking differs)
 threads         naive     aligned       gain    naive chunk%64
 --------------------------------------------------------------
-1               24.75       24.80       0.2%                 0
-2               29.39       29.42       0.1%                 0
-4               35.88       35.80      -0.2%                 0
-6               29.78       41.47      39.2%                42
-8               41.47       40.75      -1.7%                 0
-10              29.15       41.28      41.6%                25
-16              44.47       44.58       0.3%                 0
+1               24.43       24.49       0.2%                 0
+2               29.25       29.16      -0.3%                 0
+4               35.69       35.64      -0.1%                 0
+6               29.85       42.07      40.9%                42
+8               40.76       40.40      -0.9%                 0
+10              28.81       41.08      42.6%                25
+16              43.18       43.11      -0.2%                 0
 
 LayerNorm V0 (baseline)   (moved = 2.00x useful)
 threads       GiB/s   speedup     %1core      %chip  moved %chip  correct
 -------------------------------------------------------------------------
-1              7.41     1.00x      12.5%       8.7%        17.3%      yes
-2              9.09     1.23x      15.3%      10.6%        21.3%      yes
-4             11.48     1.55x      19.3%      13.4%        26.9%      yes
-6             14.85     2.00x      25.0%      17.4%        34.7%      yes
-8             14.62     1.97x      24.6%      17.1%        34.2%      yes
-10            14.33     1.93x      24.1%      16.8%        33.5%      yes
-16            15.48     2.09x      26.0%      18.1%        36.2%      yes
+1              7.22     1.00x      12.2%       8.6%        17.1%      yes
+2              9.02     1.25x      15.3%      10.7%        21.4%      yes
+4             11.42     1.58x      19.3%      13.5%        27.1%      yes
+6             13.94     1.93x      23.6%      16.5%        33.1%      yes
+8             14.66     2.03x      24.8%      17.4%        34.8%      yes
+10            14.38     1.99x      24.4%      17.1%        34.1%      yes
+16            15.16     2.10x      25.7%      18.0%        36.0%      yes
 
 LayerNorm V6 (SME1)   (moved = 2.00x useful)
 threads       GiB/s   speedup     %1core      %chip  moved %chip  correct
 -------------------------------------------------------------------------
-1             13.23     1.00x      22.2%      15.5%        30.9%      yes
-2             18.10     1.37x      30.4%      21.2%        42.3%      yes
-4             22.37     1.69x      37.6%      26.2%        52.3%      yes
-6             23.66     1.79x      39.8%      27.7%        55.3%      yes
-8             24.32     1.84x      40.9%      28.4%        56.9%      yes
-10            24.61     1.86x      41.4%      28.8%        57.6%      yes
-16            25.57     1.93x      43.0%      29.9%        59.8%      yes
+1             13.13     1.00x      22.2%      15.6%        31.2%      yes
+2             18.12     1.38x      30.7%      21.5%        43.0%      yes
+4             22.34     1.70x      37.9%      26.5%        53.0%      yes
+6             23.60     1.80x      40.0%      28.0%        56.0%      yes
+8             24.59     1.87x      41.7%      29.2%        58.3%      yes
+10            24.76     1.89x      41.9%      29.4%        58.7%      yes
+16            25.55     1.95x      43.3%      30.3%        60.6%      yes
 
 LayerNorm V7 (SME2)   (moved = 2.00x useful)
 threads       GiB/s   speedup     %1core      %chip  moved %chip  correct
 -------------------------------------------------------------------------
-1             13.51     1.00x      22.7%      15.8%        31.6%      yes
-2             18.24     1.35x      30.7%      21.3%        42.7%      yes
-4             22.79     1.69x      38.3%      26.7%        53.3%      yes
-6             24.47     1.81x      41.1%      28.6%        57.2%      yes
-8             24.99     1.85x      42.0%      29.2%        58.5%      yes
-10            25.95     1.92x      43.6%      30.4%        60.7%      yes
-16            26.20     1.94x      44.1%      30.6%        61.3%      yes
+1             13.45     1.00x      22.8%      16.0%        31.9%      yes
+2             18.24     1.36x      30.9%      21.6%        43.3%      yes
+4             22.87     1.70x      38.7%      27.1%        54.3%      yes
+6             24.55     1.83x      41.6%      29.1%        58.3%      yes
+8             25.32     1.88x      42.9%      30.0%        60.1%      yes
+10            25.52     1.90x      43.2%      30.3%        60.5%      yes
+16            25.80     1.92x      43.7%      30.6%        61.2%      yes
 
 
 ==============================================================================
 SPRINT 5 - TEIR-INVOKED NORM, OpenMP ROW-PARALLEL
 ==============================================================================
 Shape M=4096 N=8192   working set 256.0 MiB   bytes counted: useful (1R+1W)
-Ceilings: 1-core SSVE 59.5 GiB/s, chip-wide 85.5 GiB/s
+Ceilings: 1-core SSVE 59.0 GiB/s, chip-wide 84.3 GiB/s
 
 RMSNorm
 threads  chunk rows  GiB/s       speedup     % of chip   correct
 ----------------------------------------------------------------------
-1        4096        24.67       1.00x       28.8%       yes
-2        2048        29.30       1.18x       34.2%       yes
-4        1024        35.87       1.45x       41.9%       yes
-8        512         41.07       1.66x       48.0%       yes
-16       256         43.40       1.75x       50.7%       yes
+1        4096        24.67       1.00x       29.2%       yes
+2        2048        29.13       1.18x       34.5%       yes
+4        1024        35.71       1.44x       42.3%       yes
+8        512         40.51       1.64x       48.0%       yes
+16       256         43.57       1.76x       51.6%       yes
 
 LayerNorm
 threads  chunk rows  GiB/s       speedup     % of chip   correct
 ----------------------------------------------------------------------
-1        4096        13.52       1.00x       15.8%       yes
-2        2048        18.14       1.34x       21.2%       yes
-4        1024        22.82       1.68x       26.6%       yes
-8        512         25.03       1.85x       29.2%       yes
-16       256         26.51       1.96x       31.0%       yes
+1        4096        13.48       1.00x       15.9%       yes
+2        2048        18.31       1.35x       21.7%       yes
+4        1024        22.90       1.69x       27.1%       yes
+8        512         25.41       1.88x       30.1%       yes
+16       256         26.07       1.93x       30.9%       yes
 

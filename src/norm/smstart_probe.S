@@ -1,45 +1,29 @@
-// smstart_probe.S — Sprint 7b: the cost of the streaming-mode transition itself.
+// smstart_probe.S — what the streaming-mode transition actually costs.
 //
-// WHY THIS EXISTS
-// ---------------
-// Every "fixed per-call cost" figure in this project so far was INFERRED, by
-// fitting t(N) = t0 + b*N to a sweep and reading the intercept.  Sprint 2a did
-// that and reported t0 ~ 1 us/call.  Sprint 4 then found roughly 70 % of that
-// intercept was not streaming cost at all but an uncached `cpu_supports_sme()`
-// sysctl the wrapper performed on every call.  An inferred quantity absorbed a
-// bug that had nothing to do with the thing being measured.
+// Every per-call figure in this project was previously INFERRED from the
+// intercept of a linear fit.  That instrument had already failed once: Sprint
+// 2a read t0 ~ 1 us/call from it, and ~70% of that turned out to be an
+// uncached cpu_supports_sme() sysctl in the wrapper.  An inferred quantity had
+// absorbed an unrelated bug, so this measures the transition directly.
 //
-// This probe measures the transition DIRECTLY instead of inferring it, so the
-// two numbers can be compared and the intercept can finally be decomposed.
+// Method: two entry points differing in exactly one thing — a loop of
+// `iters` x {smstart; smstop} against the identical loop with the pair
+// removed.  The difference over `iters` is the transition with loop overhead
+// subtracted; branch structure, counter and alignment are otherwise the same.
 //
-// METHOD
-// ------
-// Two entry points that differ in exactly one thing:
+// Both bare-form (SM + ZA) and SM-only variants are measured: the ZA kernels
+// pay the first, the SSVE kernels the second.  They came out equal, so
+// managing PSTATE.ZA is free.
 //
-//   smstart_probe_pairs(iters)  — a loop of `iters` x { smstart; smstop }
-//   smstart_probe_empty(iters)  — the same loop with the pair removed
-//
-// The difference of the two timings, divided by `iters`, is the cost of one
-// smstart/smstop pair with the loop overhead subtracted out.  Everything else
-// about the two paths is identical: same branch structure, same counter, same
-// alignment directive, same prologue/epilogue.
-//
-// Both are bare `smstart`/`smstop` (SM + ZA), matching what the ZA kernels do.
-// The SM-only forms are measured separately by the caller passing the variant.
-//
-// ABI NOTE (the bug this project has hit repeatedly — Sprint 4 #6/#8,
-// Sprint 5's prerequisite, Sprint 6 §1.1): entering or leaving streaming mode
-// ZEROES d8-d15, which alias the low 128 bits of z8-z15 and which AAPCS64
-// makes callee-saved.  A probe that does not save them corrupts its caller,
-// and Sprint 6 Part 3 #5 records a `mova` microbenchmark that reported `inf`
-// for exactly this reason.  This file therefore saves and restores all eight
-// even though it never names them — the hazard comes from the transition, not
-// from the register allocation.
+// ABI: entering or leaving streaming mode zeroes d8-d15, which AAPCS64 makes
+// callee-saved.  These probes save all eight even though they name none — a
+// mova microbenchmark that skipped this reported `inf`.
 //
 // C signatures:
-//   void smstart_probe_pairs(int64_t iters);   // x0
-//   void smstart_probe_empty(int64_t iters);   // x0
-//   void smstart_probe_sm_only(int64_t iters); // x0
+//   void smstart_probe_pairs(int64_t iters);    // x0
+//   void smstart_probe_sm_only(int64_t iters);  // x0
+//   void smstart_probe_empty(int64_t iters);    // x0
+//   int64_t svl_fp32_lanes(void);               // -> x0
 
 #ifdef __APPLE__
     #define SYMBOL(s) _##s
@@ -58,16 +42,11 @@
 .align 4
 
 // ---------------------------------------------------------------------------
-// svl_fp32_lanes: the streaming vector length, in FP32 lanes.
+// svl_fp32_lanes -> x0: streaming vector length in FP32 lanes.
 //
-//   int64_t svl_fp32_lanes(void);   // -> x0
-//
-// Decision D says never hard-code SVL; query it.  Until now nothing on the C++
-// side could, so the harness would have had to write "64 rows per group" as a
-// literal.  RDSVL is the instruction meant for exactly this: it returns the
-// streaming vector length in bytes WITHOUT entering streaming mode, so no
-// smstart/smstop pair (and no d8-d15 hazard) is involved.  Divide by 4 for
-// FP32 lanes.  On the M4, SVL = 512 bits = 64 bytes -> 16 lanes.
+// Decision D says never hard-code SVL.  RDSVL returns it in bytes WITHOUT
+// entering streaming mode, so there is no smstart/smstop pair and no
+// d8-d15 hazard; divide by 4 for lanes.
 // ---------------------------------------------------------------------------
 SYMBOL(svl_fp32_lanes):
     rdsvl   x0, #1          // x0 = SVL in bytes
@@ -89,9 +68,7 @@ SYMBOL(svl_fp32_lanes):
     ldp d8,  d9,  [sp], #64
 .endm
 
-// ---------------------------------------------------------------------------
 // smstart_probe_pairs: iters x { smstart ; smstop }   (SM + ZA)
-// ---------------------------------------------------------------------------
 SYMBOL(smstart_probe_pairs):
     SAVE_D8_D15
     cbz     x0, 2f
@@ -105,10 +82,8 @@ SYMBOL(smstart_probe_pairs):
     ret
 
 // ---------------------------------------------------------------------------
-// smstart_probe_sm_only: iters x { smstart sm ; smstop sm }
-//
-// The SSVE norm kernels use the SM-only forms (they never touch ZA), so this
-// is the variant that matters for V6/V7; the pairs above are what the ZA
+// smstart_probe_sm_only: iters x { smstart sm ; smstop sm }.  This is what
+// the SSVE kernels pay; the pairs above are what the ZA kernels pay.
 // kernels pay.  Measuring both shows whether managing PSTATE.ZA costs extra.
 // ---------------------------------------------------------------------------
 SYMBOL(smstart_probe_sm_only):
@@ -123,13 +98,8 @@ SYMBOL(smstart_probe_sm_only):
     RESTORE_D8_D15
     ret
 
-// ---------------------------------------------------------------------------
-// smstart_probe_empty: the identical loop WITHOUT the transition.
-//
-// This is the control.  Subtracting its time removes the loop's own branch and
-// counter cost, so what remains is attributable to the transition rather than
-// to the harness measuring a loop.
-// ---------------------------------------------------------------------------
+// smstart_probe_empty: the control — the identical loop without the
+// transition, so subtracting its time leaves the transition itself.
 SYMBOL(smstart_probe_empty):
     SAVE_D8_D15
     cbz     x0, 2f

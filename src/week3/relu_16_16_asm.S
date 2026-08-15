@@ -11,10 +11,8 @@
 SYMBOL(relu_16_16_asm):
 // x0: a (src), x1: b (dst), x2: ld_a, x3: ld_b, w4: trans_b
 //
-// Bare SMSTART/SMSTOP (not "smstart sm"): the trans_b == 1 path stages the
-// transpose through a ZA tile, so PSTATE.ZA must be enabled too.  SMSTOP
-// disables both again before returning, so no ZA state is live across the
-// call (AAPCS64 lazy-save hazard avoided).
+// Bare SMSTART/SMSTOP (not `smstart sm`): the trans_b == 1 path stages the
+// transpose through a ZA tile, so PSTATE.ZA must be enabled too.
     smstart                  // Enter SSVE mode + enable ZA
     ptrue   p0.s, vl16
     fmov     z31.s, #0.0      // Initialize comparison register with 0.0
@@ -22,32 +20,17 @@ SYMBOL(relu_16_16_asm):
     cbz     w4, 1f           // If trans_b == 0, jump to col-major logic
 
     // -----------------------------------------------------------------
-    // CASE: trans_b == 1 — ReLU with a transposing store, i.e.
+    // trans_b == 1 — ReLU with a transposing store:
     //   b[i*ld_b + j] = max(a[i + j*ld_a], 0)
     //
-    // Same constraint, and the same fix, as identity_16_16_asm.S: this
-    // path used to express the transpose as a scatter store with vector
-    // offsets (ST1W with a Zm offset register), which is NOT available
-    // inside streaming mode without FEAT_SME_FA64 -- a feature Apple has
-    // not implemented.  (Same constraint documented in
-    // src/norm/rms_norm_ssve.S, and the reason every norm kernel uses
-    // scalar-base LD1W/ST1W.)  It therefore never completed on M4; CI
-    // never caught it because the CI runners have no SME and skip the
-    // whole test case, and test_week3 only ever exercised trans_b == 0.
-    //
-    // The fix uses the ZA array for what context.md 5 sanctions it for --
-    // 2-D data movement.  Load A's columns into ZA HORIZONTAL slices, then
-    // read VERTICAL slices back out: slice j holds A column j, so
-    // za0[j][i] = a[i + j*ld_a], and vertical slice i is
-    // { za0[j][i] for j } = row i of A -- exactly the 16 contiguous floats
-    // row i of B needs.  Every slice is written before it is read, so no
-    // "zero {za}" is required.  ReLU is elementwise, so it may be applied
-    // on either side of the staging; clamping on the way OUT matches the
-    // week6 Unary::emit_transposed relu path.
-    //
-    // The fp32 MOVA slice-offset immediate is only 2 bits (0-3); the full
-    // 0-15 slice index is W12 (which must be W12-W15) plus that offset,
-    // hence 4 groups of 4 with W12 stepping by 4.
+    // Same constraint and same fix as identity_16_16_asm.S: streaming mode has
+    // no scatter without FEAT_SME_FA64, so the transpose is staged through ZA
+    // (A's columns into horizontal slices, vertical slices back out as rows).
+    // This path had never been exercised — the ReLU test only passed
+    // trans_b = 0 — which is how it kept the broken scatter store long after
+    // the identical defect was fixed next door.  ReLU is elementwise, so it
+    // may be applied on either side of the staging; clamping on the way OUT
+    // matches week6's Unary::emit_transposed.
     // -----------------------------------------------------------------
     mov     x6, x0          // running A pointer (walks columns)
     mov     w12, #0         // ZA slice base

@@ -1,17 +1,19 @@
-// layer_norm_ssve_v6.S — LayerNorm SSVE Sprint 2c ablation V6
+// layer_norm_ssve_v6.S — LayerNorm V6: 4-row-block contiguity grouping.
+// The Sprint-2 incumbent, and what the JIT emits on an SME1 host.
 //
-// Change vs V4: 4-row-block contiguity grouping.  When at least 4 VL-row
-// blocks remain, all three passes (mean, variance, normalize) are run for
-// that group of 4 blocks before moving to the next group.  Within each pass,
-// each column j is touched by four back-to-back LD1W/ST1W instructions at
-// [ptr], [ptr,#1,mul vl], [ptr,#2,mul vl], [ptr,#3,mul vl], producing a
-// 4×VL-row contiguous burst that the DRAM prefetcher can stream efficiently.
-// Four independent FP accumulators (one per block) in the reduction passes
-// also expose ILP.  Residency across passes is improved for working sets
-// that fit in L2 (all three passes on one 4-block chunk complete before
-// touching a different chunk).  For m not divisible by 4×VL, the remaining
-// 1–3 blocks are processed by the V2-style predicated single-block tail.
-// C signature: same as layer_norm_ssve_v2.
+// When at least 4 VL-row blocks remain, all three passes (mean, variance,
+// normalize) run on that group before moving on, so each column j is touched
+// by four back-to-back LD1W/ST1W at [ptr], [ptr,#1,mul vl], [ptr,#2,mul vl],
+// [ptr,#3,mul vl] — a 256 B contiguous burst the prefetcher streams well.
+// Four independent accumulators per reduction pass keep V4's ILP, and running
+// all three passes on one chunk before the next improves residency for
+// working sets that fit L2.  Measured +71% vs V0 in the true-DRAM regime.
+//
+// Rows past the last full group take the V2-style predicated single-block
+// tail.  The group path is unpredicated (p0, all lanes active).
+//
+// C signature: identical to layer_norm_ssve (layer_norm_ssve.S).
+//   (a, b, gamma, beta, m, n, ld_a, ld_b) in x0-x7, eps in s0.
 
 #ifdef __APPLE__
     #define SYM(s) _##s
@@ -43,13 +45,9 @@
 
 SYM(layer_norm_ssve_v6):
 
-    // Prologue — frame extended to 144 bytes (was 80) to save the FULL
-    // d8-d15 callee-saved range (AAPCS64), not just d8.  smstart/smstop
-    // clobber all of d8-d15 (they alias the low bits of z8-z15), so a
-    // caller holding live values in d9-d15 across this call would
-    // otherwise have them silently zeroed (Sprint-5 prerequisite fix —
-    // this was previously masked by a caller-side `volatile` workaround
-    // in the bench harness, which a real TEIR caller will not have).
+    // Prologue — 144-byte frame saving the FULL d8-d15 callee-saved range:
+    // smstart/smstop zero all eight, and z8-z15 are this kernel's
+    // accumulators, so the save is doubly required.
     stp  x19, x20, [sp, #-144]!
     stp  x21, x22, [sp, #16]
     stp  x23, x24, [sp, #32]
@@ -73,9 +71,6 @@ SYM(layer_norm_ssve_v6):
     lsl   x26, x7, #2
     fmov  s8, s0
     str   s0, [sp, #128]           // dedicated eps stash, stored BEFORE smstart
-                                    // (streaming-mode entry clobbers D8 too, not
-                                    // just D9-D15 — memory survives smstart, no
-                                    // register does; verified empirically)
 
     cbz   x23, .Lret_v6            // m == 0: never enter the streaming region,
                                     // so skip the smstop as well (rms_norm_ssve_v6.S

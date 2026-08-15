@@ -36,16 +36,16 @@ OUT.mkdir(parents=True, exist_ok=True)
 # Data (submission run — see PROVENANCE above)
 # --------------------------------------------------------------------------
 FOOTPRINT_MIB = [0.0625, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256]
-NEON = [293.44, 225.64, 162.76, 126.01, 125.34, 124.34, 124.01,
-        123.84, 118.67, 100.52, 85.01, 81.27, 79.28]
-SSVE = [104.51, 97.66, 101.05, 117.21, 116.04, 116.03, 115.88,
-        115.67, 115.35, 96.13, 63.11, 60.17, 59.45]
-DRAM_CONST = 59.45          # the single denominator used until Sprint 6
+NEON = [244.14, 225.22, 158.43, 110.57, 109.53, 109.27, 108.76,
+        108.82, 105.57, 92.26, 82.22, 79.35, 78.08]
+SSVE = [104.69, 97.66, 117.21, 117.21, 116.04, 116.03, 115.74,
+        115.60, 115.60, 91.25, 62.16, 59.46, 58.78]
+DRAM_CONST = 58.78          # the single denominator used until Sprint 6
 
 ABL_STAGES = ["scalar\nref", "V0\nSSVE", "V4\nILP", "V6\ncontiguity",
               "V7\nSME2", "ZA\nresidency", "JIT\nauto"]
-ABL_RMS = [0.67, 10.37, 10.75, 20.97, 24.76, 10.37, 24.76]
-ABL_LN = [0.53, 7.40, 7.95, 13.21, 13.55, 7.51, 13.47]
+ABL_RMS = [0.59, 10.04, 10.67, 21.05, 24.63, 10.29, 24.68]
+ABL_LN = [0.47, 7.38, 7.69, 13.09, 13.52, 7.39, 13.49]
 
 SHIFTS = [1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6]
 ERR_NAIVE = [5.09e-7, 1.39e-4, 8.52e-3, 1.25e0, 1.59e2, 1.02e4, 6.80e6]
@@ -54,14 +54,14 @@ ERR_WELFORD = [2.07e-7, 1.98e-7, 4.16e-7, 4.73e-6, 5.41e-5, 8.94e-5, 6.71e-3]
 NAIVE_NEG_FROM = 1e5
 
 ROWS = [1, 2, 4, 8, 16, 64, 256]
-T_SCALAR = [0.250, 1.041, 2.166, 4.375, 8.833, 66.666, 378.375]
-T_V7 = [7.708, 6.834, 6.250, 6.208, 6.167, 6.208, 25.291]
+T_SCALAR = [0.250, 1.166, 2.416, 4.916, 9.916, 74.833, 422.208]
+T_V7 = [9.291, 6.708, 6.291, 6.209, 6.250, 6.166, 25.250]
 GROUP_ROWS = 64
 
 BASE_LABELS = ["ours (V7)", "torch\neager", "torch\ncompile",
                "ExecuTorch\nportable", "ExecuTorch\nXNNPACK"]
-BASE_RMS = [24.76, 2.76, 5.90, 3.26, 4.19]
-BASE_LN = [13.55, 7.35, 4.44, 5.92, 5.93]
+BASE_RMS = [24.63, 2.76, 5.90, 3.26, 4.19]
+BASE_LN = [13.52, 7.35, 4.44, 5.92, 5.93]
 
 
 def _bar_group(f, i, n, values_colours, label, label_size=10.5,
@@ -125,14 +125,14 @@ def fig_ceiling():
 
     # Annotations in whitespace, tied to the data by leader lines.
     f.callout(["the shaded gap is the error:",
-               "115.4 real ceiling vs 59.5 assumed",
+               "115.6 real ceiling vs 58.8 assumed",
                "→ cache-resident % of peak inflated ~2×"],
               tx=f.px(1.0), ty=f.py(78), target=(4, 87), fill=ACCENT,
               size=11, weight="600")
     # Anchored to the right margin so it cannot run off the canvas, and
     # placed BELOW the dashed line where the DRAM band is empty.
     f.text(f.w - f.pr - 4, f.py(DRAM_CONST) + 18,
-           "59.5 GiB/s — the single DRAM constant", size=10.5, anchor="end",
+           "58.8 GiB/s — the single DRAM constant", size=10.5, anchor="end",
            fill=ACCENT, layer=f.fg)
     # Lower-left is the only region both curves leave clear.
     f.callout(["below ~512 KiB this is not bandwidth:",
@@ -208,14 +208,14 @@ def fig_stability():
               tx=f.px(1.1e3), ty=f.py(6.4), target=(1e5, math.log10(1.02e4)),
               fill=ACCENT, size=11, weight="600")
     # Below every curve: the blue trace bottoms out near 1e-7, so -8.0 is clear.
-    f.callout(["two-pass is flat across 12 orders of κ — this immunity",
-               "is what LayerNorm's third traversal buys"],
+    f.callout(["two-pass stays below ~3e-5 across the sweep — that",
+               "insensitivity is what LayerNorm's third traversal buys"],
               tx=f.px(1.15), ty=f.py(-7.9), target=(1e3, math.log10(3.75e-7)),
               size=10.5, fill=BLUE)
 
     f.draw_legend(prefer=[(f.px(1.15), f.pt + 12)])
     f.footnote(["RMSNorm never forms a mean, so it never performs this "
-                "subtraction: its error is flat at ~5e-6 across the whole sweep."])
+                "subtraction: its error stays below ~1.8e-5 across the sweep."])
     return f.save(OUT / "stability.svg")
 
 

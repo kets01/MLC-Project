@@ -1,27 +1,14 @@
-// rms_norm_ssve_v2.S — Sprint 2 ablation V2
+// rms_norm_ssve_v2.S — RMSNorm V2: V1 with 1/N hoisted.
 //
-// Change vs V1:
-//   The vector FDIV(sumsq, N) inside the hot outer loop is replaced by a
-//   single scalar FDIV(1.0, N) computed once before the loop, broadcast
-//   to Z5, and then used as a vector FMUL inside the loop.
+// The per-block vector FDIV becomes one scalar FDIV before the outer loop,
+// broadcast into z5 and applied as a vector FMUL.  Measured gain is ~0: the
+// FDIV fired once per VL-row block, not per element, so it was already
+// amortized.  Kept as the ablation row that proves it.
 //
-//   FDIV is expensive (~12-14 cycles) and fired once per row-block in V1.
-//   Moving it outside the loop and making it scalar costs almost nothing
-//   (amortized over all M/VL iterations).
+// z5 = {1/N, ...}, computed AFTER smstart (which zeroes every Z register).
 //
-// Register added vs V1:
-//   Z5 — {1/N, 1/N, ...}, constant across all outer iterations.
-//        Computed after SMSTART so that the SVE DUP instruction is legal.
-//
-// C signature (identical to V0/V1):
-//   void rms_norm_ssve_v2(const float *a,     // x0
-//                         float       *b,     // x1
-//                         const float *gamma, // x2
-//                         int64_t      m,     // x3
-//                         int64_t      n,     // x4
-//                         int64_t      ld_a,  // x5
-//                         int64_t      ld_b,  // x6
-//                         float        eps);  // s0
+// C signature: identical to rms_norm_ssve (rms_norm_ssve.S).
+//   (a, b, gamma, m, n, ld_a, ld_b) in x0-x6, eps in s0.
 
 #ifdef __APPLE__
     #define SYMBOL(s) _##s
@@ -52,10 +39,6 @@ SYMBOL(rms_norm_ssve_v2):
     str  d13,      [sp, #96]
     str  d14,      [sp, #104]
     str  d15,      [sp, #112]
-                                // (Sprint 6: the Sprint-5 d8-d15 AAPCS64 fix,
-                                // extended from the two V6 winners to every
-                                // kernel -- smstart/smstop zero all of d8-d15,
-                                // so a caller's d9-d15 were silently destroyed)
 
     mov   x19, x0
     mov   x20, x1
@@ -66,9 +49,6 @@ SYMBOL(rms_norm_ssve_v2):
     lsl   x25, x6, #2
     fmov  s8,  s0          // save eps into callee-saved S8
     str   s0,  [sp, #120]   // dedicated eps stash, stored BEFORE smstart
-                            // (streaming-mode entry clobbers D8 too, not just
-                            // D9-D15 — memory survives smstart, no register
-                            // does; verified empirically)
 
     cbz   x22, .Lrow_done_v2
 
@@ -86,9 +66,7 @@ SYMBOL(rms_norm_ssve_v2):
 
     mov    x0, #0
 
-    // -----------------------------------------------------------------------
     // Outer loop — one iteration per block of VL rows.
-    // -----------------------------------------------------------------------
 .Lblock_loop_v2:
     whilelo  p1.s, x0, x22
     b.none   .Lblock_done_v2

@@ -1,69 +1,34 @@
-// layer_norm_za.S — Sprint 3: LayerNorm with ZA-tile residency (Mariza, gated)
+// layer_norm_za.S — LayerNorm staged through the SME ZA array.  A measured,
+// explained NEGATIVE result, kept as an ablation row.
 //
-// Gate context (ROADMAP Sprint 3, report Sprint-3 section): RMSNorm's ZA
-// prototype (rms_norm_za.S, Ketsia) staged x through ZA to turn its 2R+1W
-// into 1R+1W and lost decisively — 39-65% slower than the SSVE winner V6,
-// because each element now costs two extra MOVA (Z<->ZA) ops, and MOVA
-// throughput, not DRAM bandwidth, is the actual bottleneck at these shapes.
-// The roadmap left LayerNorm's ZA prototype as a reasoned-skip candidate for
-// exactly that reason, but flagged LayerNorm's structural difference: it is
-// 3R+1W (mean pass, variance pass, normalize pass all re-read x), the
-// largest residency headroom of the two norms (RMSNorm has none left after
-// V6; LayerNorm's V6 still pays a full extra read for the normalize pass).
+// RMSNorm's ZA prototype already lost (39-65% slower than V6, mova-bound),
+// but LayerNorm has the larger residency headroom — 3R+1W, so TWO extra reads
+// are available to eliminate rather than one — so the gate was resolved by
+// measuring rather than inferring.
 //
-// Rather than the partial "3R->2R" fusion the roadmap sketched (fuse only
-// the mean+variance sub-passes, still re-read x once for normalize), this
-// prototype goes further: x is staged in ZA ONCE during the mean pass and
-// reused from ZA for BOTH the variance pass and the normalize pass -- a true
-// 3R+1W -> 1R+1W fusion (50% traffic cut, vs RMSNorm's 33%). This is the
-// most decisive test available of the Sprint-3 hypothesis: if trading MORE
-// DRAM reads for MORE MOVA ops (3 per element here, vs RMSNorm's 2) still
-// loses, that confirms the MOVA-throughput ceiling is the real, norm-agnostic
-// constraint, not an artifact of RMSNorm's specific structure.
+// This goes further than the sketched "3R->2R" partial fusion: x is staged in
+// ZA once during the mean pass and reused from ZA for BOTH the variance and
+// normalize passes, a true 3R+1W -> 1R+1W (50% traffic cut vs RMSNorm's 33%).
+// That is the most decisive form of the test, because it costs THREE movas per
+// element to RMSNorm's two.
 //
-// The hypothesis, written before measuring (mirrors rms_norm_za.S's own
-// pre-registration): ZA does not raise DRAM bandwidth. If RMSNorm's 33%
-// traffic cut still lost to MOVA cost, LayerNorm's bigger 50% cut must clear
-// a proportionally bigger MOVA tax (one MOVA store + two MOVA loads per
-// element, vs RMSNorm's one store + one load) to break even. Expectation:
-// this also loses, and by a larger margin than RMSNorm's -39..-65%, because
-// the extra MOVA per element (three vs two) outweighs the extra DRAM read
-// saved. A win here would be the surprising result; a bigger loss confirms
-// the mechanism cleanly.
+// Pre-registered expectation: also a loss, and by a LARGER margin, since the
+// bigger traffic cut has to clear a proportionally bigger mova tax.  Measured
+// 51-68% slower than V6 — confirming mova throughput, not DRAM bandwidth, as
+// the norm-agnostic constraint.
 //
-// REDUCTION STAYS SSVE (context.md §5): both the mean sum and the sum of
-// squared deviations are horizontal reductions (fadd / fmla accumulating in
-// Z-registers), never routed through the ZA matrix accumulator. ZA is pure
-// residency staging for x -- it does not compute anything.
+// The REDUCTION stays SSVE (context.md §5): both the mean sum and the sum of
+// squared deviations accumulate in Z registers; ZA is pure residency staging.
 //
-// Structure per SVL-row block (rows contiguous in column-major memory, so
-// one SVL-vector load grabs SVL consecutive rows of one column):
-//   pass 1 (1 memory READ):  z = ld1w x;  mean_acc += z;  mova z -> ZA slice
-//   mean = mean_acc / N
-//   pass 2 (0 memory reads): z = mova ZA slice;  var_acc += (z-mean)^2
-//   inv_std = 1/sqrt(var_acc/N + eps)      (FRSQRTE + one Newton-Raphson step)
-//   pass 3 (1 memory WRITE): z = mova ZA slice;  y = (z-mean)*inv_std*gamma+beta
+// Same ZA constraints as rms_norm_za: tile number is an instruction immediate
+// (four macro expansions), slice-select must be W12-W15 (w13), bare
+// smstart/smstop for PSTATE.SM + PSTATE.ZA, every slice written before read.
+// Fast path requires N <= 4*SVL (from cntw, decision D); wider rows take a
+// correct streaming three-pass fallback.  Single accumulators run in strict
+// column order, matching the reference.
 //
-// The ZA-resident fast path only applies while the row fits in ZA (N <=
-// 4*SVL, derived at runtime -- decision D, never a literal 64). For wider
-// rows the block cannot stay resident; fall back to a correct streaming
-// three-pass (3R+1W, no ZA) so the kernel is right for every shape. That
-// fallback is not the performance story -- V6 remains the large-N incumbent.
-//
-// Single accumulators (mean_acc = z4, var_acc = z6) run strictly in column
-// order across all four tile sections, matching the scalar reference's
-// summation order exactly -- no reassociation tolerance needed (kTol = 1e-5).
-//
-// C signature (identical to layer_norm_ssve_v6):
-//   void layer_norm_za(const float *a,     // x0
-//                      float       *b,     // x1
-//                      const float *gamma, // x2
-//                      const float *beta,  // x3
-//                      int64_t      m,     // x4
-//                      int64_t      n,     // x5
-//                      int64_t      ld_a,  // x6
-//                      int64_t      ld_b,  // x7
-//                      float        eps);  // s0
+// C signature: identical to layer_norm_ssve (layer_norm_ssve.S).
+//   (a, b, gamma, beta, m, n, ld_a, ld_b) in x0-x7, eps in s0.
 
 #ifdef __APPLE__
     #define SYMBOL(s) _##s
@@ -175,10 +140,6 @@ SYMBOL(layer_norm_za):
     str  d13,      [sp, #104]
     str  d14,      [sp, #112]
     str  d15,      [sp, #120]
-                                // (Sprint 6: the Sprint-5 d8-d15 AAPCS64 fix,
-                                // extended from the two V6 winners to every
-                                // kernel -- smstart/smstop zero all of d8-d15,
-                                // so a caller's d9-d15 were silently destroyed)
 
     mov   x19, x0                // a
     mov   x20, x1                // b

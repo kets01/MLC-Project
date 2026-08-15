@@ -11,18 +11,17 @@ using namespace mini_jit::teir;
 using Catch::Approx;
 
 // ===========================================================================
-// Sprint 5 — the TEIR runtime executing the REAL data/*.teir files.
+// The TEIR runtime executing the REAL data/*.teir files.
 //
-// Every tree below is parsed from its file (TeirParser), and every result is
-// verified element-wise against a scalar reference that replays the file's
-// own axis strides on non-uniform data. The previous tests used constant
-// data (all-ones / all-fives) and spot-checked single elements — checks that
-// cannot distinguish a correct kernel from an addressing bug, which is
-// exactly how the week6 GEMM's broken B-operand path stayed invisible.
+// Every tree is parsed from its file and verified element-wise against a
+// scalar reference that replays the file's own axis strides on non-uniform
+// data.  The previous tests used constant data and spot-checked single
+// elements — checks that cannot distinguish a correct kernel from an
+// addressing bug, which is exactly how the week6 GEMM's broken B-operand path
+// stayed invisible.
 //
-// Helpers walk the parsed tree to shrink outer loop ranges where the file's
-// full problem (8192^3 matmul) is too large for a unit test; the reference
-// then replays the SAME shrunken iteration space.
+// Helpers shrink outer loop ranges where the file's full problem is too large
+// for a unit test; the reference then replays the same shrunken space.
 // ===========================================================================
 
 namespace {

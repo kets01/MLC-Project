@@ -1,8 +1,8 @@
 MLC-Norm Sprint 7.5 — External Baselines
 =========================================
 
-How do we compare to state of the art?
-----------------------------------------
+External framework comparison
+-------------------------------
 
 Every performance claim in this report so far has been *internal*: kernel
 against kernel, against our own measured roofline. That answers "did the
@@ -12,7 +12,7 @@ norms against two widely-used implementations on the same machine.
 .. warning::
 
    **This project already got a vendor comparison wrong once**
-   (``sprint6_errors.md`` §2.7–2.8), and the harness rules below each exist
+   (``docs/dev-notes/sprint-errors/sprint6_errors.md`` §2.7–2.8), and the harness rules below each exist
    because of one of those failures:
 
    * an "Accelerate RMSNorm" that was really our own ``vDSP_svesq`` +
@@ -64,7 +64,7 @@ Method
   reference *before* its throughput is quoted. This is what catches the failure
   mode above — two sides computing different functions.
 * **One thread**, same shapes, same byte convention (useful = 1R + 1W).
-* **Current upstream versions**, on a standalone Python 3.12 installed
+* **Versions used for the reported run**, on a standalone Python 3.12 installed
   specifically for this: **PyTorch 2.13.0** and **ExecuTorch 1.4.1**, with the
   **XNNPACK delegate** — the path that is actually deployed on device —
   exercised rather than skipped. Nothing is patched; both libraries are
@@ -165,7 +165,7 @@ per row is the one our margin is quoted against.
      - 4.27
      - 6.64
      - 5.8×
-   * - 1024×2048 → 4096×8192 (256 MiB)
+   * - 4096×8192 (256 MiB)
      - **24.65**
      - 2.77
      - 5.90
@@ -226,7 +226,7 @@ Against the pre-registration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The expectations were written into the ROADMAP and committed *before* any
-measurement, which is the practice ``sprint6_errors.md`` credits for every claim
+measurement, which is the practice ``docs/dev-notes/sprint-errors/sprint6_errors.md`` credits for every claim
 that survived contact.
 
 .. list-table::
@@ -291,11 +291,12 @@ and the report does not claim it is:
    no number: on macOS 15.2 the reachable LayerNorm entry point is a
    *deprecated* generic filter that we could create but not execute
    (``BNNSFilterApply`` → −1 in every configuration tried, including a minimal
-   single-sample case), and **there is no RMSNorm in BNNS on this OS at all** —
-   every "RMS" symbol in the headers is ``RMSProp``. Apple's current BNNSGraph
+   single-sample case), and **the Accelerate/BNNS API available on the macOS 15.2
+   reference system does not expose a direct RMSNorm operation** — every
+   "RMS" symbol in those headers is ``RMSProp``. Apple's current BNNSGraph
    does provide ``layerNorm(axes:epsilon:)`` and ``rmsNorm(scale:epsilon:)``,
    but both are absent from this SDK and post-date this OS. Full evidence in
-   ``bnns_investigation.md``.
+   ``docs/dev-notes/tooling/bnns_investigation.md``.
 2. **These are general-purpose frameworks, not specialist kernels.** A framework
    whose CPU RMSNorm decomposes in eager mode is a baseline for "what you get
    without a kernel", not a state-of-the-art bar for RMSNorm.
@@ -315,7 +316,7 @@ and the report does not claim it is:
    to compute the same function, and the vDSP composition it referred to was
    the very thing §2.7 identified as mislabelled. It is therefore withdrawn
    rather than restated: we do not have a verified vendor number in either
-   direction. The §2.7–2.8 entries stay in ``sprint6_errors.md``, because that
+   direction. The §2.7–2.8 entries stay in ``docs/dev-notes/sprint-errors/sprint6_errors.md``, because that
    is the record of our own mistake.
 
 The defensible claim is therefore narrow and worth stating precisely: *against
@@ -368,7 +369,7 @@ What is left open
 * **A specialist vendor kernel.** This is the most valuable missing baseline
   and it remains missing by decision, not oversight. Apple's BNNS was
   investigated and could not be driven on macOS 15.2, and it has no RMSNorm
-  there at all (``bnns_investigation.md``); the remaining route would be
+  there at all (``docs/dev-notes/tooling/bnns_investigation.md``); the remaining route would be
   BNNSGraph via CoreML, which was scoped out. Until such a number exists,
   **this report makes no claim about how our kernels compare to a specialist
   vendor implementation, in either direction.**

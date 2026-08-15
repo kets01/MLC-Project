@@ -1,38 +1,16 @@
-// rms_norm_ssve_v5.S — Sprint 2b ablation V5
+// rms_norm_ssve_v5.S — RMSNorm V5: V4 with software-pipelined loads.
 //
-// Change vs V4 (4 independent FMLA accumulator chains):
-//   Pass 1 is explicitly software-pipelined: the NEXT group of four column
-//   loads (register set B: Z27-Z30) is issued BEFORE the current group's
-//   FMLAs (register set A: Z0/Z24-Z26) consume their data, rotating A/B
-//   each step.  The load stream therefore always runs one 4-column group
-//   ahead of the compute in program order.
+// The next group of four column loads (B: z27-z30) is issued before the
+// current group's FMLAs (A: z0/z24-z26) consume their data, rotating each
+// step, so the load stream runs one group ahead in program order.
 //
-// Hypothesis (written before measuring): ~0 gain on the M4.  V4 already
-// broke the accumulator dependency chain; issuing loads early in PROGRAM
-// order should add nothing on a deep out-of-order core whose register
-// renaming already hoists them.  V5 exists to test whether V4's win was
-// limited by rename/issue depth — if it was, explicit scheduling helps;
-// if not, the ≈0 result closes the "more outstanding loads" family
-// (including PRFW prefetch, which works the same lever one step earlier).
+// Pre-registered expectation: ~0 on the M4, because V4 already broke the
+// dependency chain and register renaming hoists the loads anyway.  Measured
+// ~0, which closes the "more outstanding loads" family — PRFW prefetch works
+// the same lever one step earlier and gets a reasoned skip.
 //
-// Pipeline structure (x9 counts columns not yet LOADED):
-//   preload A                      (consumes 4)
-//   loop:  load B ; FMLA A         (steady state, alternating)
-//          load A ; FMLA B
-//   tails: FMLA the group left in flight, then 0-3 single columns.
-//
-// Everything after the reduction (combine, inv_rms, pass 2) is identical
-// to V4.
-//
-// C signature (identical to V0-V4):
-//   void rms_norm_ssve_v5(const float *a,     // x0
-//                         float       *b,     // x1
-//                         const float *gamma, // x2
-//                         int64_t      m,     // x3
-//                         int64_t      n,     // x4
-//                         int64_t      ld_a,  // x5
-//                         int64_t      ld_b,  // x6
-//                         float        eps);  // s0
+// C signature: identical to rms_norm_ssve (rms_norm_ssve.S).
+//   (a, b, gamma, m, n, ld_a, ld_b) in x0-x6, eps in s0.
 
 #ifdef __APPLE__
     #define SYMBOL(s) _##s
@@ -63,10 +41,6 @@ SYMBOL(rms_norm_ssve_v5):
     str  d13,      [sp, #96]
     str  d14,      [sp, #104]
     str  d15,      [sp, #112]
-                                // (Sprint 6: the Sprint-5 d8-d15 AAPCS64 fix,
-                                // extended from the two V6 winners to every
-                                // kernel -- smstart/smstop zero all of d8-d15,
-                                // so a caller's d9-d15 were silently destroyed)
 
     mov   x19, x0
     mov   x20, x1
@@ -77,9 +51,6 @@ SYMBOL(rms_norm_ssve_v5):
     lsl   x25, x6, #2          // stride_b in bytes
     fmov  s8,  s0
     str   s0,  [sp, #120]       // dedicated eps stash, stored BEFORE smstart
-                                // (streaming-mode entry clobbers D8 too, not
-                                // just D9-D15 — memory survives smstart, no
-                                // register does; verified empirically)
 
     cbz   x22, .Lrow_done_v5
 

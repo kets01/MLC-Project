@@ -16,12 +16,9 @@
 namespace mini_jit::teir {
 
 TeirRuntime::TeirRuntime() {
-    // Emission is host-portable (only EXECUTING the emitted kernel needs
-    // SME), so no SME guard is needed here. Unary/Gemm kernels are no
-    // longer pre-generated at a fixed 16x16(x16) shape — the real .teir
-    // files each need their own shape (48x32, 32x64x512, ...), so those
-    // are generated lazily and cached by get_unary_kernel/get_gemm_kernel
-    // the first time a parsed Invocation asks for them.
+    // Emission is host-portable — only EXECUTING the result needs SME — so no
+    // guard is needed here.  Unary/Gemm kernels are generated lazily and
+    // cached, because each .teir file needs its own shape.
     if (norm_rms_gen.generate(mini_jit::Norm::ntype_t::rms) == mini_jit::Norm::error_t::success)
         rmsnorm_kernel = norm_rms_gen.get_rms_kernel();
     if (norm_layer_gen.generate(mini_jit::Norm::ntype_t::layer) == mini_jit::Norm::error_t::success)
@@ -141,12 +138,10 @@ void TeirRuntime::traverse(Node* node, RuntimeContext& ctx) {
                                            call->trans_b);
             if (kernel) kernel(ctx.data_a, ctx.data_b, call->ld_a, call->ld_b);
         } else if (call->kernel_name == "zero") {
-            // Zero writes the output tile ("out" -> pointer slot c). The
-            // parser normalized the tile to m runs of n contiguous floats,
-            // ld_b apart. Dense tiles (ld == run length, matmul.teir) are
-            // one kernel call; interleaved tiles (contraction.teir's q x s
-            // tile, where other axes sit between consecutive runs) are
-            // zeroed run by run.
+            // Zero writes the output tile ("out" -> slot c).  The parser
+            // normalized it to m runs of n contiguous floats, ld_b apart.
+            // Dense tiles are one call; interleaved tiles (contraction.teir's
+            // q x s tile) are zeroed run by run.
             if (call->ld_b == call->n) {
                 auto kernel = get_unary_kernel(static_cast<uint32_t>(call->m),
                                                static_cast<uint32_t>(call->n),

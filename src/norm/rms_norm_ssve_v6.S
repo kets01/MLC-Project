@@ -1,39 +1,26 @@
-// rms_norm_ssve_v6.S — Sprint 2b ablation V6 (contiguity blocking)
+// rms_norm_ssve_v6.S — RMSNorm V6: 4-row-block contiguity grouping.  The
+// Sprint-2 incumbent, and the kernel the JIT emits on an SME1 host.
 //
-// What the measurement said (see the Sprint-2b report section): the ROADMAP's
-// original V6 premise — "make pass 2 re-read x from cache, not DRAM" — is
-// already satisfied by the loop structure: the reuse distance between pass 1
-// and pass 2 of one VL-row block is 64*N bytes (~128-256 KB at bench shapes),
-// which is L2-resident by construction.  The measured DRAM-regime collapse
-// (footprint > L2: 36 -> 18 -> 11 GiB/s) correlates with ACCESS DENSITY
-// instead: each column touch reads 64 B out of every 4*M bytes, and the
-// sparser that walk, the worse DRAM/prefetcher efficiency gets (at equal
-// 32 MB footprint: M=512/N=8192 runs 31 GiB/s, M=2048/N=2048 runs 18 GiB/s).
+// The lever is ACCESS DENSITY, not residency.  Pass-2 residency was measured
+// to be already satisfied (reuse distance 64*N ~ 128-256 KB, L2-resident by
+// construction); what actually collapses throughput is a sparse column walk —
+// each touch reads 64 B out of every 4*M bytes, and at equal 32 MB footprint
+// M=512/N=8192 runs 31 GiB/s against M=2048/N=2048's 18.
 //
-// Change vs V4: process FOUR consecutive VL-row blocks per outer iteration.
-//   - Each column touch becomes 4 consecutive LD1Ws ([x8, #k, MUL VL]) =
-//     256 B contiguous, 4x denser DRAM access per pass.
-//   - The four FMLA accumulators are now one PER ROW-BLOCK: still four
-//     independent chains (keeps V4's ILP win), but each row's sum
-//     accumulates sequentially over columns — the SAME summation order as
-//     the scalar reference, so V6 needs no reassociation tolerance.
-//   - inv_rms is computed for four blocks per group (amortized), and pass 2
-//     shares each LD1RW gamma broadcast across the four blocks (4x fewer
-//     gamma loads).
+// So V6 processes FOUR consecutive VL-row blocks per outer iteration:
+//   - each column touch becomes 4 consecutive LD1Ws ([x8, #k, MUL VL]) =
+//     256 B contiguous, 4x denser;
+//   - one accumulator PER ROW BLOCK keeps V4's four independent chains while
+//     each row sums sequentially, matching the reference's order (so V6 needs
+//     no reassociation tolerance, unlike V4/V5);
+//   - inv_rms is computed for four blocks at once and pass 2 shares each
+//     LD1RW gamma broadcast across them.
 //
-// Rows beyond the last full 4-block group fall back to a V2-style
-// single-block predicated loop (at most 3 blocks + tail; perf shapes are
-// group-dominated).  Group path needs no predication: all lanes active (p0).
+// Rows past the last full group take a V2-style predicated single-block tail.
+// The group path needs no predication: all lanes active under p0.
 //
-// C signature (identical to V0-V5):
-//   void rms_norm_ssve_v6(const float *a,     // x0
-//                         float       *b,     // x1
-//                         const float *gamma, // x2
-//                         int64_t      m,     // x3
-//                         int64_t      n,     // x4
-//                         int64_t      ld_a,  // x5
-//                         int64_t      ld_b,  // x6
-//                         float        eps);  // s0
+// C signature: identical to rms_norm_ssve (rms_norm_ssve.S).
+//   (a, b, gamma, m, n, ld_a, ld_b) in x0-x6, eps in s0.
 
 #ifdef __APPLE__
     #define SYMBOL(s) _##s
@@ -50,13 +37,8 @@
 
 SYMBOL(rms_norm_ssve_v6):
 
-    // Prologue — frame extended to 128 bytes (was 80) to save the FULL
-    // d8-d15 callee-saved range (AAPCS64), not just d8.  smstart/smstop
-    // clobber all of d8-d15 (they alias the low bits of z8-z15), so a
-    // caller holding live values in d9-d15 across this call would
-    // otherwise have them silently zeroed (Sprint-5 prerequisite fix —
-    // this was previously masked by a caller-side `volatile` workaround
-    // in the bench harness, which a real TEIR caller will not have).
+    // Prologue — 128-byte frame saving the FULL d8-d15 callee-saved range:
+    // smstart/smstop zero all eight (they alias the low bits of z8-z15).
     stp  x19, x20, [sp, #-128]!
     stp  x21, x22, [sp, #16]
     stp  x23, x24, [sp, #32]
@@ -79,9 +61,6 @@ SYMBOL(rms_norm_ssve_v6):
     lsl   x25, x6, #2          // stride_b in bytes
     fmov  s8,  s0
     str   s0,  [sp, #120]      // dedicated eps stash, stored BEFORE smstart
-                                // (streaming-mode entry clobbers D8 too, not
-                                // just D9-D15 — memory survives smstart, no
-                                // register does; verified empirically)
 
     cbz   x22, .Lrow_done_v6
 
@@ -100,9 +79,7 @@ SYMBOL(rms_norm_ssve_v6):
     lsl   x14, x14, #2         // x14 = 4*VL rows per group
     mov   x0, #0               // x0 = row index
 
-    // -----------------------------------------------------------------------
     // Group loop — four full VL-row blocks per iteration, no predication.
-    // -----------------------------------------------------------------------
 .Lgroup_loop_v6:
     add   x6, x0, x14
     cmp   x6, x22
@@ -194,9 +171,7 @@ SYMBOL(rms_norm_ssve_v6):
     mov    x0,  x6
     b      .Lgroup_loop_v6
 
-    // -----------------------------------------------------------------------
     // Tail — up to 3 full blocks + a partial block, V2-style predicated loop.
-    // -----------------------------------------------------------------------
 .Ltail_blocks_v6:
     whilelo  p1.s, x0, x22
     b.none   .Lblock_done_v6

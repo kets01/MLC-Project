@@ -3,8 +3,7 @@
 **Status: closed, not measured.** This is a developer note, deliberately kept
 out of the project report. It records a baseline we investigated and could not
 obtain a number for, what we established along the way, and why we stopped.
-It follows the same convention as `sprint3_errors.md`, `sprint4_errors.md` and
-`sprint6_errors.md`: a result that did not work is still a result, provided the
+It follows the same convention as the sprint error logs in `../sprint-errors/`: a result that did not work is still a result, provided the
 evidence is written down.
 
 Everything below was verified on the course machine — **Apple M4, macOS 15.2

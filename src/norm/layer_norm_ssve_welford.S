@@ -1,23 +1,23 @@
-// layer_norm_ssve_welford.S — LayerNorm SSVE Sprint 2c ablation: Welford
+// layer_norm_ssve_welford.S — LayerNorm with Welford's online algorithm.
 //
-// Replaces the two-pass (mean then variance) reduction with Welford's online
-// algorithm, computing per-lane mean and M2 in a single column sweep.  This
-// eliminates one full read of the input, giving 2R+1W traffic (same as
-// RMSNorm) instead of LayerNorm's usual 3R+1W.
+// Replaces the two reduction passes with a single column sweep carrying
+// per-lane (mean, M2), cutting traffic from 3R+1W to 2R+1W — the same as
+// RMSNorm.  It still loses, and the bottleneck is deliberately exposed:
+// Welford needs mean += delta/count with count changing every column, so a
+// scalar FDIV per column serialises the loop.  Measured 25-30% slower than
+// V6 despite moving 25% fewer bytes, which is what keeps two-pass incumbent.
 //
-// The bottleneck intentionally exposed: Welford's update rule requires
-//   mean_new = mean + delta / count    (count = j+1, changes every column)
-// so a scalar reciprocal 1/(j+1) must be computed and broadcast before each
-// FMLA.  Here we use a scalar FDIV per column iteration (~12-cycle latency),
-// which serialises the column loop and is expected to make this variant
-// SLOWER than the two-pass V2 for all N > ~64.
+// On accuracy the two are comparable, not "two-pass dominates": Welford's
+// VARIANCE is the more accurate of the two, and its extra output error comes
+// from the running MEAN updating at full input magnitude every element.
 //
-// Two passes overall:
-//   Pass 1 (Welford): per-lane (mean, M2) updated across all N columns.
-//            After the loop: variance = M2 * 1/N; inv_std via FRSQRTE+NR.
-//   Pass 2 (normalize): y = (x - mean) * inv_std * gamma + beta.
+// Two passes overall: Welford, then normalise/scale/shift.
 //
-// C signature: same as layer_norm_ssve_v2.
+// Registers: z8 running mean, z9 running M2, z6 x, z0 delta, z1 delta2,
+// z2 = {1/count}, s20 = 1.0 for the per-column reciprocal.
+//
+// C signature: identical to layer_norm_ssve (layer_norm_ssve.S).
+//   (a, b, gamma, beta, m, n, ld_a, ld_b) in x0-x7, eps in s0.
 
 #ifdef __APPLE__
     #define SYM(s) _##s
@@ -62,10 +62,6 @@ SYM(layer_norm_ssve_welford):
     str  d13,      [sp, #104]
     str  d14,      [sp, #112]
     str  d15,      [sp, #120]
-                                // (Sprint 6: the Sprint-5 d8-d15 AAPCS64 fix,
-                                // extended from the two V6 winners to every
-                                // kernel -- smstart/smstop zero all of d8-d15,
-                                // so a caller's d9-d15 were silently destroyed)
 
     mov   x19, x0
     mov   x20, x1
@@ -77,9 +73,6 @@ SYM(layer_norm_ssve_welford):
     lsl   x26, x7, #2
     fmov  s8, s0
     str   s0, [sp, #128]            // dedicated eps stash, stored BEFORE smstart
-                                    // (streaming-mode entry clobbers D8 too, not
-                                    // just D9-D15 — memory survives smstart, no
-                                    // register does; verified empirically)
 
     cbz   x23, .Ldone_wf
 

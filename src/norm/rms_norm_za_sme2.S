@@ -1,58 +1,40 @@
-// rms_norm_za_sme2.S — Sprint 6: ZA residency rebuilt on SME2 multi-vector MOVA
+// rms_norm_za_sme2.S — ZA residency rebuilt on SME2 multi-vector MOVA.
 //
-// WHY: a skip whose premise measurement overturned.
-// Sprint 3's rms_norm_za.S staged x through ZA to turn 2R+1W into 1R+1W and
-// lost badly — 39-65 % slower than the SSVE winner and pinned at ~10 GiB/s at
-// EVERY footprint, the signature of a non-memory bottleneck.  It was
-// attributed to "mova throughput", but that conflates two causes:
-//     ZA-PORT-bound  -> the array itself limits transfer; nothing helps
-//     ISSUE-bound    -> instructions/cycle limits it; folding 4 MOVAs into one
-//                       multi-vector MOVA should give ~4x
-// Sprint 6 measured it directly (no memory traffic, 16 vectors moved either
-// way): single-vector 3.88 G vec/s vs 4-vector 15.50 G vec/s = exactly 4.00x.
-// MOVA is ISSUE-bound, so the Sprint-3 extrapolation ("even 2x only reaches
-// ~20 GiB/s, a tie at best") used a factor of 2 where the hardware gives 4.
-// This kernel is the follow-through.
+// Sprint 3 left ZA alone on the reasoning that even a 2x mova speed-up would
+// only reach a tie with V6.  That rested on an untested factor: mova had never
+// been characterised as ISSUE-bound vs ZA-PORT-bound.  Measured directly (no
+// memory traffic, 16 vectors either way): single-vector 3.88 G vec/s,
+// 4-vector 15.50 = exactly 4.00x.  It is issue-bound and the fold is 4:1, so
+// the skip's own arithmetic did not hold and the kernel was built.
 //
-// WHAT CHANGES vs rms_norm_za.S: four columns are staged per chunk, so the ZA
-// traffic folds 4:1 in both directions —
-//     4x  mova za{t}v.s[w13,0], p1/m, z{n}.s  ->  mova za.s[w8,0,vgx4], {z0-z3}
-//     4x  mova z{n}.s, p1/m, za{t}v.s[w13,0]  ->  mova {z0-z3}, za.s[w8,0,vgx4]
-// i.e. 2 MOVAs per 4 columns instead of 8.  The loads and stores are unchanged
-// (columns are strided in column-major layout, so they stay single-vector).
+// Result: +62% over the Sprint-3 ZA kernel, and still 37% behind V7.  The
+// residual cause is different from the original diagnosis — these kernels
+// touch ONE SVL-row block per iteration (64 B per column) against V6/V7's
+// four (256 B), so what binds is access density, not mova.
 //
-// VERIFIED BEFORE USE, not assumed (CLAUDE.md §10): the multi-vector form
-// addresses ZA as a vector GROUP (`za.s[w8, 0, vgx4]`) with the slice cursor
-// in W8-W11, which is a different addressing scheme from the single-vector
-// tile/slice form (`za0v.s[w12,0]`, W12-W15).  A standalone probe wrote two
-// groups at w8=0 and w8=4, clobbered every Z register, read both back and
-// compared: 0/128 elements wrong.  So the cursor means what this kernel
-// assumes and the groups do not alias.
+// vs rms_norm_za: four columns are staged per chunk, folding ZA traffic 4:1
+// in both directions (2 MOVAs per 4 columns instead of 8).  Loads and stores
+// stay single-vector — columns are strided in column-major layout.
 //
-// REGISTER NOTE — the trap this kernel is designed around: the multi-vector
-// form REQUIRES its slice cursor in W8-W11, but every other norm kernel here
-// uses x8 as a walking pointer.  Writing W8 zeroes the upper half of X8 —
-// exactly the week-6 GEMM defect Sprint 5 found (MOVZ W12 corrupting a stride
-// parked in X12).  Pointers therefore live in x12-x15 and x8 is never used as
-// a pointer.
+// ADDRESSING, verified rather than assumed: the group form `za.s[w8,0,vgx4]`
+// takes slice w8 from EACH of the four 32-bit tiles, so a group is 4 vectors,
+// the cursor runs 0..SVL_S-1 and steps by ONE, not four.  (Stepping by four
+// wraps silently at N > SVL; the N=17/31 tests pin it.)  A standalone probe
+// wrote two groups, clobbered every Z register, read both back: 0/128 wrong.
 //
-// NUMERICS: the four columns of a chunk accumulate into ONE accumulator with
-// four sequential FMLAs, so per-row summation stays in strict column order —
-// identical to the scalar reference and to rms_norm_za.  No reassociation
-// tolerance needed.
+// REGISTER TRAP this kernel is designed around: the multi-vector form requires
+// its slice cursor in W8-W11, and writing W8 zeroes the upper half of X8 — the
+// week-6 GEMM defect in miniature.  Pointers therefore live in x12-x15 and x8
+// is never used as one.
 //
-// CAPACITY: `za.s[w8, 0, vgx4]` selects slice w8 from EACH of the four 32-bit
-// tiles, so one group = 4 vectors and the cursor runs 0..SVL_S-1 (0..15 at
-// SVL=512), stepping by ONE per chunk — not by four.  That gives 16 groups x
-// 4 vectors = 64 vectors, so the resident path covers N <= 4*SVL — the window
-// as rms_norm_za, with the same streaming fallback for wider rows.  N not a
-// multiple of 4 pads the final chunk with zeroed vectors rather than reading
-// out of bounds; the padded slices are staged but never read back.
+// Numerics: the four columns of a chunk accumulate into ONE accumulator with
+// four sequential FMLAs, so summation stays in strict column order.
+// Capacity: 16 groups x 4 vectors = 64, so the resident path covers
+// N <= 4*SVL; N % 4 pads the final chunk with zeroed vectors rather than
+// reading out of bounds, and the padded slices are never read back.
 //
-// C signature: identical to every other RMSNorm kernel.
-//   void rms_norm_za_sme2(const float *a, float *b, const float *gamma,
-//                         int64_t m, int64_t n, int64_t ld_a, int64_t ld_b,
-//                         float eps);
+// C signature: identical to rms_norm_ssve (rms_norm_ssve.S).
+//   (a, b, gamma, m, n, ld_a, ld_b) in x0-x6, eps in s0.
 
 #ifdef __APPLE__
     #define SYMBOL(s) _##s

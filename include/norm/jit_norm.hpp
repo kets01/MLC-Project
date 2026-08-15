@@ -2,20 +2,20 @@
 #include <cstdint>
 #include <vector>
 
-// Sprint 4 — mini_jit::Norm: JIT generator for the norm primitives.
+// mini_jit::Norm — runtime code generator for the norm primitives.
 //
-// Emits, at runtime, the instruction words of the measured Sprint-2 winners
-// (rms_norm_ssve_v6 / layer_norm_ssve_v6 — the ZA variants lost in Sprint 3
-// and are deliberately not emitted).  Verified by the encoding-diff test:
-// the generated buffer must match, word for word, the toolchain-assembled
-// hand-written kernel it reproduces (tests/test_norm.cpp, [sprint4]).
+// Emits the instruction words of the measured winners (V6, or V7 where
+// FEAT_SME2 is present) into a week5 JitEngine buffer via InstGen, following
+// the week6 mini_jit::Unary pattern.  Emission is a one-time cost and the
+// returned function pointer is reused.
 //
-// Follows the week6 mini_jit::Unary pattern: generate() emits via InstGen,
-// get_*_kernel() returns a function pointer into a week5 JitEngine buffer.
-// Emission is a one-time cost; the pointer is reused across calls.
+// Verified by the encoding-diff test: the generated buffer must match, word
+// for word, the toolchain-assembled hand-written kernel it reproduces, so the
+// generator inherits that kernel's verification instead of re-earning it.
+// The ZA variants lost their ablation and are deliberately not emitted.
 //
-// File is jit_norm.hpp, not Norm.hpp: APFS is case-insensitive, so Norm.hpp
-// would collide with the existing norm.hpp.
+// Named jit_norm.hpp, not Norm.hpp: APFS is case-insensitive, so Norm.hpp and
+// norm.hpp are the same directory entry.
 
 namespace mini_jit {
   class Norm;
@@ -66,16 +66,11 @@ class mini_jit::Norm {
     /**
      * @brief Emit a kernel for the requested norm.
      *
-     * Emission is host-portable (it only writes instruction words), but
-     * EXECUTING the result requires SME — and, for isa_t::sme2, FEAT_SME2.
-     * With isa_t::automatic the generator makes the *feature*-dependent
-     * emission decision Sprint 4 left open: Sprint 6 measured V7 (SME2
-     * multi-vector) at +17% over V6 for RMSNorm in the DRAM regime, so it is
-     * emitted wherever the hardware supports it and V6 is emitted otherwise.
-     *
-     * Passing sme1/sme2 explicitly forces the choice, which is what lets the
-     * encoding-diff tests compare each emitted variant against the
-     * corresponding hand-written kernel regardless of the build host.
+     * Emission is host-portable — it only writes instruction words — but
+     * EXECUTING the result requires SME, and FEAT_SME2 for isa_t::sme2.
+     * isa_t::automatic makes the feature-dependent choice; passing sme1 or
+     * sme2 explicitly is what lets the encoding-diff tests compare each
+     * variant against its hand-written counterpart on any build host.
      *
      * @return error_t::success on success.
      */

@@ -1,40 +1,29 @@
-// layer_norm_za_sme2.S — Sprint 6: LayerNorm ZA residency on SME2 multi-vector MOVA
+// layer_norm_za_sme2.S — LayerNorm ZA residency on SME2 multi-vector MOVA.
 //
-// The LayerNorm counterpart of rms_norm_za_sme2.S, built for the same reason
-// Sprint 3 built layer_norm_za.S rather than inferring from RMSNorm: the two
-// norms stage a different AMOUNT of data through ZA, so the MOVA fold has a
-// different amount of work to remove.
+// The counterpart of rms_norm_za_sme2, built for the same reason Sprint 3
+// built layer_norm_za rather than inferring from RMSNorm: the two norms stage
+// a different amount through ZA, so the 4:1 fold has different work to remove.
+//   RMSNorm  : 2 movas/element (1 store in pass 1, 1 load in pass 2)
+//   LayerNorm: 3 movas/element (1 store, then loads for variance and normalize)
+// LayerNorm pays a 50% larger mova tax, so it should gain MORE from the fold.
+// Measured +114% against RMSNorm's +62% — and still 24% behind V7.
 //
-//   RMSNorm ZA : 2 MOVAs per element (1 store in pass 1, 1 load in pass 2)
-//   LayerNorm  : 3 MOVAs per element (1 store in the mean pass, then 2 loads —
-//                one for the variance pass, one for the normalize pass)
+// vs layer_norm_za: four columns staged per chunk, so each of the three passes
+// issues ONE multi-vector MOVA per four columns instead of four.
 //
-// So LayerNorm pays a 50 % larger MOVA tax, and Sprint 3 measured it losing by
-// a correspondingly larger margin (51-68 % vs RMSNorm's 39-65 %).  If the
-// 4:1 multi-vector fold is what relieves that tax, LayerNorm should gain MORE
-// from this rebuild than RMSNorm did (+62 %) — it has more MOVA to remove.
-// That is the pre-registered expectation; the measurement decides.
+// ADDRESSING (verified, see rms_norm_za_sme2.S): `za.s[w8,0,vgx4]` takes slice
+// w8 from each of the four tiles, so a group is 4 vectors, the cursor steps by
+// ONE, and capacity is 16 groups x 4 = 4*SVL columns.  Stepping by four wraps
+// silently at N > SVL — found by test, pinned by the N=17/31 cases.
 //
-// WHAT CHANGES vs layer_norm_za.S: four columns are staged per chunk, so each
-// of the three passes issues ONE multi-vector MOVA per four columns instead of
-// four single-vector ones — 3 MOVAs per 4 columns instead of 12.
+// REGISTER NOTE: the multi-vector form needs its cursor in W8-W11, and writing
+// W8 zeroes the upper half of X8, so x8 is never used as a pointer here.
 //
-// ADDRESSING (verified, not assumed — see rms_norm_za_sme2.S): the group form
-// `za.s[w8, 0, vgx4]` takes slice w8 from EACH of the four 32-bit tiles, so a
-// group is 4 vectors, the cursor runs 0..SVL_S-1 and steps by ONE, and total
-// capacity is 16 groups x 4 = 64 vectors = 4*SVL columns.  Stepping the cursor
-// by four instead of one silently wraps at N > SVL — that bug was found by
-// test, and the shapes N = 17/31 pin it.
+// Numerics: within a chunk the four columns accumulate into ONE accumulator
+// with sequential FADD/FMLA, so summation stays in strict column order.
 //
-// REGISTER NOTE: the multi-vector form requires its slice cursor in W8-W11,
-// and writing W8 zeroes the upper half of X8, so x8 is never used as a pointer
-// here (the week-6 GEMM defect Sprint 5 found, in miniature).
-//
-// NUMERICS: within a chunk the four columns accumulate into ONE accumulator
-// with sequential FMLA/FADD, so per-row summation stays in strict column order
-// — identical to the scalar reference and to layer_norm_za.
-//
-// C signature: identical to layer_norm_ssve_v6.
+// C signature: identical to layer_norm_ssve (layer_norm_ssve.S).
+//   (a, b, gamma, beta, m, n, ld_a, ld_b) in x0-x7, eps in s0.
 
 #ifdef __APPLE__
     #define SYM(s) _##s

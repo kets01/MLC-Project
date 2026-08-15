@@ -1,53 +1,33 @@
-// layer_norm_ssve_v7.S — Sprint 6 ablation V7 (SME2 multi-vector load/store)
+// layer_norm_ssve_v7.S — LayerNorm V7: V6 with SME2 multi-vector accesses.
 //
-// The LayerNorm counterpart of rms_norm_ssve_v7, built to answer whether that
-// kernel's surprising result is norm-agnostic or an artifact of RMSNorm's
-// structure — the same question Sprint 3 asked of ZA staging, and answered by
-// building the LayerNorm prototype rather than inferring from RMSNorm alone.
+// Built as the DISCRIMINATING experiment for RMSNorm V7's surprising +17%.
+// Two mechanisms explain that win and predict opposite outcomes here:
+//   - "fewer instructions retire faster" -> LayerNorm folds MORE accesses per
+//     element (three passes, not two), so it should gain MORE;
+//   - "relieved memory-level parallelism" -> LayerNorm does more FP work per
+//     byte and is less memory-starved, so it should gain LESS.
+// Pre-registered prediction: less than RMSNorm's +17%.  Measured +2.7%, which
+// falsifies the instruction-count explanation.  (A later 2-vector control then
+// falsified the MLP one too; see rms_norm_ssve_v7x2.S.)
 //
-// WHAT V7 CHANGES vs V6: nothing but instruction count.  V6's group loop
-// already touches four consecutive VL-row blocks per column, addressed as
-// [x8], [x8,#1,MUL VL], [x8,#2,MUL VL], [x8,#3,MUL VL] — exactly the operand
-// shape of SME2's 4-vector contiguous access.  So each pass folds
-//     4x LD1W  ->  1x  ld1w {z0.s-z3.s}, pn8/z, [x8]
-// and pass 3 additionally folds
-//     4x ST1W  ->  1x  st1w {z0.s-z3.s}, pn8, [x9]
-// Same addresses, same traffic, same arithmetic, same summation order.  V7
-// must therefore be BIT-IDENTICAL to V6, which is how the tests check it.
+// The change itself is only instruction count: V6 already touches four
+// consecutive VL-row blocks per column, so each pass folds 4x LD1W into one
+// 4-vector ld1w and pass 3 folds 4x ST1W into one st1w.  Same addresses, same
+// traffic, same summation order — V7 must be BIT-IDENTICAL to V6.
 //
-// WHY LAYERNORM IS THE INTERESTING SECOND DATA POINT.  LayerNorm is 3R+1W to
-// RMSNorm's 2R+1W and does more FP work per byte, so it sits further from the
-// memory ceiling (V6: ~22% of the streaming roofline in DRAM vs RMSNorm's
-// ~34%).  If the RMSNorm win came from relieving memory-level parallelism —
-// one instruction requesting 256 contiguous bytes occupying less load-tracking
-// capacity than four requesting 64 — then LayerNorm, being less
-// memory-limited, should gain LESS.  If instead the win were simply "fewer
-// instructions retire faster", LayerNorm executes MORE folded accesses per
-// element (three passes, not two) and should gain MORE.
+// NO TAIL PATH: `whilelo pn8.s, x0, x23, vlx4` describes min(M - x0, 4*VL)
+// active elements across the group, so one body serves full and partial
+// groups.  V6's separate tail touched 64 B per column instead of 256 B, i.e.
+// the low access density V6 exists to fix.
 //
-// PRE-REGISTERED PREDICTION: a smaller relative gain than RMSNorm's +17%,
-// because the lever is memory-level parallelism and LayerNorm is the less
-// memory-bound of the two.  The two hypotheses above make opposite
-// predictions, so this measurement discriminates between them — which is the
-// point of building it rather than assuming.
+// Inactive-lane safety: loads are pn8/z, so a fully-inactive block ends with
+// mean 0 and variance 0 -> +eps, which FRSQRTE handles finitely; the store
+// uses the same counter.
 //
-// NO TAIL PATH (Sprint 6 revision, mirroring rms_norm_ssve_v7.S).  V6 needs a
-// separate 1-3 block tail because its group path is unpredicated; that tail
-// touches 64 B per column instead of 256 B, reverting to the low access
-// density V6 exists to fix.  SME2's predicate-as-counter removes the second
-// path entirely: `whilelo pn8.s, x0, x23, vlx4` describes
-// min(M - x0, 4*VL) active elements ACROSS the four-vector group, so one loop
-// body serves the full groups AND the final partial group.
+// Requires FEAT_SME2; the C++ bridge dispatches to V6 when it is absent.
 //
-// Inactive-lane safety: loads are pn8/z, so inactive lanes read 0 and a
-// fully-inactive block ends with mean 0 and variance 0 -> +eps, which
-// FRSQRTE handles finitely; the store is governed by the same counter, so
-// nothing invalid reaches memory.
-//
-// The C++ bridge dispatches to V6 when FEAT_SME2 is absent, so the same
-// binary runs on M1/M2 and on M4.
-//
-// C signature: same as layer_norm_ssve_v2/v6.
+// C signature: identical to layer_norm_ssve (layer_norm_ssve.S).
+//   (a, b, gamma, beta, m, n, ld_a, ld_b) in x0-x7, eps in s0.
 
 #ifdef __APPLE__
     #define SYM(s) _##s

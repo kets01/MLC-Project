@@ -142,14 +142,14 @@ TEST_CASE("Gemm Functional Verification", "[gemm]") {
 }
 
 // ===========================================================================
-// Sprint 5 — GEMM layout correctness (non-uniform data).
+// GEMM layout correctness on non-uniform data.
 //
 // The 27-setting test above is blind to addressing bugs: any 16 contiguous
-// floats of an all-ones matrix ARE the correct operand vector, and it only
-// checks C[0]. These tests verify every element against a scalar reference
-// with data where each element is distinct, across the layout combinations
-// (trans_a, trans_b, trans_c), including the ZA-staged transpose paths and
-// the accumulate (C += A*B) semantics the TEIR schedules rely on.
+// floats of an all-ones matrix ARE the correct operand vector, and it checks
+// only C[0].  These verify every element against a scalar reference with
+// distinct data, across all (trans_a, trans_b, trans_c) combinations —
+// including the ZA-staged transpose paths and the accumulate semantics the
+// TEIR schedules rely on.
 // ===========================================================================
 
 #include "week6/Instgen.hpp"
@@ -274,11 +274,10 @@ TEST_CASE("Sprint5 Unary trans_b=1: transposing copy vs scalar reference",
           "[sprint5][unary][transb]") {
     if (!cpu_supports_sme()) SKIP("SME required");
 
-    // The course Unary.h has always specified trans_b ("1 if B is stored in
-    // row-major order") while A is column-major — B := op(A) with opposite
-    // storage IS the memory transpose; this implementation previously
-    // ignored the flag. 32x48 covers multi-tile both ways; padded lds
-    // exercise the ld-awareness of the trans_b=1 path.
+    // Unary.h has always specified trans_b as "1 if B is row-major" while A is
+    // column-major — i.e. the memory transpose — and this implementation once
+    // ignored the flag.  32x48 covers multi-tile both ways; padded lds
+    // exercise the ld-awareness of that path.
     struct { uint32_t m, n, lda_pad, ldb_pad; } shapes[] = {
         {16, 16, 0, 0}, {32, 48, 0, 0}, {32, 48, 5, 3},
     };

@@ -1,35 +1,23 @@
-// rms_norm_ssve_v7x2.S — Sprint 6 CONTROL for V7 (2-vector instead of 4)
+// rms_norm_ssve_v7x2.S — 2-vector CONTROL for V7.  Measurement variant only,
+// not an incumbent and not emitted by the JIT.
 //
-// PURPOSE: discriminate between the two explanations for V7's +17% DRAM win.
-// V7 folds four single-vector accesses into ONE 4-vector access (256 B per
-// load instruction).  This control does the identical work with TWO 2-vector
-// accesses (128 B per load instruction).  Everything else is held constant:
-// same four row-blocks per group, same 256 B of data touched per column, same
-// addresses, same arithmetic, same summation order, no tail path.  The ONLY
-// variable is bytes-of-demand exposed per load instruction.
+// Identical work to V7 and the same 256 B per column, issued as two 2-vector
+// accesses instead of one 4-vector access, so bytes-of-demand per load
+// instruction is the only variable:
+//   V6 = 4 x 64 B,  V7x2 = 2 x 128 B,  V7 = 1 x 256 B.
 //
-//   V6      : 4 x 64 B  per column   (4 instructions)
-//   V7x2    : 2 x 128 B per column   (2 instructions)   <- this kernel
-//   V7      : 1 x 256 B per column   (1 instruction)
+// It falsified both pre-registered explanations of V7's DRAM win: the gain
+// saturates (4->2 captures 90% of it, 2->1 adds 1.5%), which fits neither a
+// proportional memory-level-parallelism model nor a 256 B-burst prefetcher
+// model.  What survives is a threshold effect on load-instruction count.
 //
-// PREDICTIONS, WRITTEN BEFORE MEASURING:
-//   - If the win comes from RELIEVED MEMORY-LEVEL PARALLELISM (each in-flight
-//     load instruction exposing more demand to the memory system), the gain
-//     should scale with bytes-per-instruction, so V7x2 should land roughly
-//     HALFWAY between V6 and V7.
-//   - If the win comes from the memory system specifically liking one 256 B
-//     burst (prefetcher/coalescing), V7x2 at 128 B should give LITTLE OR
-//     NOTHING over V6.
-// The two hypotheses predict measurably different results, which is the whole
-// point of building the control rather than arguing about mechanism.
+// Predication: blocks 0-1 use a VLx2 counter from the row index, blocks 2-3 a
+// second VLx2 counter from row index + 2*VL, together covering exactly what
+// V7's single VLx4 counter covers — so partial groups behave identically and
+// there is still no tail path.
 //
-// Predication: blocks 0-1 are governed by a VLx2 counter built from the row
-// index, blocks 2-3 by a second VLx2 counter built from row index + 2*VL.
-// Together they cover exactly the rows the single VLx4 counter covers in V7,
-// so partial groups behave identically and there is still no tail.
-//
-// This is a MEASUREMENT variant: it is not wired into the JIT and is not a
-// candidate incumbent.
+// C signature: identical to rms_norm_ssve (rms_norm_ssve.S).
+//   (a, b, gamma, m, n, ld_a, ld_b) in x0-x6, eps in s0.
 
 #ifdef __APPLE__
     #define SYMBOL(s) _##s
@@ -69,7 +57,6 @@ SYMBOL(rms_norm_ssve_v7x2):
     lsl   x24, x5, #2          // stride_a in bytes
     lsl   x25, x6, #2          // stride_b in bytes
     str   s0,  [sp, #120]      // dedicated eps stash, stored BEFORE smstart
-                                // (no register survives the PSTATE.SM change)
 
     cbz   x22, .Lrow_done_v7x2
 

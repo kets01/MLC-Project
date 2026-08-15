@@ -39,12 +39,9 @@ public:
 private:
     void traverse(Node* node, RuntimeContext& ctx);
 
-    // Lazily generate & cache kernels per shape (and, for GEMM, per layout
-    // combination) — the parsed .teir primitives need whatever shape and
-    // storage order their own axes/strides declare (e.g. a row-major
-    // 32x64x512 contraction, a 48x32 transposing copy), so kernels are
-    // generated on first use and reused for any later invocation asking
-    // for the same configuration.
+    // Lazily generate and cache kernels per shape, and per layout combination
+    // for GEMM: the parsed .teir primitives need whatever shape and storage
+    // order their own axes and strides declare.
     mini_jit::Unary::kernel_t get_unary_kernel(uint32_t m, uint32_t n,
                                                mini_jit::Unary::ptype_t ptype,
                                                uint32_t trans_b);
@@ -53,8 +50,8 @@ private:
 
     std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, mini_jit::Unary::kernel_t> m_unary_cache;
     std::map<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>, mini_jit::Gemm::kernel_t> m_gemm_cache;
-    // The lazy getters run inside OpenMP-parallel traverse() calls — the
-    // one-time generation + map insert must not race across threads.
+    // The lazy getters run inside OpenMP-parallel traverse() calls, so the
+    // one-time generation and map insert must not race.
     std::mutex m_cache_mutex;
 
     mini_jit::Norm norm_rms_gen;

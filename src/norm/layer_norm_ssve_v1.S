@@ -1,25 +1,16 @@
-// layer_norm_ssve_v1.S — LayerNorm SSVE Sprint 2c ablation V1
+// layer_norm_ssve_v1.S — LayerNorm V1: FRSQRTE + one Newton-Raphson step.
 //
-// Change vs V0 (layer_norm_ssve.S):
-//   inv_std replaces FSQRT + FMOV(1.0) + FDIV with FRSQRTE + one
-//   Newton-Raphson step (FRSQRTS).
-//   Everything else — prologue, passes 1 and 3, VLA predication — is
-//   identical to V0.
+// Change vs V0: inv_std drops FSQRT + FMOV(1.0) + FDIV for
+//   e = FRSQRTE(var+eps); t = e*(var+eps); c = FRSQRTS(e,t); inv_std = e*c
+// Passes 1 and 3 are unchanged.  Measured ~0, same verdict as RMSNorm V1:
+// reciprocal-sqrt latency is not on the critical path.
 //
-// NR sequence for 1/sqrt(a), where a = var + eps  (z9 after pass 2):
-//   SEL z9, p1, z9, z7     — fill inactive lanes with eps before unpredicated ops
-//   e  = FRSQRTE(z9)       — estimate  e ≈ 1/sqrt(a)           (1 cycle)
-//   t  = e * z9            — NR intermediate t = e·a
-//   c  = FRSQRTS(e, t)     — correction    c = (3 − e·t) / 2
-//   inv_std = e * c        — refined result, FP32-accurate after one step
+// Inactive z9 lanes hold 0 after the variance reduction, and FRSQRTE is
+// unpredicated, so a SEL fills them with eps first — otherwise FRSQRTE(0) is
+// +inf and the NR step propagates NaN.  The final FMUL is p1/m regardless.
 //
-// Inactive-lane safety: after the variance reduction, inactive z9 lanes hold
-// 0.0 (never touched by p1/m or p1/z operations).  FRSQRTE is unpredicated
-// and would give +inf for those 0-valued lanes; NR would then produce NaN.
-// The SEL fills those lanes with eps (z7) before FRSQRTE, keeping all
-// intermediates finite and preventing FPSR exception-flag side effects.
-// The final FMUL is predicated (p1/m), so inactive z5 lanes are never
-// updated and the junk from eps-based NR never reaches pass 3.
+// C signature: identical to layer_norm_ssve (layer_norm_ssve.S).
+//   (a, b, gamma, beta, m, n, ld_a, ld_b) in x0-x7, eps in s0.
 
 #ifdef __APPLE__
     #define SYM(s) _##s
@@ -31,42 +22,11 @@
 .text
 .align 2
 
-// ─── Calling convention (AArch64) ────────────────────────────────────────────
-//  x0  = a       (input  matrix, column-major, leading dim ld_a)
-//  x1  = b       (output matrix, column-major, leading dim ld_b)
-//  x2  = gamma   (scale vector, N floats, contiguous)
-//  x3  = beta    (shift vector, N floats, contiguous)
-//  x4  = m       (number of rows)
-//  x5  = n       (feature size)
-//  x6  = ld_a    (leading dimension of a)
-//  x7  = ld_b    (leading dimension of b)
-//  s0  = epsilon (first FP argument register)
-//
-// ─── Register map ────────────────────────────────────────────────────────────
-//  x8         SVL in FP32 elements
-//  x9         r_base — outer loop: first row of current chunk
-//  x10        walking column pointer in a
-//  x11        col index
-//  x12        walking pointer in b   (pass 3)
-//  x13        walking pointer in gamma (pass 3)
-//  x14        stride_col_a = ld_a * 4
-//  x15        stride_col_b = ld_b * 4
-//  x16        SVL * 4
-//  x17        walking pointer in beta (pass 3)
-//  x19        a_chunk_base (callee-saved)
-//  x20        b_chunk_base (callee-saved)
-//
-//  z0         data register (reused across passes)
-//  z1         gamma broadcast (pass 3)
-//  z2         beta  broadcast (pass 3)
-//  z3         NR scratch  (NEW in V1: replaces idle z3 from V0)
-//  z5         per-row inv_std (result of pass 2)
-//  z6         [n, n, ..., n]
-//  z7         [eps, eps, ...]
-//  z8         per-row mean (accumulator pass 1, reused in passes 2+3)
-//  z9         per-row var+eps accumulator (pass 2)
-//
-//  p1         row predicate: p1[j] = 1 iff (r_base + j) < m
+// Register map (as V0, plus z3 as NR scratch):
+//   x8 SVL lanes   x9 r_base   x10/x12/x13/x17 walking a/b/gamma/beta ptrs
+//   x11 col index  x14/x15 column strides   x16 SVL*4   x19/x20 chunk bases
+//   z0 data  z1 gamma  z2 beta  z3 NR scratch  z5 inv_std
+//   z6 {n,...}  z7 {eps,...}  z8 mean  z9 var+eps   p1 row predicate
 
 SYM(layer_norm_ssve_v1):
 
@@ -157,17 +117,9 @@ Lp2col_done_v1:
     fdiv z9.s, p1/m, z9.s, z6.s   // variance = sum / n
     fadd z9.s, p1/m, z9.s, z7.s   // var + eps  (active lanes only)
 
-// Fill inactive lanes with eps before the unpredicated FRSQRTE.
-// Inactive z9 lanes are 0 after the p1/m operations above; FRSQRTE(0) = +inf.
-// SEL z9.s, p1, z9.s, z7.s replaces inactive lanes with eps so FRSQRTE
-// sees a valid positive input everywhere and no exception flags are raised.
+    // Inactive z9 lanes are 0 and FRSQRTE is unpredicated; FRSQRTE(0) = +inf.
     sel  z9.s, p1, z9.s, z7.s     // z9[inactive] = eps
 
-// Newton-Raphson reciprocal square root:
-//   e = FRSQRTE(var+eps)           — ~8-bit accurate estimate of 1/sqrt(a)
-//   t = e * (var+eps)              — NR intermediate: should equal sqrt(a)
-//   c = FRSQRTS(e, t)             — correction factor (3 - e*t) / 2
-//   inv_std = e * c               — one NR step reaches full FP32 accuracy
     frsqrte z5.s, z9.s             // z5 = estimate e
     fmul    z3.s, z5.s, z9.s       // z3 = t = e * (var+eps)
     frsqrts z3.s, z5.s, z3.s       // z3 = c = (3 - e*t) / 2

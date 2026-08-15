@@ -43,6 +43,10 @@
 # pyenv
 mlc_env/
 
+# python bytecode from the baseline drivers
+__pycache__/
+*.pyc
+
 #build files
 build/
 # CMakePresets.json build directories: `debug` (sanitizers) and
