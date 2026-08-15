@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -60,35 +61,26 @@ double max_abs_diff(const std::vector<float>& got_rowmajor,
 
 } // namespace
 
-int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::fprintf(stderr, "usage: verify_baseline <dumpdir>\n");
+// Verify one (shape) worth of dumps.  Returns the number of FAILED checks.
+static int verify_shape(const std::string& dir, int64_t m, int64_t n, float eps) {
+    const std::string tag =
+        std::to_string(m) + "x" + std::to_string(n);
+    const size_t count = static_cast<size_t>(m) * static_cast<size_t>(n);
+
+    const auto in_row  = read_f32(dir + "/input_" + tag + ".f32", count);
+    const auto gamma   = read_f32(dir + "/gamma_" + tag + ".f32", static_cast<size_t>(n));
+    const auto beta    = read_f32(dir + "/beta_"  + tag + ".f32", static_cast<size_t>(n));
+    const auto lib_ln  = read_f32(dir + "/ln_"    + tag + ".f32", count);
+    const auto lib_rms = read_f32(dir + "/rms_"   + tag + ".f32", count);
+    if (in_row.empty() || gamma.empty() || beta.empty() ||
+        lib_ln.empty() || lib_rms.empty()) {
+        std::printf("  %-12s  *** MISSING DUMPS ***\n", tag.c_str());
         return 2;
     }
-    const std::string dir = argv[1];
-
-    int64_t m = 0, n = 0;
-    float   eps = 1e-5f;
-    {
-        std::ifstream f(dir + "/shape.txt");
-        if (!f) { std::fprintf(stderr, "missing shape.txt\n"); return 2; }
-        f >> m >> n >> eps;
-    }
-    const size_t count = static_cast<size_t>(m) * static_cast<size_t>(n);
-    std::printf("Cross-verification against the C++ float64 reference\n");
-    std::printf("  shape M=%lld N=%lld  eps=%g\n",
-                static_cast<long long>(m), static_cast<long long>(n),
-                static_cast<double>(eps));
-
-    const auto in_row  = read_f32(dir + "/input.f32", count);
-    const auto gamma   = read_f32(dir + "/gamma.f32", static_cast<size_t>(n));
-    const auto beta    = read_f32(dir + "/beta.f32",  static_cast<size_t>(n));
-    const auto lib_ln  = read_f32(dir + "/torch_ln.f32",  count);
-    const auto lib_rms = read_f32(dir + "/torch_rms.f32", count);
-    if (in_row.empty() || gamma.empty() || beta.empty() ||
-        lib_ln.empty() || lib_rms.empty()) return 2;
 
     // Transpose the library's row-major input into our column-major layout.
+    // This happens here, in the checker, and in neither timed path — so no
+    // implementation is made to pay for the other's layout.
     std::vector<float> in_col(count);
     for (int64_t r = 0; r < m; ++r)
         for (int64_t c = 0; c < n; ++c)
@@ -106,20 +98,59 @@ int main(int argc, char** argv) {
     const double d_rms = max_abs_diff(lib_rms, ref_rms, m, n, at_rms);
 
     // FP32 tolerance: the library accumulates in FP32 like our kernels, so
-    // agreement to ~1e-5 means "same function", while a semantic mismatch
+    // agreement to ~1e-4 means "same function", while a semantic mismatch
     // (missing eps, unbiased variance, no gamma) shows up orders larger.
     const double kTol = 1e-4;
-    std::printf("  LayerNorm : max|diff| = %.3e   %s\n", d_ln,
-                d_ln <= kTol ? "SAME FUNCTION" : "*** MISMATCH ***");
-    std::printf("  RMSNorm   : max|diff| = %.3e   %s\n", d_rms,
-                d_rms <= kTol ? "SAME FUNCTION" : "*** MISMATCH ***");
+    const bool ok_ln = d_ln <= kTol, ok_rms = d_rms <= kTol;
+    std::printf("  %-12s  LayerNorm %.3e %-6s   RMSNorm %.3e %-6s\n",
+                tag.c_str(), d_ln, ok_ln ? "OK" : "FAIL",
+                d_rms, ok_rms ? "OK" : "FAIL");
+    return (ok_ln ? 0 : 1) + (ok_rms ? 0 : 1);
+}
 
-    if (d_ln > kTol || d_rms > kTol) {
-        std::printf("\nA mismatch here invalidates the throughput comparison: the two sides\n"
-                    "are not computing the same function, so their speeds are not comparable.\n");
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::fprintf(stderr, "usage: verify_baseline <dumpdir>\n");
+        return 2;
+    }
+    const std::string dir = argv[1];
+
+    // Sprint 8: verify EVERY shape the benchmark reported, not one of them.
+    // Checking a single shape and publishing three is an inference; the
+    // manifest lists exactly what was measured so the two cannot drift apart.
+    std::ifstream mf(dir + "/manifest.txt");
+    if (!mf) {
+        std::fprintf(stderr,
+            "missing manifest.txt in %s — rerun the benchmark driver, which "
+            "writes it.\n", dir.c_str());
+        return 2;
+    }
+
+    std::printf("Cross-verification against the C++ float64 reference\n");
+    std::string line;
+    int checks = 0, failures = 0;
+    while (std::getline(mf, line)) {
+        if (line.empty()) continue;
+        if (line[0] == '#') { std::printf("  %s\n", line.c_str()); continue; }
+        std::istringstream is(line);
+        int64_t m = 0, n = 0; float eps = 1e-5f;
+        if (!(is >> m >> n >> eps)) continue;
+        failures += verify_shape(dir, m, n, eps);
+        checks   += 2;                       // LayerNorm + RMSNorm
+    }
+
+    if (checks == 0) {
+        std::fprintf(stderr, "manifest listed no shapes\n");
+        return 2;
+    }
+
+    std::printf("\n%d / %d checks passed.\n", checks - failures, checks);
+    if (failures > 0) {
+        std::printf("A mismatch invalidates the throughput comparison: the two sides are\n"
+                    "not computing the same function, so their speeds are not comparable.\n");
         return 1;
     }
-    std::printf("\nBoth verified. The throughput comparison is between implementations of\n"
-                "the same function, which is what makes it meaningful.\n");
+    std::printf("Every benchmarked shape computes the same function as our reference,\n"
+                "which is what makes the throughput comparison meaningful.\n");
     return 0;
 }
