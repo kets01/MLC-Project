@@ -314,4 +314,26 @@ void bw_probe_ssve(float*       d,
                    const float* s,
                    int64_t      n);
 
+// Sprint 7b streaming-transition probes (NOT norm kernels).  Every "fixed
+// per-call cost" so far was INFERRED from a linear fit's intercept; Sprint 4
+// showed that intercept had absorbed an unrelated syscall bug.  These measure
+// the transition directly so the intercept can be decomposed instead.
+//
+//   pairs   — iters x { smstart ; smstop }        (SM + ZA, what ZA kernels pay)
+//   sm_only — iters x { smstart sm ; smstop sm }  (what the SSVE kernels pay)
+//   empty   — the identical loop with no transition; the control whose time is
+//             subtracted, so the result is the transition and not the loop.
+//
+// No-ops when cpu_supports_sme() == false.
+void smstart_probe_pairs(int64_t iters);
+void smstart_probe_sm_only(int64_t iters);
+void smstart_probe_empty(int64_t iters);
+
+// The streaming vector length in FP32 lanes, queried at runtime via RDSVL
+// (decision D: never hard-code SVL).  RDSVL does not require streaming mode,
+// so this is a plain call with no PSTATE transition.  Returns 0 without SME.
+// V6/V7 process 4 VL-row blocks per group, so 4 * svl_fp32_lanes() is the
+// kernels' row granularity — 64 on the M4's 512-bit SVL, derived not literal.
+int64_t svl_fp32_lanes();
+
 } // namespace mini_jit::norm

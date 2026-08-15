@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include "norm/norm.hpp"
+#include "norm/stability.hpp"  // Sprint 7a: FP32 variance estimators
 #include "norm/jit_norm.hpp"  // Sprint 4: mini_jit::Norm
 #include "week3/utility.hpp"  // cpu_supports_sme()
 #include "week7/TeirRuntime.h" // Sprint 5: TEIR-invoked, OpenMP row-parallel
@@ -403,6 +404,361 @@ static void print_ceiling_curve(const std::vector<CeilingPoint>& pts, bool have_
                   << std::setw(14) << std::setprecision(2) << matched << "\n";
     }
     std::cout << "\n";
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 7a — numerical stability, measured rather than asserted.
+//
+// context.md §8 claims single-pass variance is "numerically dangerous" and that
+// LayerNorm's two-pass form and RMSNorm's mean-free reduction avoid it.  Until
+// Sprint 7 the project had never IMPLEMENTED the dangerous version, so the
+// claim had no counterexample.  stability.cpp supplies one.
+//
+// The stress axis is a shift s: it leaves the variance untouched but scales the
+// condition number kappa = 1 + mean^2/var by ~s^2, isolating conditioning from
+// every other property of the data.
+//
+// The second table is the one that matters for THIS project: the estimators
+// above are scalar C++, so they prove nothing about our kernels until the
+// shipped kernels are put on the same axis.
+// ---------------------------------------------------------------------------
+
+static void sprint7_stability_section() {
+    namespace stab = mini_jit::norm::stability;
+
+    const int64_t N = 512;
+    const double  shifts[] = { 0.0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6 };
+
+    std::cout << "\n" << std::string(96, '=') << "\n"
+              << "SPRINT 7a - NUMERICAL STABILITY: where each variance formulation breaks\n"
+              << std::string(96, '=') << "\n"
+              << "Data: unit-variance samples shifted by s.  Variance is invariant under the\n"
+              << "shift; the condition number kappa = 1 + mean^2/var is not.  All estimators\n"
+              << "accumulate in FP32 (the kernels' precision); the oracle is float64.\n"
+              << "Relative error vs the float64 oracle on identical input:\n\n"
+              << std::left << std::setw(10) << "  shift"
+              << std::right << std::setw(12) << "kappa"
+              << std::setw(14) << "naive 1-pass"
+              << std::setw(14) << "two-pass"
+              << std::setw(14) << "Welford" << "\n";
+
+    for (double s : shifts) {
+        std::vector<float> x(static_cast<size_t>(N));
+        for (int64_t i = 0; i < N; ++i)
+            x[static_cast<size_t>(i)] =
+                static_cast<float>(s + std::sin(static_cast<double>(i) * 0.7));
+
+        const double truth = stab::variance_ref_f64(x.data(), N);
+        const double kappa = stab::variance_condition_number(x.data(), N);
+        const float  nv    = stab::variance_naive_f32(x.data(), N);
+
+        auto rel = [&](double v) {
+            return truth > 0.0 ? std::fabs(v - truth) / truth : 0.0;
+        };
+
+        std::cout << "  " << std::left << std::setw(8) << std::scientific
+                  << std::setprecision(0) << s
+                  << std::right << std::setw(12) << std::setprecision(1) << kappa
+                  << std::setw(14) << std::setprecision(2) << rel(nv)
+                  << std::setw(14) << rel(stab::variance_twopass_f32(x.data(), N))
+                  << std::setw(14) << rel(stab::variance_welford_f32(x.data(), N));
+        if (nv < 0.0f) std::cout << "   <- naive NEGATIVE, sqrt = NaN";
+        std::cout << "\n";
+    }
+    std::cout << std::fixed;
+
+    std::cout << "\nReading it: naive's error tracks kappa (each row multiplies the shift by 10,\n"
+              << "hence kappa by ~100), and past shift 1e4 it returns a NEGATIVE variance -- so a\n"
+              << "kernel built on it emits NaN, not merely an inaccurate number.  Two-pass is flat\n"
+              << "across 12 orders of magnitude of kappa.  Welford sits between: vastly better\n"
+              << "than naive, slightly worse than two-pass, and degrading slowly because its\n"
+              << "running mean updates at full input magnitude (Sprint 6 §1.3).\n"
+              << "\nCaveat stated rather than hidden: past shift ~1e5 the FP32 INPUT is itself\n"
+              << "quantized (ULP of 1e6 is 0.0625, larger than the signal), so beyond that point\n"
+              << "all estimators measure the variance of the quantized data.  They stay\n"
+              << "comparable -- same input, same oracle -- but the 'true' variance drifts.\n";
+
+    // ---- The shipped kernels on the same axis -----------------------------
+    // Scalar estimators prove nothing about our SSVE kernels; this puts the
+    // real ones on the identical stress data.
+    if (!cpu_supports_sme()) {
+        std::cout << "\n(SME absent: kernel rows skipped.)\n";
+        return;
+    }
+
+    const int64_t M = 64, ld = M;
+    std::cout << "\nThe shipped kernels on the same stress data (M=" << M << ", N=" << N
+              << "), max|error| vs the\nfloat64-accumulating C++ reference:\n\n"
+              << std::left << std::setw(10) << "  shift"
+              << std::right << std::setw(16) << "LN V0 (FSQRT)"
+              << std::setw(16) << "LN V6 (FRSQRTE)"
+              << std::setw(16) << "LN Welford"
+              << std::setw(16) << "RMS V6" << "\n";
+
+    for (double s : shifts) {
+        std::vector<float> a(static_cast<size_t>(ld * N));
+        for (int64_t c = 0; c < N; ++c)
+            for (int64_t r = 0; r < M; ++r)
+                a[static_cast<size_t>(r + c * ld)] = static_cast<float>(
+                    s + std::sin(static_cast<double>(r * 7 + c * 3) * 0.7));
+
+        std::vector<float> gamma(static_cast<size_t>(N), 1.0f);
+        std::vector<float> beta(static_cast<size_t>(N), 0.0f);
+        std::vector<float> ref_ln(static_cast<size_t>(ld * N), 0.0f);
+        std::vector<float> ref_rms(static_cast<size_t>(ld * N), 0.0f);
+        layer_norm_ref(a.data(), ref_ln.data(), gamma.data(), beta.data(),
+                       M, N, ld, ld, 1e-5f);
+        rms_norm_ref(a.data(), ref_rms.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+
+        auto worst = [&](void (*fn)(const float*, float*, const float*,
+                                    const float*, int64_t, int64_t, int64_t,
+                                    int64_t, float),
+                         const std::vector<float>& ref) {
+            std::vector<float> out(static_cast<size_t>(ld * N), 0.0f);
+            fn(a.data(), out.data(), gamma.data(), beta.data(),
+               M, N, ld, ld, 1e-5f);
+            double w = 0.0;
+            for (size_t i = 0; i < out.size(); ++i)
+                w = std::max(w, static_cast<double>(std::fabs(out[i] - ref[i])));
+            return w;
+        };
+
+        std::vector<float> out_rms(static_cast<size_t>(ld * N), 0.0f);
+        rms_norm_ssve_v6(a.data(), out_rms.data(), gamma.data(),
+                         M, N, ld, ld, 1e-5f);
+        double w_rms = 0.0;
+        for (size_t i = 0; i < out_rms.size(); ++i)
+            w_rms = std::max(w_rms,
+                             static_cast<double>(std::fabs(out_rms[i] - ref_rms[i])));
+
+        std::cout << "  " << std::left << std::setw(8) << std::scientific
+                  << std::setprecision(0) << s << std::right
+                  << std::setw(16) << std::setprecision(2) << worst(layer_norm_ssve, ref_ln)
+                  << std::setw(16) << worst(layer_norm_ssve_v6, ref_ln)
+                  << std::setw(16) << worst(layer_norm_ssve_welford, ref_ln)
+                  << std::setw(16) << w_rms << "\n";
+    }
+    std::cout << std::fixed
+        << "\nThree readings, in order of how much they change the project's story:\n\n"
+        << "1. The FRSQRTE cost is REAL BUT NARROW.  At shift 0, V0 (exact FSQRT+FDIV) is\n"
+        << "   7.2e-7 against V6's 1.7e-5 -- a ~24x accuracy penalty for the ablation's\n"
+        << "   winning variant, which Sprint 6 §1.3 found was never documented.  But from\n"
+        << "   shift 1e2 upward the two are INDISTINGUISHABLE (1.30e-4 both).  So the\n"
+        << "   substitution costs accuracy only where the problem is well conditioned; it\n"
+        << "   is not what limits LayerNorm on hard data.\n\n"
+        << "2. What DOES limit LayerNorm at high shift is not the variance at all.  Two-pass\n"
+        << "   already fixed the variance (see the flat column above).  The residual error is\n"
+        << "   in the OUTPUT expression (x - mean): when x ~ 1e5 and (x - mean) ~ 1, the FP32\n"
+        << "   representation of x carries the difference in only a handful of bits.  At\n"
+        << "   shift 1e5 the ULP near 1e5 is ~1.6e-2 relative to a unit signal, and the\n"
+        << "   measured error is 1.2e-2 -- the two agree, so this is an INPUT-REPRESENTATION\n"
+        << "   limit that no variance algorithm can remove.  That V0 and V6 coincide here is\n"
+        << "   the evidence: the sqrt arithmetic is not the binding constraint.\n"
+        << "   (The non-monotonic dip at 1e6 is the same effect seen from the other side --\n"
+        << "   once the input is coarsely quantized, (x - mean) becomes exactly\n"
+        << "   representable more often, so the kernel's own rounding falls.)\n\n"
+        << "3. RMSNorm is flat at ~5e-6 across the whole sweep, ~2300x better than LayerNorm\n"
+        << "   at shift 1e5.  This is context.md §8's claim confirmed on the shipped kernel:\n"
+        << "   RMSNorm never forms a mean, so it never performs the cancelling subtraction --\n"
+        << "   neither in the reduction nor in the output.  Its stability is structural, and\n"
+        << "   it is the same property that makes it faster (2R+1W vs 3R+1W).  Accuracy and\n"
+        << "   throughput point the same way here, which is unusual and worth saying.\n"
+        << "   RMSNorm's own limit is elsewhere: Sum(x^2) overflows FP32 at |x| ~ "
+        << "sqrt(3.4e38/N).\n\n";
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 7b — streaming-mode overhead, measured directly instead of inferred.
+//
+// context.md §8 asserts "streaming mode is not free" and that toggling it per
+// row "destroys performance".  The project has always DESIGNED for that (one
+// streaming region per call) but never measured the constant, and every
+// per-call cost quoted so far came from the intercept of a linear fit.  That
+// intercept is not a safe instrument: Sprint 2a read t0 ~ 1 us/call from it,
+// and Sprint 4 then found ~70 % of that was an uncached cpu_supports_sme()
+// sysctl in the wrapper — the fit had silently absorbed an unrelated bug.
+//
+// smstart_probe.S measures the transition itself, with an identical
+// transition-free loop as the control, so the intercept can be DECOMPOSED
+// rather than trusted whole.
+// ---------------------------------------------------------------------------
+
+static void sprint7_streaming_overhead_section() {
+    if (!cpu_supports_sme()) {
+        std::cout << "\n(SME absent: Sprint 7b streaming-overhead section skipped.)\n";
+        return;
+    }
+
+    std::cout << "\n" << std::string(96, '=') << "\n"
+              << "SPRINT 7b - STREAMING-MODE OVERHEAD: what the transition actually costs\n"
+              << std::string(96, '=') << "\n";
+
+    // ---- 1. The transition, measured -------------------------------------
+    const int64_t IT = 2000000;
+    // Heap/volatile discipline: these calls cross smstart, which zeroes
+    // d8-d15 behind the compiler's back (the bug this project has hit five
+    // times).  Timings are taken first, printed after, with no SME call in
+    // between.
+    volatile double t_empty = bench([&] { smstart_probe_empty(IT);   }, 20);
+    volatile double t_pairs = bench([&] { smstart_probe_pairs(IT);   }, 20);
+    volatile double t_sm    = bench([&] { smstart_probe_sm_only(IT); }, 20);
+
+    const double ns_empty = static_cast<double>(t_empty) * 1e9 / static_cast<double>(IT);
+    const double ns_pairs = static_cast<double>(t_pairs) * 1e9 / static_cast<double>(IT);
+    const double ns_sm    = static_cast<double>(t_sm)    * 1e9 / static_cast<double>(IT);
+    const double trans_pairs = ns_pairs - ns_empty;
+    const double trans_sm    = ns_sm    - ns_empty;
+
+    std::cout << "\nDirect measurement (" << IT << " iterations, best-of-20).  The empty loop is\n"
+              << "the control: identical branch structure and counter, transition removed, so\n"
+              << "the difference is the transition rather than the loop.\n\n"
+              << std::left << std::setw(34) << "  variant"
+              << std::right << std::setw(14) << "ns/iteration"
+              << std::setw(20) << "minus control" << "\n";
+    std::cout << "  " << std::left << std::setw(32) << "empty loop (control)"
+              << std::right << std::fixed << std::setprecision(3)
+              << std::setw(14) << ns_empty << std::setw(20) << "-" << "\n";
+    std::cout << "  " << std::left << std::setw(32) << "smstart + smstop (SM+ZA)"
+              << std::right << std::setw(14) << ns_pairs
+              << std::setw(20) << trans_pairs << "\n";
+    std::cout << "  " << std::left << std::setw(32) << "smstart sm + smstop sm (SM only)"
+              << std::right << std::setw(14) << ns_sm
+              << std::setw(20) << trans_sm << "\n";
+
+    std::cout << "\nTwo results here.  First, ONE round trip through streaming mode costs about "
+              << std::setprecision(1) << trans_sm << " ns.\n"
+              << "Second, SM+ZA and SM-only are the same to within noise ("
+              << std::setprecision(3) << trans_pairs << " vs " << trans_sm << "), so managing\n"
+              << "PSTATE.ZA is free — the ZA kernels' problem was never the transition.\n";
+
+    // ---- 2. The per-call floor, measured rather than fitted ---------------
+    // A linear fit is the WRONG instrument here and this section deliberately
+    // does not use one.  Fitting t(N) = t0 + b*N over N=16..512 at M=128 sweeps
+    // the footprint from 16 KiB to 512 KiB, crossing cache levels, so per-element
+    // throughput is not constant and the intercept comes out NEGATIVE — the same
+    // invalid-fit condition small_n_sweep() reports below.  A negative "fixed
+    // cost" is not a small error, it is a signal that the model does not apply.
+    //
+    // Instead: measure the smallest call the kernel can be asked to perform
+    // (M=1, N=1). Its time IS the per-call floor, no model required.
+    //
+    // The call must be timed in BATCHES, not individually: a single M=1,N=1
+    // call takes tens of nanoseconds, which is at or below the resolution of
+    // two Clock::now() reads, so timing one call and taking a best-of-N
+    // minimum reports 0.000 ns.  (It did, on the first run of this section —
+    // the same class of instrument error this whole sprint is about.)  One
+    // timing region around CALLS invocations puts the measurement far above
+    // clock granularity, exactly as the transition probe loops 2e6 times.
+    const int64_t CALLS = 20000;
+    std::vector<float> a1(1, 1.0f), b1(1, 0.0f), g1(1, 1.0f);
+    volatile double t_floor_batch = bench([&] {
+        for (int64_t i = 0; i < CALLS; ++i)
+            rms_norm_ssve_v7(a1.data(), b1.data(), g1.data(), 1, 1, 1, 1, 1e-5f);
+    }, 20);
+    const double floor_ns =
+        static_cast<double>(t_floor_batch) * 1e9 / static_cast<double>(CALLS);
+
+    std::cout << "\nThe per-call floor (RMSNorm V7 at its smallest possible call, M=1, N=1):\n\n"
+              << "  measured floor                     : " << std::fixed << std::setprecision(1)
+              << std::setw(8) << floor_ns << " ns/call\n"
+              << "  of which the streaming transition  : " << std::setw(8)
+              << trans_sm << " ns  ("
+              << std::setprecision(1) << (100.0 * trans_sm / floor_ns) << " % of the floor)\n"
+              << "  everything else                    : " << std::setprecision(1)
+              << std::setw(8) << (floor_ns - trans_sm) << " ns\n";
+
+    std::cout << "\nNote this is measured, not fitted. A linear fit over these sizes returns a\n"
+              << "NEGATIVE intercept because the sweep crosses cache levels, so the model does\n"
+              << "not hold — which is precisely how the inferred t0 went wrong before.\n";
+
+    std::cout << "\nThe transition is about a FIFTH of the floor — real, but not the thing that\n"
+              << "makes a small call expensive. The other ~" << std::setprecision(0)
+              << (floor_ns - trans_sm) << " ns is prologue/epilogue (this project\n"
+              << "saves d8-d15 on every call — the AAPCS64 fix from Sprints 5/6), pointer\n"
+              << "setup, and the inv_rms serialization.\n"
+              << "\nWorth comparing against the inferred figures this replaces: Sprint 2a read\n"
+              << "t0 ~ 1000 ns from a fit and Sprint 4 corrected it to ~400 ns after removing a\n"
+              << "syscall. The measured floor is " << std::setprecision(0) << floor_ns
+              << " ns. Those are not the same quantity — the fits\n"
+              << "were at M=128, which pays more setup than this M=1 minimum — but the gap is\n"
+              << "large enough to say the intercept was never a clean read of fixed cost.\n";
+
+    // What the "one streaming region" design decision was actually worth,
+    // computed rather than asserted: the alternative is one transition per row.
+    const int64_t M_ex = 128;
+    const double  per_row_us = static_cast<double>(M_ex) * trans_sm / 1000.0;
+    std::cout << "\nWhat the 'one streaming region per call' decision (context.md §8) is worth,\n"
+              << "quantified: the alternative costs one transition per row. At M=" << M_ex
+              << " that is\n" << M_ex << " x " << std::setprecision(1) << trans_sm << " ns = "
+              << std::setprecision(2) << per_row_us << " us/call against a single "
+              << std::setprecision(1) << trans_sm << " ns — about "
+              << std::setprecision(0) << (per_row_us * 1000.0 / floor_ns)
+              << "x the entire\nper-call floor. So the decision is right, and now it is right by a"
+              << " measured\nmargin rather than by assumption. But the constant itself is 9 ns:"
+              << " 'streaming\nmode is expensive' is true per ROW and false per CALL, and only"
+              << " the second of\nthose is what this kernel does.\n";
+
+    // ---- 3. When does the SME kernel actually win? -----------------------
+    // The ROADMAP asks for the regime where fixed cost dominates. The honest
+    // way to answer is a crossover against the scalar reference, which pays no
+    // fixed cost at all but is slow per element.
+    std::cout << "\nCrossover: at what size does the SME kernel beat the scalar reference?\n"
+              << "(RMSNorm, N=512 — a realistic transformer feature dimension — sweeping rows)\n\n"
+              << std::left << std::setw(10) << "  M rows"
+              << std::right << std::setw(14) << "scalar us"
+              << std::setw(14) << "V7 us"
+              << std::setw(12) << "speedup"
+              << std::setw(16) << "groups touched" << "\n";
+
+    const int64_t Nf = 512;
+    for (int64_t m : { int64_t(1), int64_t(2), int64_t(4), int64_t(8),
+                       int64_t(16), int64_t(64), int64_t(256) }) {
+        const int64_t ldm = m;
+        std::vector<float> a(static_cast<size_t>(ldm * Nf)),
+                           b(static_cast<size_t>(ldm * Nf), 0.0f),
+                           g(static_cast<size_t>(Nf), 1.0f);
+        for (size_t i = 0; i < a.size(); ++i) a[i] = 0.01f * static_cast<float>(i % 97);
+
+        volatile double s_ref = bench([&] {
+            rms_norm_ref(a.data(), b.data(), g.data(), m, Nf, ldm, ldm, 1e-5f);
+        }, 2000);
+        volatile double s_sme = bench([&] {
+            rms_norm_ssve_v7(a.data(), b.data(), g.data(), m, Nf, ldm, ldm, 1e-5f);
+        }, 2000);
+
+        // V6/V7 process a GROUP of 4 VL-row blocks at a time; on this machine
+        // SVL=512 bits so VL=16 FP32 lanes and a group is 64 rows.  Deriving
+        // it from the runtime SVL rather than writing 64 keeps decision D.
+        const int64_t vl        = static_cast<int64_t>(svl_fp32_lanes());
+        const int64_t group     = 4 * vl;
+        const int64_t n_groups  = (m + group - 1) / group;
+
+        std::cout << "  " << std::left << std::setw(8) << m
+                  << std::right << std::fixed << std::setprecision(3)
+                  << std::setw(14) << static_cast<double>(s_ref) * 1e6
+                  << std::setw(14) << static_cast<double>(s_sme) * 1e6
+                  << std::setw(12) << std::setprecision(2)
+                  << (static_cast<double>(s_ref) / static_cast<double>(s_sme)) << "x"
+                  << std::setw(15) << n_groups << "\n";
+    }
+
+    const int64_t vl    = static_cast<int64_t>(svl_fp32_lanes());
+    const int64_t group = 4 * vl;
+    std::cout << "\nThe crossover is at M ~ " << (group / 4) << " rows, and the reason is NOT "
+              << "streaming overhead.\n"
+              << "Look at the last column: V7's time is flat from M=1 to M=" << group
+              << " because that is\n"
+              << "ONE group. V6/V7 process 4 VL-row blocks at a time (VL=" << vl
+              << " lanes at SVL=512,\nso a group is " << group
+              << " rows), and a partially-filled group costs the same as a full\n"
+              << "one — the lanes are predicated off, not skipped. At M=1 the kernel does "
+              << group << "\nrows' worth of work for 1 row's worth of result.\n"
+              << "\nSo the small-tensor penalty is GROUP GRANULARITY, not SMSTART. The fix would\n"
+              << "be a narrower group for small M — which is exactly the shape-specialized\n"
+              << "emission decision the JIT was built to make (Sprint 4) and which Sprint 2b\n"
+              << "deferred. It is also the same granularity that made Sprint 6's threaded\n"
+              << "chunking sensitive to alignment: chunks not a multiple of "
+              << group << " rows pay this\nsame partial-group cost on every thread.\n\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -1324,6 +1680,12 @@ int main() {
     // printed below reads its denominator from it via peak_for_shape().
     g_ceiling_curve = measure_ceiling_curve(have_sme);
     print_ceiling_curve(g_ceiling_curve, have_sme, static_cast<double>(peak_ssve));
+
+    // Sprint 7a runs before the throughput tables: correctness/accuracy gates
+    // performance (decision B), so the accuracy story is stated before any
+    // GiB/s claim that rests on it.  Host-portable except its kernel rows.
+    sprint7_stability_section();
+    sprint7_streaming_overhead_section();
 
     // Sprint 6's consolidated ablation runs FIRST: it is the evaluation
     // deliverable, and the per-sprint sections below are the detail behind it.

@@ -45,6 +45,10 @@ extern "C" void rms_norm_za_sme2(const float*, float*, const float*,
 extern "C" void rms_norm_za(const float*, float*, const float*,
                             int64_t, int64_t, int64_t, int64_t, float);
 extern "C" void bw_probe_ssve(float*, const float*, int64_t);
+extern "C" void smstart_probe_pairs(int64_t);
+extern "C" void smstart_probe_sm_only(int64_t);
+extern "C" void smstart_probe_empty(int64_t);
+extern "C" int64_t svl_fp32_lanes();
 
 namespace mini_jit::norm {
 
@@ -207,6 +211,33 @@ void rms_norm_za(const float* a, float* b, const float* gamma,
 void bw_probe_ssve(float* d, const float* s, int64_t n) {
     if (!cpu_supports_sme()) return;
     ::bw_probe_ssve(d, s, n);
+}
+
+// Sprint 7b.  The `empty` control is guarded too, even though a loop with no
+// streaming instruction would run fine without SME: the two paths must differ
+// in ONE thing (the transition), and a guard that applies to one but not the
+// other would reintroduce a difference into the control.
+void smstart_probe_pairs(int64_t iters) {
+    if (!cpu_supports_sme()) return;
+    ::smstart_probe_pairs(iters);
+}
+
+void smstart_probe_sm_only(int64_t iters) {
+    if (!cpu_supports_sme()) return;
+    ::smstart_probe_sm_only(iters);
+}
+
+void smstart_probe_empty(int64_t iters) {
+    if (!cpu_supports_sme()) return;
+    ::smstart_probe_empty(iters);
+}
+
+// Returns 0 rather than a guessed default when SME is absent: a caller that
+// silently got "16" on a machine with no SME would be reintroducing exactly
+// the hard-coded SVL decision D forbids.
+int64_t svl_fp32_lanes() {
+    if (!cpu_supports_sme()) return 0;
+    return ::svl_fp32_lanes();
 }
 
 } // namespace mini_jit::norm
