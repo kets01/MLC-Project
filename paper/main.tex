@@ -64,7 +64,7 @@ The negative and corrective results are the more transferable ones. Using the
 ZA matrix accumulator as a residency buffer \emph{loses} by 24--37\,\% even
 after an SME2 rebuild that made it 62--114\,\% faster, because it trades a
 memory read that was never a memory read for \code{mova} traffic. The
-streaming-mode transition costs 9.07\,ns, roughly a sixth of the per-call floor,
+streaming-mode transition costs 9.04\,ns, roughly a fifth of the per-call floor,
 so the small-tensor penalty is kernel group granularity rather than
 \code{SMSTART}. And our own roofline was mis-stated for five sprints: the
 bandwidth ceiling is a curve in working-set size, not a constant, and dividing
@@ -301,7 +301,7 @@ five report sections.
 Our roofline probe is a STREAM-style~\cite{mccalpin1995stream} scale-add
 executed the way the kernels access memory: one streaming region, contiguous \code{LD1W}/\code{ST1W},
 predicated tail. We originally measured it at a single 128\,MiB-per-array
-footprint, obtaining 59.5\,GiB/s, and then divided \emph{every} shape by that
+footprint, obtaining 58.8\,GiB/s, and then divided \emph{every} shape by that
 number.
 
 That figure is the \emph{DRAM} ceiling. Sweeping the same probe across
@@ -366,8 +366,11 @@ verified and measured on the same harness and the same shapes.
 \begin{table}[t]
 \caption{Consolidated ablation, useful bytes (1R+1W), best-of-$N$. Percentages
 are against the ceiling measured \emph{at each shape's own footprint}
-(115.35 and 59.45\,GiB/s respectively). Every row was verified against the
-float64 reference before it was timed.}
+(115.60 and 58.78\,GiB/s respectively). Every row was verified against the
+float64 reference before it was timed. This table is the consolidated run, in
+which each rung is measured once in sequence; the per-lever percentages quoted
+in the text come from the dedicated order-alternating A/B studies, which is the
+instrument that controls for drift in a paired comparison.}
 \label{tab:ablation}
 \centering
 \small
@@ -377,20 +380,20 @@ float64 reference before it was timed.}
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}
 stage & 16\,MiB & 256\,MiB & 16\,MiB & 256\,MiB \\
 \midrule
-scalar reference        & 1.03  & 0.67  & 0.97  & 0.53 \\
-V0 SSVE                 & 25.11 & 10.37 & 12.82 & 7.40 \\
-V1 \code{FRSQRTE}+NR    & 25.13 & 10.37 & 12.82 & 7.40 \\
-V2 hoisted $1/N$        & 25.14 & 10.36 & 14.42 & 7.57 \\
-V3 $2\times$ unroll     & 25.16 & 10.41 & ---   & --- \\
-V4 accumulator ILP      & 31.91 & 10.75 & 16.46 & 7.95 \\
-V5 load pipelining      & 31.99 & 10.78 & 16.47 & 7.95 \\
-\textbf{V6} access density & \textbf{38.47} & \textbf{20.97} & \textbf{16.49} & \textbf{13.21} \\
-\textbf{V7} SME2 multi-vector & \textbf{38.47} & \textbf{24.76} & \textbf{16.49} & \textbf{13.55} \\
-Welford (single stage)  & ---   & ---   & 12.14 & 6.75 \\
-ZA residency            & 25.14 & 10.37 & 14.41 & 7.51 \\
-JIT (automatic ISA)     & 38.46 & 24.76 & 16.49 & 13.47 \\
+scalar reference & 0.90 & 0.59 & 0.84 & 0.47 \\
+V0 SSVE & 24.87 & 10.04 & 12.82 & 7.38 \\
+V1 \code{FRSQRTE}+NR & 24.88 & 10.06 & 12.79 & 7.38 \\
+V2 hoisted $1/N$ & 24.82 & 10.29 & 14.40 & 7.39 \\
+V3 $2\times$ unroll & 24.84 & 10.34 & --- & --- \\
+V4 accumulator ILP & 31.37 & 10.67 & 16.36 & 7.69 \\
+V5 load pipelining & 31.35 & 10.65 & 16.35 & 7.56 \\
+\textbf{V6} access density & \textbf{38.46} & \textbf{21.05} & \textbf{16.47} & \textbf{13.09} \\
+\textbf{V7} SME2 multi-vector & \textbf{38.45} & \textbf{24.63} & \textbf{16.47} & \textbf{13.52} \\
+Welford (single stage) & --- & --- & 12.07 & 6.67 \\
+ZA residency & 24.86 & 10.29 & 14.41 & 7.39 \\
+JIT (automatic ISA) & 38.46 & 24.68 & 16.48 & 13.49 \\
 \midrule
-\% of footprint ceiling (V7) & 33.3 & 41.6 & 14.3 & 22.8 \\
+\% of footprint ceiling (V7) & 33.3 & 41.9 & 14.2 & 23.0 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -780,7 +783,7 @@ our explanation.
 \begin{table}[t]
 \caption{TEIR-invoked, OpenMP row-parallel, 256\,MiB working set. Every
 configuration verified against the reference before its figure is reported. The
-chip-wide ceiling is 85.50\,GiB/s.}
+chip-wide ceiling is 84.30\,GiB/s.}
 \label{tab:threading}
 \centering
 \begin{tabular}{lrrrr}
@@ -789,16 +792,16 @@ chip-wide ceiling is 85.50\,GiB/s.}
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}
 threads & GiB/s & \% chip & GiB/s & \% chip \\
 \midrule
-1  & 24.67 & 28.8 & 13.52 & 15.8 \\
-2  & 29.30 & 34.2 & 18.14 & 21.2 \\
-4  & 35.87 & 41.9 & 22.82 & 26.6 \\
-8  & 41.07 & 48.0 & 25.03 & 29.2 \\
-16 & 43.40 & 50.7 & 26.51 & 31.0 \\
+1  & 24.67 & 29.2 & 13.48 & 15.9 \\
+2  & 29.36 & 34.8 & 18.02 & 21.4 \\
+4  & 35.86 & 42.5 & 22.62 & 26.8 \\
+8  & 40.98 & 48.6 & 24.86 & 29.5 \\
+16 & 43.57 & 51.6 & 26.07 & 30.9 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Scaling saturates well before the ceiling---$1.75\times$ and $1.96\times$ at 16
+Scaling saturates well before the ceiling---$1.76\times$ and $1.93\times$ at 16
 threads. This is expected rather than suspicious: an independent
 characterization of the same machine finds that a single performance core can
 largely saturate the cluster's SME resource, so the M4 is not well modelled as
@@ -816,12 +819,12 @@ fit had silently absorbed an unrelated bug.
 
 We therefore measured the transition directly, against an identical
 transition-free loop as a control so that loop overhead is subtracted rather
-than attributed. One round trip through streaming mode costs \textbf{9.07\,ns},
+than attributed. One round trip through streaming mode costs \textbf{9.04\,ns},
 and the SM+ZA form is indistinguishable from SM-only---so managing the ZA state
 is free, and the ZA kernels' problem was never the transition. The per-call
 floor, measured rather than fitted at the smallest possible call and timed in
-batches because a single call sits at clock resolution, is 46--57\,ns depending
-on run, of which the transition is roughly one sixth.
+batches because a single call sits at clock resolution, is 45.8\,ns in the
+submitted run, of which the transition is 19.7\,\%.
 
 A linear fit is deliberately \emph{not} used here: over these sizes it returns a
 negative intercept, which is the model announcing that it does not apply.
@@ -844,12 +847,12 @@ $4\times$ the $M=64$ time.}
 \toprule
 $M$ & scalar ($\mu$s) & V7 ($\mu$s) & speedup & groups \\
 \midrule
-1   & 0.250   & 7.791  & 0.03$\times$ & 1 \\
-4   & 2.166   & 6.208  & 0.35$\times$ & 1 \\
-8   & 4.375   & 6.084  & 0.72$\times$ & 1 \\
-\textbf{16}  & 8.875 & 6.208 & \textbf{1.43$\times$} & 1 \\
-64  & 66.000  & 6.291  & 10.49$\times$ & 1 \\
-256 & 378.667 & 25.292 & 14.97$\times$ & 4 \\
+1   & 0.250   & 9.291  & 0.03$\times$ & 1 \\
+4   & 2.416   & 6.291  & 0.38$\times$ & 1 \\
+8   & 4.916   & 6.209  & 0.79$\times$ & 1 \\
+\textbf{16}  & 9.916 & 6.250 & \textbf{1.59$\times$} & 1 \\
+64  & 74.833  & 6.166  & 12.14$\times$ & 1 \\
+256 & 422.208 & 25.250 & 16.72$\times$ & 4 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -865,7 +868,7 @@ row of result.
 
 This also quantifies a design decision previously taken on intuition. The
 alternative to one streaming region per call is one per row, which at $M=128$
-costs $128\times9.07\,\text{ns}\approx1.16\,\mu$s---about twenty times the
+costs $128\times9.04\,\text{ns}\approx1.16\,\mu$s---about twenty-five times the
 entire per-call floor. The decision is right, and now right by a measured
 margin. But the constant is 9\,ns: \emph{``streaming mode is expensive'' is true
 per row and false per call}, and only the second is what these kernels do.
@@ -924,12 +927,12 @@ the XNNPACK delegate.}
 shape & \textbf{(V7)} & eager & compile & portable & XNNPACK \\
 \midrule
 \multicolumn{6}{l}{\emph{LayerNorm}} \\
-1024$\times$2048 & \textbf{16.49} & 7.89 & 4.63 & 6.17 & 6.06 \\
-4096$\times$8192 & \textbf{13.54} & 7.35 & 4.44 & 5.92 & 5.93 \\
+1024$\times$2048 & \textbf{16.47} & 7.89 & 4.63 & 6.17 & 6.06 \\
+4096$\times$8192 & \textbf{13.52} & 7.35 & 4.44 & 5.92 & 5.93 \\
 \midrule
 \multicolumn{6}{l}{\emph{RMSNorm}} \\
-1024$\times$2048 & \textbf{38.46} & 3.44 & 6.65 & 4.27 & 6.64 \\
-4096$\times$8192 & \textbf{24.65} & 2.77 & 5.90 & 3.26 & 4.19 \\
+1024$\times$2048 & \textbf{38.45} & 3.44 & 6.65 & 4.27 & 6.64 \\
+4096$\times$8192 & \textbf{24.63} & 2.77 & 5.90 & 3.26 & 4.19 \\
 \bottomrule
 \end{tabular}
 \end{table}
