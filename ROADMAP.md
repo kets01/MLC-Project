@@ -441,6 +441,33 @@ accumulator does and doesn't help a bandwidth-bound vector op.
 
 ---
 
+## Sprint 7.5 — External baselines (how do we compare to state of the art?)
+
+**Goal:** place our kernels against two real, widely-used implementations, on the same machine, with a harness fair enough that the number means something.
+
+> **Read `sprint6_errors.md` §2.7–2.8 first.** This project already attempted a vendor comparison once and it produced four wrong claims: an "Accelerate RMSNorm" that was our own `vDSP_svesq`+`vDSP_vsmul` composition (Accelerate has no RMSNorm), a "`vDSP_normalize` = LayerNorm" equivalence that is false (no eps, no γ, no β), and a headline "16–37× faster" that was **measuring a layout mismatch, not a kernel** — vDSP forced to walk our column-major matrix at `stride = ld`, one cache miss per element. Given its own contiguous layout, **vDSP beat us: 65.77 vs 38.47 GiB/s at 16 MiB.** That is the precedent, and the reason for every rule below.
+
+**Chosen baselines: ExecuTorch + PyTorch ATen.** ExecuTorch is Meta's on-device runtime, which is the deployment story this project is about; PyTorch ATen is the most-cited CPU baseline and its LayerNorm uses Welford, tying directly into the Sprint 2c/6/7a Welford analysis.
+
+**Harness rules (each one exists because of a specific past failure):**
+- [ ] **Native layout for everyone.** Our kernels are column-major over a strided feature axis; every library normalizes the last, contiguous axis of a row-major tensor. Both are efficient *in their own layout* (V6's grouping makes each column touch 256 contiguous bytes). Forcing either into the other's layout measures the mismatch, not the kernel — the exact Sprint-6 error. Report the layout as a stated variable.
+- [ ] **Correctness gates the comparison (decision B applies to baselines too).** Verify each library's output against our float64 reference *before* quoting its throughput. This is what catches semantic mismatches, which is where the last attempt went wrong: PyTorch LayerNorm uses biased variance; ExecuTorch may **decompose** RMSNorm into elementwise ops rather than running a fused kernel.
+- [ ] **Say what is fused and what is not.** Comparing our fused kernel against an unfused op sequence and calling the difference "we are faster" is the §2.8 trap ("fused beats unfused" is not a kernel-quality claim).
+- [ ] **One thread everywhere**, same shapes, same byte convention (useful 1R+1W), footprint-matched ceilings from Sprint 6 §1.2.
+- [ ] **Record versions.** ExecuTorch 0.3.0 + torch 2.4.0 (isolated venv — the only combination available for this machine's Python 3.9; upstream is 0.5+, so the ExecuTorch figure is dated and must be labelled so). PyTorch eager/compile measured separately on 2.8.0 in `mlc_env`. **Do not install ExecuTorch into `mlc_env`** — it holds the Sphinx toolchain the docs workflow depends on.
+
+**Pre-registered expectations (written BEFORE measuring; the practice `sprint6_errors.md` credits for every claim that survived):**
+- [ ] **P1 — PyTorch eager will be slow, and not for a flattering reason.** Sprint 6 measured 2.78 GiB/s eager and 6.27 with `torch.compile` at 4096×8192. Expect us to win by ~5–10×, but attribute it to per-op dispatch overhead and lack of fusion at this shape, *not* to kernel quality.
+- [ ] **P2 — ExecuTorch's portable kernels will be SLOWER than PyTorch eager** unless XNNPACK delegation is active, because portable ops are reference implementations. If delegation kicks in, expect it to be competitive with or faster than us.
+- [ ] **P3 — RMSNorm will decompose** in ExecuTorch into `mul/mean/add/rsqrt/mul` rather than a fused kernel, moving several times our traffic; so its RMSNorm should look worse than its LayerNorm relative to ours. If this is right, the honest comparison is against the decomposed graph, labelled as such.
+- [ ] **P4 — the risk, stated up front: we may lose.** vDSP already beat us contiguous, and against the corrected 16 MiB ceiling we sit at only ~33 % useful / 50 % moved. A well-optimized contiguous baseline reaching 55–60 % is entirely plausible. **A loss is a publishable result** and must be reported as one, not buried.
+
+**Done when:** both baselines are verified-correct against our reference, measured on the same machine and shapes with layouts stated, and the report carries the comparison — including whichever of P1–P4 the measurements refute.
+**Tooling:** isolated venv for ExecuTorch; `mlc_env` for current PyTorch.
+**Learning focus:** what "state of the art" means for a bandwidth-bound op, fair-comparison methodology, fused vs decomposed execution.
+
+---
+
 ## Sprint 8 — Report & ship
 
 - [ ] Final Sphinx report section: motivation (norm in every block, bandwidth-bound), the two norms, the SSVE/JIT/SME/TEIR path, correctness, the GiB/s ablation, the stability/overhead analysis.
