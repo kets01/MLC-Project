@@ -79,6 +79,13 @@ Sprint status
        and the streaming transition timed directly at 9 ns — with the
        small-tensor penalty attributed to group granularity, not ``SMSTART``
      - Done
+   * - 7.5
+     - External baselines (PyTorch 2.13, ExecuTorch 1.4.1 incl. XNNPACK):
+       **1.5–2.1× faster on LayerNorm, 4.2–5.8× on RMSNorm**, both verified to
+       compute the same function — but the RMSNorm margin is mostly PyTorch
+       decomposing rather than fusing, and a vendor DSP library still beats us,
+       so this is not "state of the art"
+     - Done
 
 The best kernel per architecture (SSVE **V6**, 4-row-block contiguity
 grouping, for both norms; **V7** where ``FEAT_SME2`` is present) is the
@@ -124,4 +131,5 @@ ablation treatment there.
    norm_sprint5
    norm_sprint6
    norm_sprint7
+   norm_sprint7_5
    sprint2_debug_log
