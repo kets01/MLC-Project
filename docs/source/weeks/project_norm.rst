@@ -86,6 +86,12 @@ Sprint status
        decomposing rather than fusing, and a vendor DSP library still beats us,
        so this is not "state of the art"
      - Done
+   * - 8
+     - Hardening: the silent no-op on non-SME hosts replaced by a dispatching
+       public API with a scalar fallback; **66/66 configurations
+       correctness-gated before timing**; median/p10-p90 alongside best-case;
+       build/machine/CPU-feature provenance printed with every run
+     - Done
 
 The best kernel per architecture (SSVE **V6**, 4-row-block contiguity
 grouping, for both norms; **V7** where ``FEAT_SME2`` is present) is the
@@ -132,4 +138,5 @@ ablation treatment there.
    norm_sprint6
    norm_sprint7
    norm_sprint7_5
+   norm_sprint8
    sprint2_debug_log
