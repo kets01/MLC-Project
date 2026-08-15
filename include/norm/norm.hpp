@@ -10,8 +10,69 @@ namespace mini_jit::norm {
 // Normalized axis: N (each of the M rows is normalized independently).
 // gamma, beta: per-feature scale/shift vectors [N elements].
 
+// ===========================================================================
+// PUBLIC API — use these unless you specifically want one named kernel.
+//
+// Sprint 8 correctness fix.  Previously the only entry points were the
+// ISA-specific ones below, and each of them SILENTLY RETURNED on a CPU without
+// SME.  That meant
+//
+//     layer_norm_ssve(a, b, gamma, beta, ...);
+//     use(b);                       // <-- reads uninitialized memory
+//
+// produced no computation, no status and no diagnostic: the caller could not
+// tell success from a no-op.  That contradicts this project's own rule to fail
+// fast and clearly rather than conceal an unsupported state (CLAUDE.md §4),
+// and a silent no-op is the worst of the available options.
+//
+// These dispatchers ALWAYS compute a correct result.  They select the best
+// implementation available on the running CPU:
+//
+//     FEAT_SME2 present -> V7 (SME2 multi-vector)
+//     FEAT_SME  present -> V6 (SSVE, 4-row-block contiguity)
+//     otherwise         -> the scalar C++ reference
+//
+// so the same call is correct on the M4, on an M1/M2 CI runner, and on a
+// non-Arm host.  The ISA-specific entry points remain available for
+// benchmarking and testing, but they now abort loudly instead of no-opping.
+// ===========================================================================
+
+void layer_norm(const float* a,
+                float*       b,
+                const float* gamma,
+                const float* beta,
+                int64_t      m,
+                int64_t      n,
+                int64_t      ld_a,
+                int64_t      ld_b,
+                float        epsilon);
+
+void rms_norm(const float* a,
+              float*       b,
+              const float* gamma,
+              int64_t      m,
+              int64_t      n,
+              int64_t      ld_a,
+              int64_t      ld_b,
+              float        epsilon);
+
+// Which implementation the dispatchers select on this host: "SME2 (V7)",
+// "SME (V6)" or "scalar reference".  For the benchmark's provenance block, so
+// a reported number always says which code actually ran.
+const char* norm_dispatch_target();
+
+// ===========================================================================
+// ISA-SPECIFIC ENTRY POINTS
+//
+// PRECONDITION: cpu_supports_sme() (and cpu_supports_sme2() for the SME2
+// variants).  Calling one without the required feature prints a diagnostic
+// naming the function and calls std::abort() — it does NOT silently return.
+// Guard with cpu_supports_sme(), or call the dispatchers above instead.
+// ===========================================================================
+
 // LayerNorm: y = gamma * (x - mean(x)) / sqrt(var(x) + eps) + beta
-// Two-pass: pass 1 computes mean and variance, pass 2 normalizes.
+// Two reduction stages (mean, then variance) followed by output generation,
+// so the baseline implementation performs THREE traversals of the input.
 void layer_norm_ref(const float* a,
                     float*       b,
                     const float* gamma,
@@ -23,7 +84,9 @@ void layer_norm_ref(const float* a,
                     float        epsilon);
 
 // RMSNorm: y = gamma * x / sqrt(mean(x^2) + eps)
-// Single-pass: no mean subtraction, no beta.
+// One reduction stage (sum of squares) followed by output generation, so
+// the implementation performs TWO traversals of the input -- one fewer than
+// LayerNorm, which is the structural source of its throughput advantage.
 void rms_norm_ref(const float* a,
                   float*       b,
                   const float* gamma,
@@ -35,7 +98,7 @@ void rms_norm_ref(const float* a,
 
 // LayerNorm — hand-written SSVE kernel (Sprint 2c).
 // Same signature as layer_norm_ref; verified against it in tests.
-// Returns immediately (no-op) when SME is absent so the caller can skip.
+// PRECONDITION: cpu_supports_sme(); aborts loudly otherwise (see above).
 void layer_norm_ssve(const float* a,
                      float*       b,
                      const float* gamma,
@@ -158,7 +221,7 @@ void layer_norm_za_sme2(const float* a,
 // winner V6's 3R+1W) whenever a row fits in ZA (N <= 4*SVL); wider rows fall
 // back to a correct streaming three-pass.  The reduction stays SSVE
 // (context.md §5).  Same interface as layer_norm_ssve_v6; requires
-// cpu_supports_sme() == true, no-op otherwise.
+// cpu_supports_sme() == true; aborts loudly otherwise (see above).
 void layer_norm_za(const float* a,
                    float*       b,
                    const float* gamma,
@@ -171,7 +234,7 @@ void layer_norm_za(const float* a,
 
 // RMSNorm — hand-written Streaming SVE kernel (Sprint 2, V0 baseline).
 // Same interface as rms_norm_ref; requires cpu_supports_sme() == true.
-// Returns immediately (no-op) when SME is absent so the caller can skip.
+// PRECONDITION: cpu_supports_sme(); aborts loudly otherwise (see above).
 void rms_norm_ssve(const float* a,
                    float*       b,
                    const float* gamma,
@@ -294,7 +357,7 @@ void rms_norm_za_sme2(const float* a,
 // from memory (1R+1W vs the SSVE winner's 2R+1W) whenever a row fits in ZA
 // (N <= 4*SVL); wider rows fall back to a correct streaming two-pass.  The
 // reduction stays SSVE (context.md §5).  Same interface as rms_norm_ssve;
-// requires cpu_supports_sme() == true, no-op otherwise.
+// requires cpu_supports_sme() == true; aborts loudly otherwise.
 void rms_norm_za(const float* a,
                  float*       b,
                  const float* gamma,
@@ -309,7 +372,7 @@ void rms_norm_za(const float* a,
 // measures the single-core bandwidth ceiling the SSVE kernels can actually
 // reach (the compiler-vectorized C++ probe runs in NEON mode, a different
 // execution mode and therefore a different ceiling).
-// No-op when cpu_supports_sme() == false.
+// PRECONDITION: cpu_supports_sme(); aborts loudly otherwise.
 void bw_probe_ssve(float*       d,
                    const float* s,
                    int64_t      n);
@@ -324,7 +387,7 @@ void bw_probe_ssve(float*       d,
 //   empty   — the identical loop with no transition; the control whose time is
 //             subtracted, so the result is the transition and not the loop.
 //
-// No-ops when cpu_supports_sme() == false.
+// PRECONDITION: cpu_supports_sme(); these abort loudly otherwise.
 void smstart_probe_pairs(int64_t iters);
 void smstart_probe_sm_only(int64_t iters);
 void smstart_probe_empty(int64_t iters);
