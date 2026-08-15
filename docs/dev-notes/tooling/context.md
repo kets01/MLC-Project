@@ -2,8 +2,8 @@
 
 > Full context for any AI coding assistant working on MLC-Norm. Read this first.
 > - **This file** = what the project is, the target architecture, the kernels, the design decisions.
-> - `CLAUDE.md` = how to work (git, commits, tests, correctness gates, ISA rules, build, skills).
-> - `ROADMAP.md` = the route: sprint-by-sprint, a correct scalar slice first, then SSVE, then SME, then integration.
+> - `../../../CLAUDE.md` = how to work (git, commits, tests, correctness gates, ISA rules, build, skills).
+> - `../roadmap/ROADMAP.md` = the route: sprint-by-sprint, a correct scalar slice first, then SSVE, then SME, then integration.
 >
 > Important: the architecture below is the **TARGET vision**, reached by adding layers.
 > The project starts as a single correct reference + a thin SSVE kernel (see ROADMAP Sprints 0–2),
@@ -139,7 +139,7 @@ the TEIR registration (decision A).
 
 ## 4. Key design decisions (the "why" behind the build)
 
-These are the cross-cutting decisions; `ROADMAP.md` references them as A–F.
+These are the cross-cutting decisions; `../roadmap/ROADMAP.md` references them as A–F.
 
 - **(A) One canonical primitive interface.** The kernel signature for the norm primitives is defined once —
   following the lab's unary-kernel convention (`a`, `b`, `ld_a`, `ld_b`, layout flag, plus ε and the γ/β
@@ -425,10 +425,10 @@ ctest --test-dir build --output-on-failure
 ## 14. Current status
 
 The lab stack (assembly → NEON → SSVE/SME microkernels → `mini_jit` → TEIR) exists from the weekly exercises;
-this project extends it with the two norm primitives. Build order and per-sprint tasks live in `ROADMAP.md`:
+this project extends it with the two norm primitives. Build order and per-sprint tasks live in `../roadmap/ROADMAP.md`:
 start at Sprint 0 (reference + harness + CI), then add one layer at a time — SSVE kernel, VLA, SME ZA tile,
 JIT, TEIR integration, evaluation.
 
 > The precise "what's already implemented" checklist should be filled in from the actual `MLC-project` repo
-> (clone it / share the URL) — these three docs describe the target and the route, and `ROADMAP.md` is where
+> (clone it / share the URL) — these three docs describe the target and the route, and `../roadmap/ROADMAP.md` is where
 > the live status is tracked.
