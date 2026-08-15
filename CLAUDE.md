@@ -1,8 +1,10 @@
 # CLAUDE.md — MLC-Norm working conventions
 
 > How to work on MLC-Norm. Read alongside the other two files:
-> - `context.md` = what the project is, target architecture, design decisions (A–F), the kernels, the stack.
-> - `ROADMAP.md` = the route: sprint-by-sprint, reference + SSVE first, then SME, JIT, TEIR, evaluation.
+> - `docs/dev-notes/tooling/context.md` = what the project is, target architecture,
+>   design decisions (A–F), the kernels, the stack.
+> - `docs/dev-notes/roadmap/ROADMAP.md` = the route: sprint-by-sprint, reference + SSVE
+>   first, then SME, JIT, TEIR, evaluation.
 > - **This file** = conventions: git, commits, tests, build, ISA rules, correctness gates, tooling, style.
 >
 > The norm work extends an existing, merged lab repo (**MLC-Project**, `github.com/kets01/MLC-Project`),

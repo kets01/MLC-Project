@@ -194,7 +194,7 @@ where traffic binds do not overlap — at any footprint.
 
    **Known AAPCS64 hazard, re-confirmed and escalated (fix before TEIR — ROADMAP
    Sprint 5).** This is the same SMSTART/D-register clobber first hit in Sprint 2
-   and logged in ``sprint4_errors.md`` (#6, #8), not a new discovery. Getting
+   and logged in ``docs/dev-notes/sprint-errors/sprint4_errors.md`` (#6, #8), not a new discovery. Getting
    stable timings again required forcing all loop/timestamp state into memory: a
    fresh Release build zeroed every benchmark after the first streaming call. Root
    cause: ``smstart``/``smstop`` zero all of ``d8–d15`` (they alias the low bits of

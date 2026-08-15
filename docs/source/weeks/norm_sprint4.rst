@@ -61,7 +61,7 @@ What the exactness found: two latent InstGen bugs
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Preparing the golden words surfaced two week-6 encoder bugs that every
-behavioral test had passed over (full detail in ``sprint4_errors.md``):
+behavioral test had passed over (full detail in ``docs/dev-notes/sprint-errors/sprint4_errors.md``):
 
 - ``sve_ptrue_all(fp32)`` emitted ``PTRUE P.B`` (size bits 00), not the
   ``PTRUE P.S`` its own comment promised — functionally masked because an

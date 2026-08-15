@@ -19,7 +19,7 @@ The blocker: the Sprint-5 ABI fix was only half-applied
 The sprint opened by re-running ``main_norm`` for a baseline. **65 rows printed
 0.00 GiB/s** — Section 1 after the first SME call, and both ZA tables in their
 entirety. That is the ``d8-d15`` clobber signature already logged twice
-(``sprint4_errors.md`` #6 and #8).
+(``docs/dev-notes/sprint-errors/sprint4_errors.md`` #6 and #8).
 
 Sprint 5 fixed the two V6 winners, because those are what TEIR calls, and left
 everything else. A hardware probe over every entry point found **15 of 17
@@ -514,7 +514,7 @@ Sprint 6 status
   overstated (the half-applied ABI fix, the single-constant roofline, the
   Welford accuracy claim, the ZA skip) and are corrected in place across
   Sprints 0/1 through 6; nine claims made *during* the sprint were refuted by
-  the next measurement. The full log is ``sprint6_errors.md``.
+  the next measurement. The full log is ``docs/dev-notes/sprint-errors/sprint6_errors.md``.
 * **JIT/TEIR:** feature-dependent emission, three new encoders pinned to golden
   words, encoding diffs green for both SME2 kernels, TEIR single-thread RMSNorm
   +17.3 %.
