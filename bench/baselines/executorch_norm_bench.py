@@ -16,13 +16,22 @@ ExecuTorch-specific notes, because they change what the number MEANS:
   * The measured time includes ExecuTorch's per-invocation runtime dispatch.
     That is honest for an on-device comparison (it is what the op costs in
     that runtime), but it is NOT a pure kernel number, and the report says so.
-  * Version: ExecuTorch 0.3.0 with torch 2.4.0, the newest combination
-    available for this machine's Python 3.9.  Upstream is well past this, so
-    the figure is dated and is labelled as such.
+  * Versions are NOT pinned in this file; they are recorded at run time into
+    the output manifest, because that is the only version information that is
+    guaranteed to describe the run that produced the numbers.  The reported
+    measurements were taken with ExecuTorch 1.4.1 / torch 2.13.0 on Python
+    3.12.  (An earlier attempt on Python 3.9 could only install ExecuTorch
+    0.3.0, whose XNNPACK partitioner does not even import there -- staticmethod
+    objects became callable only in Python 3.10 -- so the delegated path, the
+    one that is actually deployed, could not be measured at all.  Reporting
+    only the portable kernels would have understated the baseline, which is the
+    mirror image of the Sprint-6 error, so a newer interpreter was used
+    instead.  Requires Python >= 3.10.)
 """
 
 import argparse
 import os
+import sys
 import time
 import warnings
 
@@ -127,7 +136,7 @@ def main() -> int:
     print(hdr)
     print("-" * len(hdr))
 
-    first_outputs = {}
+    shapes_written: list = []
 
     for (m, n) in shapes:
         x = make_input(m, n)
@@ -142,6 +151,7 @@ def main() -> int:
             rms.weight.copy_(gamma)
 
         row = {}
+        outputs = {}
         for tag, mod in (("LN", ln), ("RMS", rms)):
             for mode, delegate in (("portable", False), ("xnnpack", True)):
                 key = f"{tag}_{mode}"
@@ -150,8 +160,7 @@ def main() -> int:
                     rt = load_runtime(buf)
                     out = rt.forward([x])[0]
                     row[key] = gibs(m, n, best_of(lambda: rt.forward([x]), args.reps))
-                    if (m, n) == shapes[0]:
-                        first_outputs[key] = out
+                    outputs[key] = out
                 except Exception as exc:  # noqa: BLE001
                     row[key] = float("nan")
                     print(f"  [{key} @ {m}x{n}] failed: {type(exc).__name__}: "
@@ -161,21 +170,35 @@ def main() -> int:
               f"{row['LN_xnnpack']:13.2f}{row['RMS_portable']:14.2f}"
               f"{row['RMS_xnnpack']:13.2f}")
 
-        if (m, n) == shapes[0]:
-            x0, g0, b0 = x, gamma, beta
-            dump(os.path.join(args.outdir, "input.f32"), x0)
-            dump(os.path.join(args.outdir, "gamma.f32"), g0)
-            dump(os.path.join(args.outdir, "beta.f32"), b0)
-            with open(os.path.join(args.outdir, "shape.txt"), "w") as f:
-                f.write(f"{m} {n} {eps}\n")
-            # The checker reads torch_ln/torch_rms; reuse those names so the
-            # same verifier binary works for both baselines.
-            if "LN_portable" in first_outputs:
-                dump(os.path.join(args.outdir, "torch_ln.f32"),
-                     first_outputs["LN_portable"])
-            if "RMS_portable" in first_outputs:
-                dump(os.path.join(args.outdir, "torch_rms.f32"),
-                     first_outputs["RMS_portable"])
+        # Sprint 8: dump EVERY shape so each row of the results table carries
+        # its own correctness gate, rather than inferring three shapes from one.
+        # The XNNPACK outputs are the ones dumped where available, since that is
+        # the path the reported numbers come from.
+        shape_tag = f"{m}x{n}"
+        dump(os.path.join(args.outdir, f"input_{shape_tag}.f32"), x)
+        dump(os.path.join(args.outdir, f"gamma_{shape_tag}.f32"), gamma)
+        dump(os.path.join(args.outdir, f"beta_{shape_tag}.f32"), beta)
+        for key, fname in (("LN", f"ln_{shape_tag}.f32"), ("RMS", f"rms_{shape_tag}.f32")):
+            out = outputs.get(f"{key}_xnnpack", outputs.get(f"{key}_portable"))
+            if out is not None:
+                dump(os.path.join(args.outdir, fname), out)
+        shapes_written.append((m, n, eps))
+
+    # Manifest: which shapes the checker must verify, plus the exact versions
+    # this run used.  Versions are recorded rather than pinned in source,
+    # because a rerun months later must be comparable to THIS run, not merely
+    # resemble it.
+    try:
+        from importlib.metadata import version as _pkg_version
+        et_version = _pkg_version("executorch")
+    except Exception:  # noqa: BLE001
+        et_version = "unknown"
+    with open(os.path.join(args.outdir, "manifest.txt"), "w") as f:
+        f.write(f"# framework executorch {et_version} (torch {torch.__version__})\n")
+        f.write(f"# python {sys.version.split()[0]}\n")
+        f.write(f"# threads {torch.get_num_threads()}\n")
+        for (m, n, e) in shapes_written:
+            f.write(f"{m} {n} {e}\n")
 
     print("\nPortable = reference kernels (not meant to be fast). XNNPACK = the "
           "delegated\npath that is actually deployed. Times include ExecuTorch's "

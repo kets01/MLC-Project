@@ -20,8 +20,14 @@ norms against two widely-used implementations on the same machine.
    * ``vDSP_normalize`` called "LayerNorm" when it has no eps, no γ and no β;
    * a headline "16–37× faster" that **measured a layout mismatch, not a
      kernel** — vDSP forced to walk our column-major matrix at ``stride = ld``,
-     one cache miss per element. In its own layout that library was **faster
-     than us**: 65.77 vs 38.47 GiB/s at 16 MiB.
+     one cache miss per element. Re-run in its own contiguous layout the same
+     composition was recorded as *faster* than us (65.77 vs 38.47 GiB/s at
+     16 MiB), which is what turned the headline from a win into an error.
+
+   Neither of those vDSP figures is used anywhere in this report: both come
+   from the error log rather than from the correctness-gated harness below, and
+   neither was ever verified to compute the same function as our reference.
+   They are cited here only as the reason the rules exist.
 
 Method
 ~~~~~~~~
@@ -32,6 +38,27 @@ Method
   makes each of our column touches 256 contiguous bytes — so each is measured
   in the layout it was designed for. The transpose lives only in the
   correctness checker, never in a timed path.
+
+  .. important::
+
+     **Which question this answers, and which it does not.** Measuring each
+     implementation in its preferred representation answers:
+
+       *What throughput can each implementation achieve on this operator, given
+       the tensor layout it was designed for?*
+
+     It does **not** answer:
+
+       *What would it cost to replace a framework's operator with our kernel,
+       for the same incoming tensor representation?*
+
+     Those are different questions and the second is the one a compiler
+     integrator actually faces — it would have to include any layout conversion
+     at the boundary, which this comparison deliberately excludes from both
+     sides. We answer only the first, and every margin below should be read
+     with that scope attached. (The Sprint-6 failure was the mirror image:
+     forcing one implementation into the other's layout and reporting the
+     mismatch as a kernel result.)
 * **Correctness gates the comparison** (decision B, applied to baselines).
   Every library output is dumped to raw FP32 and verified against our float64
   reference *before* its throughput is quoted. This is what catches the failure
@@ -259,24 +286,45 @@ The honest limit of this result
 **Beating PyTorch and ExecuTorch is not the same as being state of the art**,
 and the report does not claim it is:
 
-1. **The fastest implementation ever measured on this machine is neither of
-   these.** Sprint 6's corrected figure has Apple's vDSP, in its own contiguous
-   layout, at **65.77 GiB/s** against our 38.46 at 16 MiB — about **1.7× faster
-   than us**. Against the footprint-matched ceiling (115.6 GiB/s at 16 MiB)
-   that is ~57 % for vDSP versus our ~33 %.
+1. **No specialist vendor kernel was measured.** This is the largest gap, and
+   it is a gap rather than a result. Apple's BNNS was investigated and produced
+   no number: on macOS 15.2 the reachable LayerNorm entry point is a
+   *deprecated* generic filter that we could create but not execute
+   (``BNNSFilterApply`` → −1 in every configuration tried, including a minimal
+   single-sample case), and **there is no RMSNorm in BNNS on this OS at all** —
+   every "RMS" symbol in the headers is ``RMSProp``. Apple's current BNNSGraph
+   does provide ``layerNorm(axes:epsilon:)`` and ``rmsNorm(scale:epsilon:)``,
+   but both are absent from this SDK and post-date this OS. Full evidence in
+   ``bnns_investigation.md``.
 2. **These are general-purpose frameworks, not specialist kernels.** A framework
    whose CPU RMSNorm decomposes in eager mode is a baseline for "what you get
    without a kernel", not a state-of-the-art bar for RMSNorm.
 3. **The comparison includes runtime dispatch.** ExecuTorch times are
    per-invocation through its runtime, which is honest for an on-device
    comparison but is not a pure kernel number.
+4. **Single-threaded only.** The frameworks parallelize by default and our TEIR
+   path scales 2.1×; a threaded comparison is a separate question against a
+   separate ceiling.
+
+.. note::
+
+   **A claim withdrawn.** An earlier version of this section stated that a
+   specialist vendor library "still beats us", citing Apple's vDSP at
+   65.77 GiB/s against our 38.46 at 16 MiB. That figure came from the Sprint-6
+   error log, not from this correctness-gated harness — it was never verified
+   to compute the same function, and the vDSP composition it referred to was
+   the very thing §2.7 identified as mislabelled. It is therefore withdrawn
+   rather than restated: we do not have a verified vendor number in either
+   direction. The §2.7–2.8 entries stay in ``sprint6_errors.md``, because that
+   is the record of our own mistake.
 
 The defensible claim is therefore narrow and worth stating precisely: *against
 two general-purpose frameworks at current versions, in their own layouts,
-single-threaded, and verified to compute the same function, our kernels are
-1.5–2.1× (LayerNorm) and 4.2–5.8× (RMSNorm) faster; the RMSNorm margin is
-largely the absence of a fused CPU kernel on their side, and a specialist vendor
-library still beats us.*
+single-threaded, and verified to compute the same function on every benchmarked
+shape, our kernels are 1.5–2.1× (LayerNorm) and 4.2–5.8× (RMSNorm) faster; the
+RMSNorm margin is largely the absence of a fused CPU kernel on their side; and
+no specialist vendor kernel was measured, so this is not a state-of-the-art
+claim.*
 
 Reproducing
 ~~~~~~~~~~~~~
@@ -288,7 +336,14 @@ Reproducing
    # workflow depends on.
    curl -LsSf https://astral.sh/uv/install.sh | sh
    uv python install 3.12 && uv venv --python 3.12 /tmp/et312
-   uv pip install --python /tmp/et312/bin/python executorch
+
+   # PINNED, not floated: the margins above are a statement about specific
+   # versions.  The same harness on torch 2.4.0 / executorch 0.3.0 gave
+   # torch.compile RMSNorm 3.02 GiB/s against 5.90 here, which would have made
+   # our RMSNorm margin read 8-13x instead of 4.2-5.8x.  The kernels did not
+   # change; the baseline did.
+   uv pip install --python /tmp/et312/bin/python \
+       -r bench/baselines/requirements-baselines.txt
 
    /tmp/et312/bin/python bench/baselines/torch_norm_bench.py       --outdir /tmp/t312
    /tmp/et312/bin/python bench/baselines/executorch_norm_bench.py  --outdir /tmp/et312d
@@ -299,13 +354,28 @@ Reproducing
        build/src/week6/libweek6_lib.a -o /tmp/verify_baseline
    /tmp/verify_baseline /tmp/t312 && /tmp/verify_baseline /tmp/et312d
 
+The drivers write a ``manifest.txt`` recording the framework and Python
+versions, the thread count and every shape measured; the checker reads that
+same list, so the set of shapes *timed* and the set *correctness-gated* cannot
+drift apart. The manifests from the runs reported above are checked in under
+``bench/baselines/manifests/``. A rerun that produces different versions is a
+different measurement, and its numbers should not be compared with these
+without saying so.
+
 What is left open
 ~~~~~~~~~~~~~~~~~~~
 
-* **A vDSP re-measurement through this harness.** The 65.77 GiB/s figure comes
-  from the Sprint-6 error log rather than from this correctness-gated harness.
-  Since it is the only implementation known to beat us, it is by far the most
-  valuable baseline still missing.
+* **A specialist vendor kernel.** This is the most valuable missing baseline
+  and it remains missing by decision, not oversight. Apple's BNNS was
+  investigated and could not be driven on macOS 15.2, and it has no RMSNorm
+  there at all (``bnns_investigation.md``); the remaining route would be
+  BNNSGraph via CoreML, which was scoped out. Until such a number exists,
+  **this report makes no claim about how our kernels compare to a specialist
+  vendor implementation, in either direction.**
 * **Threaded comparison.** Everything here is single-threaded; the frameworks
   parallelize by default and our TEIR path scales to 2.1×, so a multi-thread
   comparison is a separate question with a separate ceiling.
+* **The integration question.** As stated in the method, this measures each
+  implementation in its preferred layout. What it would cost to substitute our
+  kernel for a framework operator on the framework's own tensor representation
+  — including any boundary conversion — is not measured.

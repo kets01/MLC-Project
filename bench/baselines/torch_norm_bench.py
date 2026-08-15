@@ -88,6 +88,7 @@ def main() -> int:
 
     shapes = [(128, 64), (1024, 2048), (4096, 8192)]
     eps = 1e-5
+    shapes_written: list = []
 
     hdr = (f"{'shape':>14}{'MiB':>9}{'LN eager':>11}{'LN compile':>13}"
            f"{'RMS eager':>12}{'RMS compile':>13}")
@@ -131,19 +132,33 @@ def main() -> int:
         print(f"{m}x{n:<9}{mib:9.1f}{gibs(m,n,t_ln):11.2f}{gibs(m,n,t_lnc):13.2f}"
               f"{gibs(m,n,t_rms):12.2f}{gibs(m,n,t_rmsc):13.2f}")
 
-        # Dump the smallest shape for cross-verification against our reference.
-        if (m, n) == shapes[0]:
-            dump(os.path.join(args.outdir, "input.f32"), x)
-            dump(os.path.join(args.outdir, "gamma.f32"), gamma)
-            dump(os.path.join(args.outdir, "beta.f32"), beta)
-            dump(os.path.join(args.outdir, "torch_ln.f32"), ln_out)
-            dump(os.path.join(args.outdir, "torch_rms.f32"), rms_out)
-            with open(os.path.join(args.outdir, "shape.txt"), "w") as f:
-                f.write(f"{m} {n} {eps}\n")
+        # Sprint 8: dump EVERY shape, not just the smallest.  Verifying one
+        # shape and then publishing three is an inference, not a check -- a
+        # kernel can be right at 128x64 and wrong at a tail or a boundary, which
+        # is exactly the class of bug this project has hit repeatedly.  The C++
+        # checker runs over every dumped shape, so each row of the results
+        # table has its own correctness gate.
+        tag = f"{m}x{n}"
+        dump(os.path.join(args.outdir, f"input_{tag}.f32"), x)
+        dump(os.path.join(args.outdir, f"gamma_{tag}.f32"), gamma)
+        dump(os.path.join(args.outdir, f"beta_{tag}.f32"), beta)
+        dump(os.path.join(args.outdir, f"ln_{tag}.f32"), ln_out)
+        dump(os.path.join(args.outdir, f"rms_{tag}.f32"), rms_out)
+        shapes_written.append((m, n, eps))
 
-    print("\nGiB/s counts useful bytes (1R+1W). Correctness of these outputs is "
-          "verified\nseparately by the C++ checker against our float64 reference "
-          "before any of\nthese numbers is quoted (decision B).")
+    # Manifest: the checker reads this to know which shapes to verify, and it
+    # doubles as the environment record so a rerun can be compared to this one
+    # rather than merely resembling it.
+    with open(os.path.join(args.outdir, "manifest.txt"), "w") as f:
+        f.write(f"# framework torch {torch.__version__}\n")
+        f.write(f"# python {sys.version.split()[0]}\n")
+        f.write(f"# threads {torch.get_num_threads()}\n")
+        for (m, n, e) in shapes_written:
+            f.write(f"{m} {n} {e}\n")
+
+    print("\nGiB/s counts useful bytes (1R+1W). Every shape above was dumped and is "
+          "verified\nby the C++ checker against our float64 reference before any of "
+          "these numbers is\nquoted (decision B) — not just the smallest shape.")
     return 0
 
 

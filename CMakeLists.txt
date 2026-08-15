@@ -23,6 +23,42 @@ FetchContent_MakeAvailable(Catch2)
 
 include_directories(include)
 
+# ---------------------------------------------------------------------------
+# Build provenance (Sprint 8).
+#
+# A performance report has to say WHICH build produced its numbers.  These are
+# captured at configure time and compiled into the benchmark, which then prints
+# them beside the results, so a table can never be separated from the commit,
+# compiler and flags that produced it.
+#
+# The SHA is marked -dirty when the working tree has uncommitted changes: a
+# benchmark run from a modified tree is not reproducible from its SHA alone,
+# and saying so is the whole point.
+# ---------------------------------------------------------------------------
+find_package(Git QUIET)
+set(MLC_GIT_SHA "unknown")
+if(GIT_FOUND)
+    execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                    OUTPUT_VARIABLE MLC_GIT_SHA
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET)
+    execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain
+                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                    OUTPUT_VARIABLE MLC_GIT_DIRTY
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET)
+    if(NOT MLC_GIT_DIRTY STREQUAL "")
+        set(MLC_GIT_SHA "${MLC_GIT_SHA}-dirty")
+    endif()
+endif()
+
+add_compile_definitions(
+    MLC_GIT_SHA="${MLC_GIT_SHA}"
+    MLC_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+    MLC_CXX_COMPILER="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}"
+)
+
 # OpenMP — used by the week7 TEIR runtime for parallel iteration axes, and by
 # the norm benchmark to set the thread count for the Sprint-5 scaling study.
 # Detected here (not in a subdirectory) so every target sees the result.

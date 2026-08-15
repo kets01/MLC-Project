@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <vector>
 #include "norm/norm.hpp"
@@ -64,6 +65,121 @@ static double bench(Fn fn, int reps = 50) {
 
 static double to_gibs(double bytes, double seconds) {
     return (bytes / (1024.0 * 1024.0 * 1024.0)) / seconds;
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 8 — provenance.
+//
+// A performance table is only reproducible if the reader knows which build,
+// which machine and which CPU features produced it.  This prints all of it
+// once, at the top of the run, so no number in the report can be separated
+// from its conditions.  The SME/SME2 lines are the DETECTED values, not a
+// datasheet claim — this project's own docs carried a stale "M4 is SME1"
+// assumption for several sprints while the hardware reported FEAT_SME2=1.
+// ---------------------------------------------------------------------------
+
+#ifndef MLC_GIT_SHA
+#define MLC_GIT_SHA "unknown"
+#endif
+#ifndef MLC_BUILD_TYPE
+#define MLC_BUILD_TYPE "unknown"
+#endif
+#ifndef MLC_CXX_COMPILER
+#define MLC_CXX_COMPILER "unknown"
+#endif
+
+static std::string shell_capture(const char* cmd) {
+    std::string out;
+    FILE* p = popen(cmd, "r");
+    if (!p) return "unavailable";
+    char buf[256];
+    while (fgets(buf, sizeof(buf), p)) out += buf;
+    pclose(p);
+    while (!out.empty() && (out.back() == '\n' || out.back() == ' ')) out.pop_back();
+    return out.empty() ? "unavailable" : out;
+}
+
+static void print_provenance(unsigned nthreads) {
+    std::cout << std::string(96, '=') << "\n"
+              << "RUN PROVENANCE — the conditions every number below was produced under\n"
+              << std::string(96, '=') << "\n"
+              << "  git commit        : " << MLC_GIT_SHA << "\n"
+              << "  build type        : " << MLC_BUILD_TYPE << "\n"
+              << "  compiler          : " << MLC_CXX_COMPILER << "\n"
+              << "  C++ standard      : " << __cplusplus << "\n"
+              << "  OS                : " << shell_capture("sw_vers -productName 2>/dev/null")
+              << " " << shell_capture("sw_vers -productVersion 2>/dev/null")
+              << " (" << shell_capture("uname -m") << ")\n"
+              << "  CPU               : "
+              << shell_capture("sysctl -n machdep.cpu.brand_string 2>/dev/null") << "\n"
+              << "  FEAT_SME (sysctl) : "
+              << shell_capture("sysctl -n hw.optional.arm.FEAT_SME 2>/dev/null") << "\n"
+              << "  FEAT_SME2 (sysctl): "
+              << shell_capture("sysctl -n hw.optional.arm.FEAT_SME2 2>/dev/null") << "\n"
+              << "  cpu_supports_sme(): " << (cpu_supports_sme()  ? "true" : "false")
+              << ",  cpu_supports_sme2(): " << (cpu_supports_sme2() ? "true" : "false") << "\n"
+              << "  streaming VL      : " << svl_fp32_lanes() << " FP32 lanes (RDSVL)\n"
+              << "  norm dispatch     : " << norm_dispatch_target() << "\n"
+              << "  OpenMP threads    : " << nthreads << "\n"
+              << "  scheduler QoS     : QOS_CLASS_USER_INTERACTIVE (P-core hint; "
+                 "macOS exposes no pinning API)\n"
+              << std::string(96, '=') << "\n\n";
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 8 — report a distribution, not just the best sample.
+//
+// Every table in this harness historically reported best-of-N (the minimum).
+// That is a defensible instrument for estimating a machine CEILING: taking the
+// minimum suppresses preemption, migration and unrelated system activity, so
+// it answers "what can this kernel do when nothing interferes".
+//
+// It is a poor number to present ALONE, because it cannot distinguish
+//     "18.4 us is what this kernel does"
+// from
+//     "one lucky run hit 18.4 us and the other 49 were 24-31 us".
+// Those have very different engineering meanings and identical minima.
+//
+// So the minimum is kept and explicitly labelled best-case, and a median plus
+// a p10/p90 spread is reported next to it. A wide gap between min and median
+// is itself a finding: it says the number is fragile.
+// ---------------------------------------------------------------------------
+
+struct Stats {
+    double best   = 0.0;   // minimum — best-case envelope
+    double median = 0.0;   // robust typical value
+    double p10    = 0.0;
+    double p90    = 0.0;
+    int    n      = 0;
+};
+
+// Percentile by nearest-rank on a sorted sample.
+static double percentile(const std::vector<double>& sorted, double q) {
+    if (sorted.empty()) return 0.0;
+    const size_t idx = static_cast<size_t>(q * static_cast<double>(sorted.size() - 1) + 0.5);
+    return sorted[std::min(idx, sorted.size() - 1)];
+}
+
+template<typename Fn>
+static Stats bench_stats(Fn fn, int reps = 50) {
+    // Samples live on the heap: they are read again after calls that cross
+    // SMSTART, which zeroes d8-d15 behind the compiler's back.
+    std::vector<double> s;
+    s.reserve(static_cast<size_t>(reps));
+    for (int r = 0; r < reps; ++r) {
+        auto t0 = Clock::now();
+        fn();
+        auto t1 = Clock::now();
+        s.push_back(std::chrono::duration<double>(t1 - t0).count());
+    }
+    std::sort(s.begin(), s.end());
+    Stats st;
+    st.n      = static_cast<int>(s.size());
+    st.best   = s.front();
+    st.median = percentile(s, 0.50);
+    st.p10    = percentile(s, 0.10);
+    st.p90    = percentile(s, 0.90);
+    return st;
 }
 
 // ---------------------------------------------------------------------------
@@ -1247,6 +1363,13 @@ using KernelFnBench   = void (*)(const float*, float*, const float*,
 using LNKernelFnBench = void (*)(const float*, float*, const float*, const float*,
                                  int64_t, int64_t, int64_t, int64_t, float);
 
+// Sprint 8: every (implementation, norm, shape) that appears in a results
+// table is correctness-gated before it is timed.  These count the gate so the
+// run can state the total, and so a single failure is visible in the summary
+// rather than only in one row.
+int g_gate_total  = 0;
+int g_gate_failed = 0;
+
 double max_abs_dev(const std::vector<float>& got, const std::vector<float>& ref) {
     double worst = 0.0;
     for (size_t i = 0; i < got.size(); ++i)
@@ -1264,22 +1387,33 @@ void print_abl_header(int64_t m, int64_t n, double footprint_mib,
               << std::setw(30) << "lever"
               << std::right
               << std::setw(9)  << "GiB/s"
+              << std::setw(9)  << "median"
+              << std::setw(14) << "p10-p90"
               << std::setw(9)  << "%1core"
               << std::setw(8)  << "%chip"
               << std::setw(11) << "vs scalar"
               << std::setw(12) << "max|dev|"
               << std::setw(5)  << "ok" << "\n"
-              << std::string(106, '-') << "\n";
+              << std::string(126, '-') << "\n";
     (void)peak_ssve; (void)peak_chip;
 }
 
-void print_abl_row(const Rung& r, double gibs, double peak_ssve, double peak_chip,
+// `gibs` is the best-case (minimum-time) figure the ablation has always
+// reported; `med`/`lo`/`hi` come from the same sample set so the reader can see
+// whether that best case is typical or a lucky outlier.
+void print_abl_row(const Rung& r, double gibs, double med, double lo, double hi,
+                   double peak_ssve, double peak_chip,
                    double scalar_gibs, double dev, bool ok) {
+    std::ostringstream spread;
+    spread << std::fixed << std::setprecision(1) << lo << "-" << hi;
+
     std::cout << std::left
               << std::setw(22) << r.name
               << std::setw(30) << r.lever
               << std::right << std::fixed
               << std::setw(9)  << std::setprecision(2) << gibs
+              << std::setw(9)  << std::setprecision(2) << med
+              << std::setw(14) << spread.str()
               << std::setw(8)  << std::setprecision(1) << (100.0 * gibs / peak_ssve) << "%"
               << std::setw(7)  << std::setprecision(1) << (100.0 * gibs / peak_chip) << "%"
               << std::setw(10) << std::setprecision(1) << (gibs / scalar_gibs) << "x"
@@ -1366,15 +1500,34 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
 
         double scalar_rms = 0.0;
         auto rms_row = [&](const Rung& r, KernelFnBench fn) {
+            // Correctness gate FIRST, for this exact (implementation, norm,
+            // shape): run the very function that is about to be timed, compare
+            // its complete output against the reference, and refuse to time it
+            // if it disagrees.  A GiB/s figure is only meaningful for a kernel
+            // that computes the right thing (decision B), so an unverified row
+            // must not appear at all rather than appear with a "NO" beside it.
             std::fill(b.begin(), b.end(), -1.0f);
             fn(a.data(), b.data(), gamma.data(), s.m, s.n, ld, ld, 1e-5f);
-            double dev = max_abs_dev(b, expect);
-            double sec = bench([&] {
+            const double dev = max_abs_dev(b, expect);
+            ++g_gate_total;
+            if (dev > kGate) {
+                ++g_gate_failed;
+                std::cout << std::left << std::setw(22) << r.name
+                          << std::setw(30) << r.lever
+                          << "  *** CORRECTNESS GATE FAILED (max|dev| = "
+                          << std::scientific << std::setprecision(2) << dev
+                          << std::fixed << ") — not timed ***\n";
+                return;
+            }
+
+            const Stats st   = bench_stats([&] {
                 fn(a.data(), b.data(), gamma.data(), s.m, s.n, ld, ld, 1e-5f);
             }, reps);
-            double gibs = to_gibs(bytes, sec);
+            const double gibs = to_gibs(bytes, st.best);
             if (scalar_rms == 0.0) scalar_rms = gibs;
-            print_abl_row(r, gibs, matched_peak, peak_chip, scalar_rms, dev, dev <= kGate);
+            print_abl_row(r, gibs, to_gibs(bytes, st.median),
+                          to_gibs(bytes, st.p90), to_gibs(bytes, st.p10),
+                          matched_peak, peak_chip, scalar_rms, dev, true);
         };
 
         std::cout << "RMSNorm (single-pass, 2R+1W)\n";
@@ -1396,16 +1549,30 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
 
         double scalar_ln = 0.0;
         auto ln_row = [&](const Rung& r, LNKernelFnBench fn) {
+            // Same gate-then-time discipline as rms_row above.
             std::fill(b.begin(), b.end(), -1.0f);
             fn(a.data(), b.data(), gamma.data(), beta.data(), s.m, s.n, ld, ld, 1e-5f);
-            double dev = max_abs_dev(b, expect);
-            double sec = bench([&] {
+            const double dev = max_abs_dev(b, expect);
+            ++g_gate_total;
+            if (dev > kGate) {
+                ++g_gate_failed;
+                std::cout << std::left << std::setw(22) << r.name
+                          << std::setw(30) << r.lever
+                          << "  *** CORRECTNESS GATE FAILED (max|dev| = "
+                          << std::scientific << std::setprecision(2) << dev
+                          << std::fixed << ") — not timed ***\n";
+                return;
+            }
+
+            const Stats st = bench_stats([&] {
                 fn(a.data(), b.data(), gamma.data(), beta.data(),
                    s.m, s.n, ld, ld, 1e-5f);
             }, reps);
-            double gibs = to_gibs(bytes, sec);
+            const double gibs = to_gibs(bytes, st.best);
             if (scalar_ln == 0.0) scalar_ln = gibs;
-            print_abl_row(r, gibs, matched_peak, peak_chip, scalar_ln, dev, dev <= kGate);
+            print_abl_row(r, gibs, to_gibs(bytes, st.median),
+                          to_gibs(bytes, st.p90), to_gibs(bytes, st.p10),
+                          matched_peak, peak_chip, scalar_ln, dev, true);
         };
 
         std::cout << "LayerNorm (two-pass, 3R+1W)\n";
@@ -1421,6 +1588,25 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
         ln_row({"ZA residency", "ZA staging, 1R+1W"},             layer_norm_za);
         ln_row({"JIT (auto ISA)", "emitted: V7 on SME2, else V6"},   kln);
     }
+
+    // The sentence this earns: "every configuration in this table was
+    // correctness-gated against the FP64 reference before it was timed."
+    // It is only true because the gate runs the exact function that is then
+    // timed, on the exact shape, and refuses to time it on disagreement.
+    std::cout << "\n" << std::string(126, '-') << "\n"
+              << "Correctness gate: " << (g_gate_total - g_gate_failed) << " / "
+              << g_gate_total << " configurations verified against the float64 "
+              << "reference BEFORE timing.\n";
+    if (g_gate_failed > 0) {
+        std::cout << "*** " << g_gate_failed << " configuration(s) FAILED and were "
+                  << "not timed — the table above is incomplete. ***\n";
+    } else {
+        std::cout << "No configuration produced a timing without first matching the "
+                  << "reference.\n";
+    }
+    std::cout << "The GiB/s column is the BEST sample (best-case envelope, the figure this\n"
+              << "harness has always reported); `median` and `p10-p90` show the distribution\n"
+              << "from the same samples, so a best case that is not typical is visible.\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -1641,8 +1827,15 @@ int main() {
     std::cout <<
         "Byte convention: all GiB/s count USEFUL bytes = 1 read + 1 write per\n"
         "element (the algorithm's minimum), for kernels AND probes alike.\n"
-        "The V0-V3 kernels as implemented move 2R+1W (both passes read x);\n"
-        "their moved-bytes figure is 1.5x the printed one.\n\n";
+        "\n"
+        "MOVED bytes differ PER NORM, and the two must not be conflated:\n"
+        "  RMSNorm   1 reduction stage  (sum of squares) + output generation\n"
+        "            -> 2 input traversals, 2R+1W, moved = 1.5x the printed figure\n"
+        "  LayerNorm 2 reduction stages (mean, then variance) + output generation\n"
+        "            -> 3 input traversals, 3R+1W, moved = 2.0x the printed figure\n"
+        "The 1.33x traffic ratio between them is structural and is the main reason\n"
+        "RMSNorm outruns LayerNorm here.  (An earlier version of this header quoted\n"
+        "2R+1W without saying which norm, which reads as if it applied to both.)\n\n";
 
     const bool have_sme = cpu_supports_sme();
     if (!have_sme)
@@ -1659,6 +1852,8 @@ int main() {
     // All ceilings live in volatile doubles: they are read again after many
     // SMSTART/SMSTOP transitions, which zero callee-saved FP registers
     // (d9-d15) behind the compiler's back.
+    print_provenance(nthreads);
+
     std::cout << "Measuring ceilings (128 MiB arrays, best-of-10)...\n";
     volatile double peak_neon = measure_peak_neon_1core();
     volatile double peak_chip = measure_peak_chip(nthreads);

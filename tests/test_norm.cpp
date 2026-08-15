@@ -2,6 +2,7 @@
 #include <catch2/catch_approx.hpp>
 #include <chrono>   // Sprint 7b: timing the streaming-transition probes
 #include <cmath>
+#include <string>   // Sprint 8: dispatch-target assertions
 #include <vector>
 #include "norm/norm.hpp"
 #include "week3/utility.hpp"  // cpu_supports_sme()
@@ -2249,4 +2250,126 @@ TEST_CASE("Sprint7b: the probes preserve d9-d15 across the transition",
     REQUIRE(r13 == 5.0);
     REQUIRE(r14 == 6.0);
     REQUIRE(r15 == 7.0);
+}
+
+// ===========================================================================
+// Sprint 8 — the public dispatchers.
+//
+// These replace an API whose only entry points SILENTLY RETURNED on a CPU
+// without SME, so a caller could not distinguish "computed" from "did
+// nothing" and would go on to read an untouched output buffer.
+//
+// Deliberately NOT SME-guarded: the whole point is that these compute a
+// correct result on ANY cpu, so they must run on the CI runner (no SME, hence
+// the scalar fallback path) as well as on the M4 (V7). A guard here would
+// leave the fallback untested on the only machine that exercises it.
+// ===========================================================================
+
+TEST_CASE("Sprint8 dispatch: layer_norm matches the reference on any CPU",
+          "[norm][sprint8][dispatch]") {
+    for (auto shape : { std::pair<int64_t,int64_t>{64, 32},
+                        std::pair<int64_t,int64_t>{100, 50},
+                        std::pair<int64_t,int64_t>{192, 37} }) {
+        const int64_t M = shape.first, N = shape.second, ld = M;
+        std::vector<float> gamma(N), beta(N);
+        for (int64_t i = 0; i < N; ++i) {
+            gamma[i] = 0.5f + 0.05f * static_cast<float>(i % 17);
+            beta[i]  = 0.1f  * static_cast<float>(i % 13) - 0.3f;
+        }
+        auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+            return static_cast<float>((r * 11 + c * 7) % 19) - 9.0f;
+        });
+
+        std::vector<float> got(ld * N, 0.0f), want(ld * N, 0.0f);
+        layer_norm_ref(a.data(), want.data(), gamma.data(), beta.data(),
+                       M, N, ld, ld, 1e-5f);
+        layer_norm(a.data(), got.data(), gamma.data(), beta.data(),
+                   M, N, ld, ld, 1e-5f);
+
+        // Absolute margin, not relative: on an SME2 host the dispatcher runs
+        // V7, whose FRSQRTE+Newton-Raphson reciprocal-sqrt is accurate to
+        // ~1e-5 RELATIVE — which a relative epsilon of kTol rejects on values
+        // near zero.  This is the same kAbsMarginNR the V6/V7 tests use, and
+        // it is the measured accuracy of that substitution (Sprint 7a), not a
+        // gate widened to make the test pass.
+        INFO("dispatch target: " << norm_dispatch_target()
+             << "  M=" << M << " N=" << N);
+        for (int64_t c = 0; c < N; ++c)
+            for (int64_t r = 0; r < M; ++r)
+                REQUIRE(got[r + c * ld] ==
+                        Approx(want[r + c * ld]).margin(kAbsMarginNR));
+    }
+}
+
+TEST_CASE("Sprint8 dispatch: rms_norm matches the reference on any CPU",
+          "[norm][sprint8][dispatch]") {
+    for (auto shape : { std::pair<int64_t,int64_t>{64, 32},
+                        std::pair<int64_t,int64_t>{100, 50},
+                        std::pair<int64_t,int64_t>{192, 37} }) {
+        const int64_t M = shape.first, N = shape.second, ld = M;
+        std::vector<float> gamma(N);
+        for (int64_t i = 0; i < N; ++i)
+            gamma[i] = 0.5f + 0.1f * static_cast<float>(i % 17);
+        auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+            return static_cast<float>((r * 11 + c * 7) % 19) - 9.0f;
+        });
+
+        std::vector<float> got(ld * N, 0.0f), want(ld * N, 0.0f);
+        rms_norm_ref(a.data(), want.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+        rms_norm(a.data(), got.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+
+        // Absolute margin, not relative: on an SME2 host the dispatcher runs
+        // V7, whose FRSQRTE+Newton-Raphson reciprocal-sqrt is accurate to
+        // ~1e-5 RELATIVE — which a relative epsilon of kTol rejects on values
+        // near zero.  This is the same kAbsMarginNR the V6/V7 tests use, and
+        // it is the measured accuracy of that substitution (Sprint 7a), not a
+        // gate widened to make the test pass.
+        INFO("dispatch target: " << norm_dispatch_target()
+             << "  M=" << M << " N=" << N);
+        for (int64_t c = 0; c < N; ++c)
+            for (int64_t r = 0; r < M; ++r)
+                REQUIRE(got[r + c * ld] ==
+                        Approx(want[r + c * ld]).margin(kAbsMarginNR));
+    }
+}
+
+TEST_CASE("Sprint8 dispatch: the output buffer is always written",
+          "[norm][sprint8][dispatch]") {
+    // The regression this whole change exists for.  The old API could leave
+    // the buffer exactly as the caller left it; a sentinel that survives the
+    // call is precisely the silent-no-op signature.
+    const int64_t M = 33, N = 17, ld = M;
+    std::vector<float> gamma(N, 1.0f), beta(N, 0.0f);
+    auto a = make_matrix(M, N, ld, [](int64_t r, int64_t c) {
+        return 1.0f + 0.25f * static_cast<float>((r + c) % 5);
+    });
+
+    const float kSentinel = -12345.0f;
+
+    std::vector<float> ln(ld * N, kSentinel);
+    layer_norm(a.data(), ln.data(), gamma.data(), beta.data(),
+               M, N, ld, ld, 1e-5f);
+
+    std::vector<float> rms(ld * N, kSentinel);
+    rms_norm(a.data(), rms.data(), gamma.data(), M, N, ld, ld, 1e-5f);
+
+    for (int64_t c = 0; c < N; ++c) {
+        for (int64_t r = 0; r < M; ++r) {
+            const size_t i = static_cast<size_t>(r + c * ld);
+            INFO("index " << i << " target " << norm_dispatch_target());
+            REQUIRE(ln[i]  != kSentinel);
+            REQUIRE(rms[i] != kSentinel);
+            REQUIRE(std::isfinite(ln[i]));
+            REQUIRE(std::isfinite(rms[i]));
+        }
+    }
+}
+
+TEST_CASE("Sprint8 dispatch: reports a target consistent with the CPU",
+          "[norm][sprint8][dispatch]") {
+    const std::string target = norm_dispatch_target();
+    INFO("target = " << target);
+    if (cpu_supports_sme2())     REQUIRE(target.find("SME2")   != std::string::npos);
+    else if (cpu_supports_sme()) REQUIRE(target.find("SME")    != std::string::npos);
+    else                         REQUIRE(target.find("scalar") != std::string::npos);
 }

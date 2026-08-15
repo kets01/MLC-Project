@@ -20,14 +20,29 @@ Jena): optimizing the two dominant Transformer normalization primitives — Laye
 AArch64 with the Scalable Matrix Extension (SME) and its Streaming SVE (SSVE) mode.**
 
 Normalization is not an afterthought in a Transformer: a norm runs in **every block**, twice per layer.
-These primitives are **memory-bandwidth bound** — they read and write the whole activation tensor while
-doing very little arithmetic per element — so they sit squarely on the bandwidth ceiling of the machine.
-Making them fast is a data-movement problem, not a flop-counting one.
+These primitives are **bandwidth-dominated at the shapes we measure** — they read and write the whole
+activation tensor while doing very little arithmetic per element — so making them fast is primarily a
+data-movement problem, not a flop-counting one.
+
+> **Wording, deliberately hedged (Sprint 10).** Earlier revisions called the kernels "memory-bandwidth
+> bound" flatly. Our own measurements do not support that as an unqualified claim: against footprint-matched
+> ceilings the best kernel reaches ~33% useful / ~50% moved bytes, not ~95%, and at cache-resident shapes
+> RMSNorm V7 is **FP-issue-bound** — sustaining 100% of the measured SSVE FP-instruction issue rate — which
+> is precisely why SME2 multi-vector loads buy it nothing there and +17% at DRAM. Bandwidth dominates in the
+> DRAM regime; elsewhere reduction dependency chains, FP issue rate, load-instruction count and `rsqrt`
+> latency all show up in the ablation. "Bandwidth-dominated for the measured shapes" is what the data
+> supports.
+
+> **Hardware note (corrected in Sprint 6).** Earlier revisions said the M4 "ships SME1" and warned against
+> assuming SME2. That was wrong: the target machine reports `hw.optional.arm.FEAT_SME2: 1`, and the SME2
+> multi-vector forms both assemble and execute on it — the V7 kernels are built on them. Take the feature set
+> from the machine (`sysctl hw.optional.arm.FEAT_SME2`, echoed in the benchmark's provenance header) rather
+> than from this file.
 
 The project delivers, for both norms:
 
 - **Hand-written SME/SSVE kernels** that compute the norm over the feature dimension on a target machine
-  exposing SME (AArch64; in practice an Apple M-series chip such as the **M4**, which ships SME1).
+  exposing SME (AArch64; in practice an Apple M-series chip such as the **M4**).
 - **JIT (dynamic instruction emission)**: the kernels are *generated at runtime* by an extended `mini_jit`
   (the code generator built across the lab), parameterized by shape — not pre-compiled fixed binaries.
 - **TEIR integration**: the norms are registered as **primitives** the Tiled Execution IR runtime can place
@@ -137,11 +152,25 @@ These are the cross-cutting decisions; `ROADMAP.md` references them as A–F.
   worthless. Numerical stability of the reduction (variance for LayerNorm, sum-of-squares for RMSNorm) is
   *part of* correctness, not a separate concern (see §8).
 
-- **(C) Two norms, two compute strategies — not one kernel with a flag.** LayerNorm is **two-pass**
-  (pass 1: mean & variance; pass 2: normalize, scale γ, shift β) → higher arithmetic intensity, high
-  stability. RMSNorm is **single-pass** (one sum-of-squares reduction; no mean, no β) → lower arithmetic
-  intensity, ~10–40% higher throughput at the same accuracy. The two reduction structures are a deliberate
-  design axis and an **ablation variable**, not a parameter toggle.
+- **(C) Two norms, two compute strategies — not one kernel with a flag.** The difference is best stated as
+  **reduction stages** and **input traversals**, because those are two different things and the shorthand
+  "two-pass / single-pass" conflates them:
+  - **LayerNorm** has **two reduction stages** (mean, then variance) followed by output generation, so the
+    baseline implementation performs **three traversals of the input** → traffic **3R+1W**.
+  - **RMSNorm** has **one reduction stage** (sum of squares) followed by output generation, so it performs
+    **two traversals** → traffic **2R+1W**.
+
+  That 1.33× traffic ratio is the structural source of RMSNorm's advantage, and it is why the 2R+1W model
+  must not be applied to LayerNorm. Three claims are kept separate throughout, because they are separate:
+  1. **Semantics** — RMSNorm omits mean-centering, hence one fewer reduction and one fewer traversal.
+  2. **Literature** — Zhang & Sennrich (NeurIPS 2019) report *comparable task performance* and runtime
+     reductions of roughly **7–64%** depending on the experiment; not a single "10–40%" figure.
+  3. **Our measurement** — on our shapes, LN/RMS = 0.43–0.56, i.e. RMSNorm 1.8–2.3× faster (Sprint 2).
+
+  Note that **kernel numerical agreement is not model accuracy**: our tests can show our RMSNorm matches an
+  RMSNorm reference, which says nothing about whether replacing LayerNorm with RMSNorm preserves accuracy in
+  a given network. That is a modelling question this project does not evaluate. The two reduction structures
+  are a deliberate design axis and an **ablation variable**, not a parameter toggle.
 
 - **(D) Vector-Length-Agnostic (VLA) code.** No hard-coded streaming vector length (SVL) or element count.
   The Streaming Vector Length is **queried at runtime** and loops are written to any SVL; predication
@@ -196,19 +225,39 @@ tile geometry is a generator parameter. Entering and leaving **streaming mode** 
 real cost — keep the whole norm inside one streaming region, don't toggle per element (see §8).
 
 > The exact instruction mnemonics and ZA addressing are an SME-version concern — confirm against the target
-> machine's SME level (SME1 on Apple M4) at coding time; don't assume SME2-only instructions are available.
+> machine's SME level at coding time by querying it. On the target M4 that is **SME2**
+> (`hw.optional.arm.FEAT_SME2: 1`), confirmed by assembling and executing the multi-vector forms before
+> any kernel was built on them; SME2-only instructions are guarded at runtime by `cpu_supports_sme2()`
+> so they degrade to the SME1 path on M1/M2.
 
 ---
 
 ## 6. Performance model & the roofline (decision E detail)
 
-- **Know the ceiling first.** Normalization's arithmetic intensity is low (a handful of FLOPs per element
-  against 4–8 bytes moved), so its roofline position is on the **bandwidth-bound** side. Peak achievable is
-  ~`bytes_moved / peak_bandwidth`, not anything FLOP-derived. Establish the machine's measured peak bandwidth
-  (e.g. a STREAM-style probe) as the target line before optimizing.
+- **Know the ceiling first.** Normalization's operational intensity is low, which puts its roofline position
+  on the bandwidth-dominated side. Stated concretely rather than qualitatively, per element of output:
 
-- **Count the bytes honestly.** LayerNorm two-pass naively reads the row twice; an optimized kernel keeps the
-  row resident in registers/cache between passes so it is effectively read once. RMSNorm is single-pass by
+  | | RMSNorm | LayerNorm |
+  |---|---|---|
+  | reduction stages | 1 (Σx²) | 2 (mean, then variance) |
+  | input traversals | 2 | 3 |
+  | traffic, moved | 2R+1W = 12 B | 3R+1W = 16 B |
+  | traffic, useful (1R+1W) | 8 B | 8 B |
+  | FP ops | ~3 (fmla, 2 fmul) | ~5 (add, fmla, sub, 2 fmul) |
+  | **operational intensity** | **~0.25 flop/B moved** | **~0.31 flop/B moved** |
+
+  For scale: reaching the M4's ~1984 GFLOPS FMOPA peak would need ~31 flop/B — about 100× more — which is why
+  "1% of FMOPA peak" is what the roofline permits for this operator, not a defect to optimise away. The
+  metric is GiB/s against a **measured, footprint-matched** ceiling (decision E), never GFLOPS.
+
+  Two caveats the measurements forced (Sprints 6 and 10): the ceiling is a **curve**, not a constant — the
+  same probe reaches 115.6 GiB/s at a 16 MiB footprint and 59.5 at 256 MiB, so a cache-resident kernel must
+  not be divided by the DRAM figure; and low operational intensity does **not** mean bandwidth is always the
+  binding constraint. At cache-resident shapes RMSNorm V7 is FP-issue-bound at 100% of the measured SSVE
+  FP-instruction issue rate, which is why SME2 multi-vector loads gain it ~0% there and +17% at DRAM.
+
+- **Count the bytes honestly.** LayerNorm's three traversals read the row three times; an optimized kernel
+  keeps it resident between stages so it is effectively read once. RMSNorm needs only two traversals by
   construction. Report effective bandwidth as *useful bytes (1 read + 1 write) / time*, and state whether the
   intermediate reads were eliminated.
 
@@ -229,14 +278,17 @@ real cost — keep the whole norm inside one streaming region, don't toggle per 
 The math, over the feature dimension of size `d` (ε is a small constant for stability):
 
 - **LayerNorm** — `y = γ ⊙ (x − μ) / √(σ² + ε) + β`, with `μ = mean(x)`, `σ² = var(x)`.
-  **Two-pass**: pass 1 reduces to mean and variance; pass 2 normalizes and applies the learned gain γ and
-  bias β. Higher arithmetic intensity, numerically stable. Used in BERT, GPT-2/3, the original Transformer
+  **Two reduction stages** (mean, then variance from centred values) then output generation → **three input
+  traversals**, 3R+1W. The centred second stage is what makes it numerically stable — see §8. Higher
+  arithmetic intensity. Used in BERT, GPT-2/3, the original Transformer
   (Ba, Kiros & Hinton, 2016 · arXiv:1607.06450).
 
 - **RMSNorm** — `y = γ ⊙ x / RMS(x)`, with `RMS(x) = √( (1/d) Σ xᵢ² + ε )`.
-  **Single-pass**: one sum-of-squares reduction, then normalize and apply γ. No mean subtraction, **no β**.
-  Lower arithmetic intensity, ~10–40% faster throughput, same accuracy. Used in LLaMA, Gemma, Mistral
-  (Zhang & Sennrich, NeurIPS 2019 · arXiv:1910.07467).
+  **One reduction stage** (sum of squares) then output generation → **two input traversals**, 2R+1W.
+  No mean subtraction, **no β**. Lower arithmetic intensity. Zhang & Sennrich report comparable task
+  performance with runtime reductions of ~7–64% across their experiments; our own kernels measure
+  1.8–2.3× on the shapes we evaluate (a different claim, on different hardware, about different code).
+  Used in LLaMA, Gemma, Mistral (Zhang & Sennrich, NeurIPS 2019 · arXiv:1910.07467).
 
 The reference C++ implementations of both are written first and kept deliberately simple — they are the
 correctness oracle (decision B), never the performance target.
@@ -291,7 +343,7 @@ These are exactly the "explain the real tradeoff" talking points the lab rewards
 | Layer | Choice | Notes |
 |---|---|---|
 | Target ISA | AArch64 + **SME / SSVE** | Streaming SVE for reductions; ZA tile for 2D movement |
-| Target hardware | SME-capable AArch64 (e.g. **Apple M4**, SME1) | Confirm SME level before using SME2-only instructions |
+| Target hardware | SME-capable AArch64 (**Apple M4**, reports `FEAT_SME2`) | Feature set is *detected*, not assumed; SME2 paths guarded by `cpu_supports_sme2()` |
 | Kernels | Hand-written assembly, then **JIT-emitted** | 16×16 FP32 tiles; VLA, no hard-coded SVL |
 | Code generator | **`mini_jit`** (extended with `Norm`) | New `mini_jit::Norm` alongside `Unary`/`Gemm`; dynamic instruction emission |
 | Compiler IR | **TEIR** (tensor expression IR) | Norms registered as primitives; loop-nest integration |

@@ -37,12 +37,15 @@ the existing lab foundation (weeks 1–7). The full stack target is:
 
 The two norms differ in reduction structure:
 
-- **LayerNorm** — two-pass (mean, then variance + normalize-scale-shift); more
-  arithmetic intensity, numerically stable
-- **RMSNorm** — single-pass (sum of squares, no mean, no β); ~10–40% faster
+- **LayerNorm** — **two reduction stages** (mean, then variance) plus output
+  generation, hence **three input traversals**, 3R+1W; more arithmetic
+  intensity, numerically stable
+- **RMSNorm** — **one reduction stage** (sum of squares, no mean, no β) plus
+  output generation, hence **two traversals**, 2R+1W
 
-Both are bandwidth-bound; the evaluation metric is **effective GiB/s** vs the
-measured peak.
+That 1.33× traffic ratio is the structural source of RMSNorm's advantage. Both
+are bandwidth-dominated at the shapes measured here; the evaluation metric is
+**effective GiB/s** against a measured, footprint-matched peak.
 
 Sprint 1 — C++ reference, correctness harness, and bandwidth baseline
 ----------------------------------------------------------------------
@@ -96,8 +99,21 @@ against which every future kernel is verified.
 **RMSNorm — single-pass per row:**
 
 Sum of squares ``Σx²``, divide by N, add ε, take the inverse square root, then
-scale by γ.  No mean subtraction and no β — the simpler reduction is what makes
-RMSNorm ~10–40% faster at equal accuracy relative to LayerNorm.
+scale by γ.  No mean subtraction and no β — one reduction stage instead of two,
+so two traversals of the input instead of three.
+
+.. note::
+
+   Three separate claims, kept separate (Sprint 10). **Semantics:** RMSNorm
+   omits mean-centering, hence one fewer reduction and one fewer traversal.
+   **Literature:** Zhang & Sennrich (NeurIPS 2019) report *comparable task
+   performance* with runtime reductions of roughly **7–64 %** across their
+   experiments — not a single "10–40 %" figure. **Our measurement:** 1.8–2.3×
+   on the shapes evaluated here (Sprint 2). Earlier revisions collapsed these
+   into "~10–40 % faster at equal accuracy", which overstated the literature
+   and conflated kernel numerics with model accuracy: our tests show our
+   RMSNorm matches an *RMSNorm reference*, which says nothing about whether
+   substituting RMSNorm for LayerNorm preserves accuracy in a given network.
 
 Correctness harness (decision B)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -143,7 +143,8 @@ This is low-level C++/AArch64-assembly work, so the document/UI skills don't app
   integration. Read them before extending.
 - **Arm Architecture Reference Manual (SME/SSVE)** + the lab's `tnzr.org/compile` material — the authority on
   instruction encodings and ZA/streaming semantics. **Critical and exact** for the JIT encoding step. Verify
-  against the M4's SME level (SME1) at coding time.
+  against the M4's *detected* SME level at coding time — `sysctl hw.optional.arm.FEAT_SME2` reports 1, so
+  SME2 is present; guard SME2-only paths with `cpu_supports_sme2()` so they degrade on M1/M2.
 - **GDB** — stepping the hand-written assembly, inspecting registers / predicates.
 - **skill-creator** (official, optional, early): write a small MLC-Norm conventions skill as a learning step.
 
@@ -170,6 +171,10 @@ This is low-level C++/AArch64-assembly work, so the document/UI skills don't app
 "It assembles" does not mean "it's the right instruction." Confirm against ground truth, not recollection:
 - **Instruction encodings** — against the Arm ARM, especially in the JIT step (a wrong encoding can assemble
   *and* run, just wrongly).
-- **SME level / available instructions** — SME1 on the M4; don't assume SME2-only instructions exist.
+- **SME level / available instructions** — **detect, don't assume, in either direction.** The target M4
+  reports `hw.optional.arm.FEAT_SME2: 1`, and the SME2 multi-vector forms were assembled *and executed*
+  before any kernel was built on them. These docs asserted "SME1" for several sprints while the hardware
+  said otherwise, which is the mistake this rule now exists to prevent. Guard SME2-only paths behind
+  `cpu_supports_sme2()`; the benchmark's provenance header echoes the detected values.
 - **Peak bandwidth (the roofline)** — measure it on the actual M4 (a STREAM-style probe); don't quote a
   datasheet figure.
