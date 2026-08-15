@@ -104,17 +104,20 @@ correction and it invalidated percentages across five report sections.
    :width: 100%
 
    Measured single-core bandwidth against working-set size, both execution
-   modes. Until Sprint 6 every "% of peak" divided by the 59.5 GiB/s DRAM
-   constant, including for cache-resident shapes whose real ceiling is
-   ~115 GiB/s.
+   modes. Until Sprint 6 every "% of peak" divided by the DRAM figure alone
+   (58.8 GiB/s in this run), including for cache-resident shapes whose real
+   ceiling is ~116 GiB/s.
 
 Consequences worth stating explicitly:
 
 * A cache-resident kernel divided by the DRAM ceiling is credited for a
   constraint it never met. The most-quoted number in earlier drafts — RMSNorm V6
   at "~95 % of the moved-bytes roofline" — is really **~50 %**.
-* Streaming mode costs ~25 % against NEON at DRAM but is nearly free in cache
-  (0.93×), so "streaming is a structural handicap" is a DRAM-regime statement.
+* Streaming mode costs ~25 % against NEON at DRAM, so "streaming is a
+  structural handicap" is a DRAM-regime statement. In the cache-resident range
+  the two modes are comparable, but the ratio is not stable between runs (0.93×
+  and 1.06× on two runs of the same probe, because the NEON figure moves by
+  ~15 % while the SSVE one does not); only the DRAM gap reproduces.
 * Below ~512 KiB the SSVE figure stops being a bandwidth number at all: NEON
   climbs toward L1 speed while SSVE falls, because ``SMSTART`` becomes a visible
   share of a sub-microsecond pass.
@@ -223,9 +226,10 @@ a leaf the compiler schedules, not a standalone program.
   The JIT inherits the trust of kernels that already passed the full suite.
 * **Feature-dependent emission.** ``generate()`` takes an ``isa_t``: SME2 emits
   V7, otherwise V6.
-* **Threading.** With ``is_parallel`` on the row axis, RMSNorm scales
-  20.28 → 42.80 GiB/s (2.11×) and LayerNorm 13.26 → 25.80 (1.94×) against an
-  86 GiB/s chip ceiling.
+* **Threading.** With ``is_parallel`` on the row axis, the TEIR-invoked path
+  scales RMSNorm 24.67 → 43.57 GiB/s (1.76×, 51.6 % of the chip ceiling) and
+  LayerNorm 13.48 → 26.07 (1.93×, 30.9 %) from 1 to 16 threads, against the
+  84.30 GiB/s chip-wide ceiling measured in the same run.
 
 When the SME kernel is worth using
 ----------------------------------
@@ -237,14 +241,14 @@ When the SME kernel is worth using
 
 The crossover is at **M ≈ 16 rows**, and the cause is *not* streaming-mode
 overhead. A direct probe measures one ``smstart``/``smstop`` round trip at
-**9.07 ns** — about a fifth of the ~46 ns per-call floor — and SM+ZA costs the
+**9.04 ns** — about a fifth of the 45.8 ns per-call floor — and SM+ZA costs the
 same as SM-only. What actually makes small calls expensive is **group
 granularity**: V6/V7 process four VL-row blocks at a time (64 rows), and a
 partially filled group costs the same as a full one. A 9 ns transition cannot
 explain a 6 µs plateau; the group explains it exactly.
 
 This also quantifies a design decision previously taken on intuition: one
-streaming region per call rather than one per row saves 128 × 9.07 ns ≈ 1.16 µs
+streaming region per call rather than one per row saves 128 × 9.04 ns ≈ 1.16 µs
 at M=128, about 22× the entire per-call floor. *"Streaming mode is expensive" is
 true per row and false per call*, and only the second is what these kernels do.
 
