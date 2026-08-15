@@ -499,12 +499,15 @@ accumulator does and doesn't help a bandwidth-bound vector op.
 
 ---
 
-## Sprint 9 — Reproducibility & the Apple BNNSGraph baseline
+## Sprint 9 — Reproducibility & polish
 
+> **Scope decision: no further implementations will be tested.** The remaining
+> work perfects what exists rather than adding baselines or kernels.
+
+- [x] **Apple BNNS investigated and DROPPED as a baseline — recorded, not measured.** Full evidence in `bnns_investigation.md` (kept out of the report as a developer note, per the `sprint*_errors.md` convention). What stands: BNNS reaches LayerNorm only through a **generic** `BNNSFilterCreateLayerNormalization(normType, …)` whose `normType` selects batch(2)/instance(3)/**layer(4)**/group(5) — a real mislabelling trap; and there is **no RMSNorm in BNNS on macOS 15.2** (every "RMS" symbol in the headers is `RMSProp`). Apple's *current* BNNSGraph builder does provide `layerNorm(axes:epsilon:)` and `rmsNorm(scale:epsilon:)`, but both are **absent from this SDK** — 0 occurrences in an `Accelerate.swiftinterface` carrying 644 BNNS and 117 BNNSGraph declarations — and post-date this OS, so a newer SDK would compile them but they would not run. We could create layer-normalization filters but not execute them (`BNNSFilterApply` → −1); the `M=1` minimal case fails identically at every axis, which **rules out tensor-dimension/axis interpretation as the cause**, and a ReLU control with the identical deprecation applies fine (rc=0), which rules out "deprecated hence stubbed". **No BNNS number is reported** — reporting one we could not obtain, or composing an RMSNorm and calling it a vendor kernel, would repeat the Sprint-6 §2.7 error.
 - [ ] CMake presets: `debug` (sanitizers/tests), `release`, `release-submission` (the exact submitted benchmark configuration).
 - [ ] Pin baseline environments and check in the manifests produced by the drivers.
 - [ ] State explicitly which question "native layout" answers (*what can each implementation achieve in its preferred representation?*) versus the one it does not (*what does replacing a framework op with ours cost for the same incoming tensor layout?*).
-- [ ] **Apple BNNSGraph baseline** (replaces vDSP as the vendor comparison). macOS 15.2 and `bnns_graph.h` are present; `BNNSGraphCompileFromFile` is available since macOS 15.0. Flow: CoreML model containing the op → compile → `BNNSGraphCompileFromFile` → `BNNSGraphContextMake` → execute. Same harness rules: native layout, one thread, correctness-gated first. **Three things to verify in a feasibility spike before committing to it:** (a) BNNS exposes `BNNSFilterCreateLayerNormalization` but **no RMSNorm symbol at all**, so RMSNorm will decompose — and must be labelled *"a decomposition, not a BNNS RMSNorm kernel"*, which is exactly the §2.7 trap; (b) BNNSGraph may dispatch to **AMX rather than SME**, a different execution unit, which changes what the comparison means; (c) whether the context can be pinned to one thread.
 
 ## Sprint 10 — Claim corrections & external validation
 
@@ -514,7 +517,7 @@ accumulator does and doesn't help a bandwidth-bound vector op.
 - [ ] **Reconcile +17 % vs +21.5 %** for the RMSNorm DRAM improvement — the A/B study (20.96 → 24.56) and the consolidated table (20.29 → 24.65) are different measurement sets; make the consolidated table authoritative and label the other.
 - [ ] **Update `context.md`'s stale SME1 assumption**; dedupe the `d8–d15` ABI narrative to one location.
 - [ ] **External validation against the tnzr.org *Hello SME* M4 microbenchmarks** — independent corroboration rather than only our own instrument: 512-bit SVL; **their SSVE FMLA 31 GFLOP/s against our measured 31.0 GFLOPS**; a sharp bandwidth reduction above ~8 MiB, which independently supports the footprint-matching correction; and **SME2 four-register `LD1W` reaching ~925 GiB/s vs ~376 for single-register**, which independently motivates V7 as a design decision rather than ISA trickery. Note that absolute numbers should *not* be expected to match — different instruction streams and traffic definitions — and that their multicore data (one P-core largely saturating the cluster's SME resource) is why sub-linear thread scaling is expected here.
-- [ ] Rewrite the Sprint 7.5 "honest limit" section around the BNNSGraph result, replacing the vDSP evidence.
+- [ ] **Rewrite the Sprint 7.5 "honest limit" section.** vDSP is out as a live claim (the 65.77 GiB/s figure came from the Sprint-6 error log, never through the correctness-gated harness), and BNNS produced no number. So the section can no longer say "a specialist vendor library still beats us" — that evidence is withdrawn. The replacement claim is narrower and fully supported: *we are faster than two general-purpose frameworks at current versions, verified to compute the same function; a specialist vendor kernel was **not measured**, and Apple's own RMSNorm API does not exist on this OS.* Keep the §2.7–2.8 entries in `sprint6_errors.md` intact — that is the record of our own mistake, and deleting it would undercut the point of having an error log.
 
 ## Sprint 11 — Report & ship
 
