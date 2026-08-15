@@ -10,9 +10,9 @@ namespace mini_jit::teir {
 namespace {
 
 // ---------------------------------------------------------------------
-// Tokenizer — the grammar only needs "words" (identifiers/numbers, any
-// run of characters that isn't whitespace or single-char punctuation)
-// and the punctuation marks below. No comments, no string literals.
+// Tokenizer: the grammar needs only "words" — any run of characters that is
+// neither whitespace nor single-char punctuation — plus the punctuation
+// below.  No comments, no string literals.
 // ---------------------------------------------------------------------
 
 struct Token {
@@ -43,9 +43,8 @@ std::vector<Token> tokenize(const std::string& src) {
 }
 
 // ---------------------------------------------------------------------
-// Cursor over the token stream with small helpers matching the grammar's
-// fixed keywords/punctuation. Fails loud (decision: no silent recovery)
-// so a malformed .teir file is a clear error, not a wrong tree.
+// Cursor over the token stream.  Fails loud, so a malformed .teir file is a
+// clear error rather than a wrong tree.
 // ---------------------------------------------------------------------
 
 class Cursor {
@@ -80,9 +79,8 @@ class Cursor {
 };
 
 // ---------------------------------------------------------------------
-// Intermediate (pre-resolution) representation — mirrors the grammar
-// directly; @name references are plain strings until build_tree()
-// resolves them against these tables.
+// Pre-resolution representation: mirrors the grammar directly, with @name
+// references left as strings until build_tree() resolves them.
 // ---------------------------------------------------------------------
 
 struct ParsedAxis {
@@ -263,9 +261,8 @@ ParsedProgram parse_program(Cursor& c) {
 // Resolution: names -> the runtime's actual Axis/Node objects.
 // ---------------------------------------------------------------------
 
-// tensor name -> pointer slot (0=a,1=b,2=c,3=d), by declaration order —
-// the same convention every hand-written build_*_tree() already follows
-// (e.g. matmul.teir's %in0,%in1,%out -> a,b,c matches execute(A,B,C)).
+// tensor name -> pointer slot (0=a,1=b,2=c,3=d), by declaration order, which
+// is the convention every hand-written build_*_tree() already follows.
 std::unordered_map<std::string, int> slot_map(const ParsedProgram& prog) {
     std::unordered_map<std::string, int> slots;
     for (size_t i = 0; i < prog.tensor_order.size(); ++i)
@@ -308,13 +305,13 @@ const ParsedAxis& group_axis(const ParsedPrimitive& prim, const ParsedProgram& p
     return prog.axes.at(it->second.front());
 }
 
-// Fill in an Invocation's kernel_name and shape/layout parameters from its
-// primitive's declared type. Layout (row- vs column-major) and leading
-// dimensions are DERIVED from the tensors' axis strides in the file — the
-// runtime hardcodes no layout assumption. A direction with element stride 1
-// is the contiguous one; the other direction's stride is the leading
-// dimension. Anything that is neither is rejected loudly (no gather loads
-// in streaming mode on this target, so no kernel could serve it anyway).
+// Fill an Invocation's kernel_name and shape/layout from its primitive's
+// declared type.  Layout and leading dimensions are DERIVED from the tensors'
+// axis strides in the file — the runtime hardcodes no layout assumption.  A
+// direction with element stride 1 is the contiguous one and the other's
+// stride is the leading dimension; anything contiguous in neither direction
+// is rejected loudly, since streaming mode has no gather loads on this target
+// and no kernel could serve it.
 void fill_invocation_params(Invocation& inv, const ParsedPrimitive& prim,
                             const ParsedProgram& prog) {
     const auto& type = prim.type;

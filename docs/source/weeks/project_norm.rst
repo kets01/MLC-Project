@@ -212,7 +212,7 @@ a leaf the compiler schedules, not a standalone program.
 
 * **Verification by encoding diff.** The generator's buffer is compared
   word-by-word against the *linked* hand-written kernel read from its function
-  address at runtime — 157/157 and 208/208 words identical (148/196 with SME2).
+  address at runtime — 157/157 and 208/208 words identical (110/144 with SME2).
   The JIT inherits the trust of kernels that already passed the full suite.
 * **Feature-dependent emission.** ``generate()`` takes an ``isa_t``: SME2 emits
   V7, otherwise V6.

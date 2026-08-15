@@ -3,19 +3,19 @@
 #include "week6/Instgen.hpp"
 #include "week3/utility.hpp"  // cpu_supports_sme2()
 
-// mini_jit::Norm — emits the Sprint-2 SSVE V6 winners at runtime.
+// mini_jit::Norm — emits the measured winners at runtime: V6, or V7 where
+// FEAT_SME2 is present.
 //
-// The emission below is a 1:1 transcription of the hand-written kernels
-// (src/norm/rms_norm_ssve_v6.S / layer_norm_ssve_v6.S), same registers,
-// same instruction order.  That is deliberate: the encoding-diff test
-// proves the buffer byte-identical to a kernel that already passed the
-// full verification suite, so the generator inherits its trust instead
-// of re-earning it instruction by instruction.
+// Each emitter is a 1:1 transcription of its hand-written kernel — same
+// registers, same instruction order.  That is deliberate: the encoding-diff
+// test proves the buffer byte-identical to a kernel that already passed the
+// full verification suite, so the generator inherits that trust instead of
+// re-earning it instruction by instruction.
 //
 // Branches: backward targets are recorded as word indices when reached
-// (label = m_ops.size()); forward targets are emitted as placeholders
-// and backpatched once the target index is known.  Offsets are in
-// instructions, relative to the branch word itself.
+// (label = m_ops.size()); forward targets are emitted as placeholders and
+// backpatched once the target is known.  Offsets are in instructions,
+// relative to the branch word itself.
 
 namespace mini_jit {
 
@@ -40,11 +40,9 @@ inline int32_t back( const std::vector<uint32_t>& ops, size_t label ) {
 void Norm::emit_rms_v6() {
     std::vector<uint32_t>& ops = m_ops;
 
-    // Prologue: callee-saved regs (FULL d8-d15, AAPCS64 — Sprint-5
-    // prerequisite fix, see rms_norm_ssve_v6.S) + the dedicated eps stash
-    // slot [sp,#120] (eps must live in MEMORY across smstart — no fp
-    // register survives the streaming-mode transition; the Sprint-3 eps
-    // bugfix).
+    // Prologue: callee-saved GPRs, the full d8-d15 range (AAPCS64: smstart
+    // zeroes all eight), and the eps stash at [sp,#120] — eps must live in
+    // MEMORY across smstart, since no register survives the transition.
     ops.push_back( I::base_stp_pre_x( I::x19, I::x20, I::sp, -128 ) );
     ops.push_back( I::base_stp_off_x( I::x21, I::x22, I::sp,  16 ) );
     ops.push_back( I::base_stp_off_x( I::x23, I::x24, I::sp,  32 ) );
@@ -509,12 +507,10 @@ void Norm::emit_layer_v6() {
 }
 
 // ---------------------------------------------------------------------------
-// V7 emitters — 1:1 transcriptions of rms_norm_ssve_v7.S / layer_norm_ssve_v7.S
-// (same registers, same order), exactly as the V6 pair transcribes its own
-// kernels.  The only difference from V6 is that each group of four
-// single-vector accesses collapses into one SME2 multi-vector access, so these
-// stay word-comparable to their .S counterparts and the encoding diff carries
-// the same guarantee.
+// V7 emitters — 1:1 transcriptions of the V7 kernels, exactly as the V6 pair
+// transcribes its own.  The only difference from V6 is that each group of
+// four single-vector accesses collapses into one SME2 multi-vector access,
+// so these stay word-comparable to their .S counterparts.
 // ---------------------------------------------------------------------------
 
 void Norm::emit_rms_v7() {
@@ -804,8 +800,7 @@ Norm::error_t Norm::generate( ntype_t ntype, isa_t isa ) {
     m_ops.clear();
     m_ntype = ntype;
 
-    // The feature-dependent emission decision (Sprint 4 left this open because
-    // no shape selected the ZA path; Sprint 6 measured one that does pay).
+    // The feature-dependent emission decision.
     if ( isa == isa_t::automatic )
         isa = cpu_supports_sme2() ? isa_t::sme2 : isa_t::sme1;
     m_isa = isa;

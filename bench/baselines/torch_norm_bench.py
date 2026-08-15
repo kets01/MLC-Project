@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
-"""Sprint 7.5 - PyTorch ATen baseline for LayerNorm / RMSNorm.
+"""PyTorch ATen baseline for LayerNorm / RMSNorm.
 
-Read ROADMAP Sprint 7.5 and sprint6_errors.md 2.7-2.8 before changing this file.
-The previous vendor comparison in this project was wrong in four ways, and the
-rules encoded here each exist because of one of them:
+Each harness rule below exists because of a specific earlier failure; see
+ROADMAP Sprint 7.5 and sprint6_errors.md §2.7-2.8 before changing this file.
 
   * NATIVE LAYOUT.  PyTorch normalizes the last, contiguous axis of a row-major
-    tensor.  Our kernels are column-major over a strided feature axis.  Both are
-    efficient in their own layout, so each is measured in its own; forcing either
-    into the other's measures the mismatch, not the kernel.  That mislabelling is
-    exactly how "we are 16-37x faster than Accelerate" happened, when in its own
-    layout that library was in fact FASTER than us.
+    tensor; our kernels are column-major over a strided feature axis.  Both are
+    efficient in their own layout, so each is measured in its own — forcing
+    either into the other's measures the mismatch, not the kernel.  That is how
+    "we are 16-37x faster than Accelerate" happened when, in its own layout,
+    that library was in fact faster than us.
 
-  * ONE THREAD.  PyTorch defaults to all cores here (4).  Our headline kernel
-    numbers are single-core, so the comparison is pinned to one thread; the
-    threaded comparison is a separate question with a separate ceiling.
+  * ONE THREAD.  PyTorch defaults to all cores; our headline numbers are
+    single-core, and the threaded comparison is a separate question.
 
-  * SAME BYTE CONVENTION.  useful bytes = 1 read + 1 write per element, matching
-    every GiB/s figure in this project.
+  * SAME BYTE CONVENTION: useful bytes = 1 read + 1 write per element.
 
   * CORRECTNESS FIRST (decision B).  Outputs are dumped to raw f32 so the C++
     checker can verify them against our float64 reference BEFORE any throughput
-    number is trusted.  This is what catches semantic mismatches - e.g. PyTorch
-    LayerNorm uses the biased (1/N) variance, and its RMSNorm applies eps inside
-    the sqrt.  If the semantics differ, the throughput comparison is meaningless.
+    number is trusted.  This is what catches semantic mismatches — PyTorch
+    LayerNorm uses the biased variance, and its RMSNorm applies eps inside the
+    sqrt.  If the semantics differ, the throughput comparison is meaningless.
 """
 
 import argparse

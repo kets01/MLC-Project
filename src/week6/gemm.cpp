@@ -65,28 +65,24 @@ static void emit_add_reg(std::vector<uint32_t>& ops, int dst, int a, int b)
 }
 
 // ---------------------------------------------------------------------------
-// Redesigned generator (Sprint 5). What the old one got wrong, found via
-// non-uniform-data tests (the original 27-setting all-ones test is blind to
-// every addressing bug — any 16 contiguous floats of an all-ones matrix ARE
-// the correct operand vector):
-//   1. trans_b=0 loaded a contiguous sliding window of B advancing 1 element
-//      per k — not a row of B, so not a GEMM for non-uniform data. FMOPA
-//      needs B's N-direction contiguous per k-step; col-major B requires a
-//      transpose (staged through ZA below), which the old code never did.
-//   2. It zeroed ZA per call (C = A*B) although its doc said C += A*B; the
-//      TEIR schedules (guarded Zero + accumulation over outer K chunks) and
-//      the week3 hand-written kernels both require accumulation. C is now
-//      loaded into the ZA accumulators first.
-//   3. It used W12 as the MOVA slice index while X12 held the A byte-stride:
+// What the previous generator got wrong, found via non-uniform-data tests
+// (the original all-ones test is blind to every addressing bug — any 16
+// contiguous floats of an all-ones matrix ARE the correct operand vector):
+//   1. trans_b=0 loaded a contiguous sliding window of B advancing one
+//      element per k, not a row of B.  FMOPA needs B's N-direction
+//      contiguous per k-step; column-major B requires a transpose the old
+//      code never did.
+//   2. It zeroed ZA per call (C = A*B) though documented as C += A*B, which
+//      the TEIR schedules and the week3 kernels both require.
+//   3. It used W12 as the MOVA slice index while X12 held the A byte-stride;
 //      MOVZ W12 zeroes X12's upper half, so every macro-tile after the first
-//      ran with a corrupted stride. Strides now live in x6/x7/x16; x12 is
-//      reserved for slice indexing (MOVA's index register must be W12-W15).
+//      ran with a corrupted stride.
 //
 // Register map:  x0=A x1=B x2=C  x3=ld_a x4=ld_b x5=ld_c (elements)
 //   x6=ld_a*4  x7=ld_b*4  x16=ld_c*4   x8=k-chunk counter
 //   x9=A ptr   x10=B ptr  x11=C ptr    x12=W12 slice base  x15,x17=scratch
-// ZA usage: za2 (+za3) = C accumulators; za0 = A-transpose staging
-//   (trans_a=1); za1 = B-transpose staging (trans_b=0, which forces 16-wide
+// ZA: za2 (+za3) = C accumulators; za0 = A-transpose staging (trans_a=1);
+//   za1 = B-transpose staging (trans_b=0, which forces 16-wide
 //   n-blocks since only one staging tile is free for B).
 // ---------------------------------------------------------------------------
 

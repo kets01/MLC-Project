@@ -24,16 +24,12 @@ FetchContent_MakeAvailable(Catch2)
 include_directories(include)
 
 # ---------------------------------------------------------------------------
-# Build provenance (Sprint 8).
+# Build provenance: captured at configure time and compiled into the
+# benchmark, which prints them beside its results, so a table can never be
+# separated from the commit, compiler and flags that produced it.
 #
-# A performance report has to say WHICH build produced its numbers.  These are
-# captured at configure time and compiled into the benchmark, which then prints
-# them beside the results, so a table can never be separated from the commit,
-# compiler and flags that produced it.
-#
-# The SHA is marked -dirty when the working tree has uncommitted changes: a
-# benchmark run from a modified tree is not reproducible from its SHA alone,
-# and saying so is the whole point.
+# The SHA is marked -dirty when the tree has uncommitted changes: such a run
+# is not reproducible from its SHA alone, and saying so is the point.
 # ---------------------------------------------------------------------------
 find_package(Git QUIET)
 set(MLC_GIT_SHA "unknown")
@@ -59,16 +55,15 @@ add_compile_definitions(
     MLC_CXX_COMPILER="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}"
 )
 
-# OpenMP — used by the week7 TEIR runtime for parallel iteration axes, and by
-# the norm benchmark to set the thread count for the Sprint-5 scaling study.
-# Detected here (not in a subdirectory) so every target sees the result.
+# OpenMP — used by the TEIR runtime for parallel iteration axes and by the
+# norm benchmark's thread-count study.  Detected here, not in a subdirectory,
+# so every target sees the result.
 #
 # AppleClang supports OpenMP but ships neither libomp nor the -fopenmp driver
-# flag, so FindOpenMP needs explicit hints. The standard Homebrew prefixes are
-# probed directly rather than via `brew --prefix`, which is not always on the
-# PATH of the shell running CMake. If libomp is absent (e.g. a bare CI runner)
-# OpenMP simply stays off: the runtime's HAS_OMP fallback runs the same loop
-# nests sequentially, so the build and the tests never break.
+# flag, so FindOpenMP needs explicit hints.  The Homebrew prefixes are probed
+# directly rather than via `brew --prefix`, which is not always on the PATH of
+# the shell running CMake.  If libomp is absent the runtime's HAS_OMP fallback
+# runs the same loop nests sequentially, so nothing breaks.
 find_package(OpenMP QUIET)
 if(NOT OpenMP_CXX_FOUND AND APPLE)
     foreach(LIBOMP_PREFIX "/opt/homebrew/opt/libomp" "/usr/local/opt/libomp")
@@ -82,9 +77,9 @@ if(NOT OpenMP_CXX_FOUND AND APPLE)
 endif()
 find_package(OpenMP)
 
-# Must precede the add_subdirectory() calls: add_test() only registers with
-# CTest in directories processed while testing is already enabled.  (It used
-# to sit at the bottom of this file, which is why `ctest` found no tests.)
+# Must precede add_subdirectory(): add_test() only registers with CTest in
+# directories processed while testing is already enabled.  It used to sit at
+# the bottom of this file, which is why ctest found no tests.
 enable_testing()
 
 # The weekly logic is now ONLY in these folders

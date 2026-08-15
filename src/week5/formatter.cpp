@@ -1,20 +1,18 @@
 // formatter.cpp — standalone developer tool, NOT part of the CMake build.
 //
 // Turns an objdump disassembly into the uint32_t opcode arrays in
-// week5/jit_kernel.cpp, which is how the week-5 JIT kernels were produced
-// (documented in docs/source/weeks/week5.rst):
+// week5/jit_kernel.cpp:
 //
 //   clang -arch arm64 -march=armv9-a+sme+sve -c gemm_512_512_512.S -o temp.o
 //   llvm-objdump -d temp.o | ./formatter.o
 //
-// It has its own main(), so it is deliberately excluded from week5_lib —
-// building it into the library would collide with every test/bench main().
-// Build it on demand:  c++ -std=c++17 -o formatter.o src/week5/formatter.cpp
+// It has its own main(), so building it into week5_lib would collide with
+// every test/bench main().  Build on demand:
+//   c++ -std=c++17 -o formatter.o src/week5/formatter.cpp
 //
-// Sprint 4 superseded this workflow for new kernels: mini_jit::Norm emits
-// through InstGen encoders that are unit-tested against golden words, rather
-// than pasting pre-assembled opcode blobs. Kept because week5.rst documents
-// it as the reproduction path for the week-5 kernels.
+// Superseded for new kernels by mini_jit::Norm, which emits through InstGen
+// encoders unit-tested against golden words rather than pasting pre-assembled
+// blobs.  Kept because week5.rst documents it as the reproduction path.
 
 #include <iostream>
 #include <string>

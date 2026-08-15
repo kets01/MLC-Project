@@ -77,10 +77,9 @@ uint32_t mini_jit::InstGen::sve_ptrue_all( pred_t  pg,
   // fp64 (.D): base 0x25D8e000, dtype bits: size=11 (bits 23:22)
   // Pattern ALL = 0x1f (bits 4:0)
   // Pd (bits 3:0)
-  // Sprint-4 fix: the fp32 constant was 0x2518e3e0 = size=00 = PTRUE P.B,
-  // contradicting this comment.  Functionally masked for every existing
-  // caller (ALL-true .B governs .S identically) but caught by the
-  // encoding-diff against the assembled norm kernels.
+  // The fp32 constant was once 0x2518e3e0 = size=00 = PTRUE P.B, contradicting
+  // this comment.  Masked for every existing caller (an ALL-true .B predicate
+  // governs .S identically), and caught only by an exact word comparison.
   uint32_t base = (dt == dtype_t::fp32) ? 0x2598e3e0u : 0x25d8e3e0u;
   // The base encodings above use p0; patch in pg
   uint32_t ins = base;
@@ -330,11 +329,9 @@ uint32_t mini_jit::InstGen::sve_fmax_s( sve_t  zd,
          | (uint32_t)zd;
 }
 // ===========================================================================
-// Sprint 4 — encoders for the mini_jit::Norm generator.
-// Every base word below is verified against the toolchain-assembled
-// instruction words of rms_norm_ssve_v6.S / layer_norm_ssve_v6.S
-// (per-encoder unit tests: tests/test_norm.cpp, tag [sprint4][encoders])
-// and the Arm ARM field layouts.
+// Encoders for the mini_jit::Norm generator.  Every base word below is
+// verified against the toolchain-assembled words of the V6 kernels (unit
+// tests tagged [sprint4][encoders]) and the Arm ARM field layouts.
 // ===========================================================================
 
 uint32_t mini_jit::InstGen::sme_smstart_sm_only() {
@@ -525,10 +522,10 @@ uint32_t mini_jit::InstGen::sve_sel_s( sve_t zd, pred_t pg, sve_t zn, sve_t zm )
 }
 
 // ===========================================================================
-// Sprint 6 — SME2 multi-vector encoders.
+// SME2 multi-vector encoders.
 //
 // Golden words (clang -march=armv9-a+sme2, objdump), the full set the field
-// layouts below were derived from and are pinned to by the encoder tests:
+// layouts were derived from and are pinned to by the encoder tests:
 //   ptrue pn8.s                            -> 0x25a07810
 //   ptrue pn9.s                            -> 0x25a07811
 //   ptrue pn15.s                           -> 0x25a07817

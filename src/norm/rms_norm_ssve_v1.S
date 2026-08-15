@@ -1,32 +1,15 @@
-// rms_norm_ssve_v1.S — Sprint 2 ablation V1
+// rms_norm_ssve_v1.S — RMSNorm V1: FRSQRTE + one Newton-Raphson step.
 //
-// Change vs V0 (rms_norm_ssve.S):
-//   inv_rms replaces FSQRT + 1.0/FDIV with FRSQRTE + one Newton-Raphson step.
-//   Everything else is identical to V0.
+// Change vs V0: inv_rms drops FSQRT + FDIV (~24 cycles) for
+//   e = FRSQRTE(a); t = e*a; c = FRSQRTS(e,t); inv = e*c
+// which reaches FP32 accuracy in ~12.  Everything else is V0.
 //
-// NR sequence for 1/sqrt(a), where a = mean_square + eps:
-//   e = FRSQRTE(a)        — estimate, e ~= 1/sqrt(a)
-//   t = e * a             — NR intermediate
-//   c = FRSQRTS(e, t)     — correction: c = (3 - e*t) / 2
-//   inv = e * c           — refined inv_rms, FP32-accurate after one step
+// FRSQRTE/FRSQRTS are unpredicated, so a SEL first fills inactive lanes with
+// eps: FRSQRTE(0) is +inf and the NR step would turn that into NaN.  The
+// final FMUL is p1/m, so junk never reaches the output either way.
 //
-// Inactive-lane safety: after the reduction, inactive Z2 lanes hold 0.0.
-// FRSQRTE is unpredicated so it sees 0 there, producing +inf.  The NR
-// steps propagate NaN into those lanes.  The final FMUL is predicated (p1/m)
-// so inactive Z4 lanes are never updated, and pass-2 only reads Z4 under
-// p1/m, so junk never reaches output.  FP traps are masked by default FPCR.
-// We fill inactive Z2 lanes with eps via SEL before FRSQRTE to keep all
-// intermediates finite and avoid setting FPSR exception flags.
-//
-// C signature (identical to V0):
-//   void rms_norm_ssve_v1(const float *a,     // x0
-//                         float       *b,     // x1
-//                         const float *gamma, // x2
-//                         int64_t      m,     // x3
-//                         int64_t      n,     // x4
-//                         int64_t      ld_a,  // x5
-//                         int64_t      ld_b,  // x6
-//                         float        eps);  // s0
+// C signature: identical to rms_norm_ssve (rms_norm_ssve.S).
+//   (a, b, gamma, m, n, ld_a, ld_b) in x0-x6, eps in s0.
 
 #ifdef __APPLE__
     #define SYMBOL(s) _##s
@@ -57,10 +40,6 @@ SYMBOL(rms_norm_ssve_v1):
     str  d13,      [sp, #96]
     str  d14,      [sp, #104]
     str  d15,      [sp, #112]
-                                // (Sprint 6: the Sprint-5 d8-d15 AAPCS64 fix,
-                                // extended from the two V6 winners to every
-                                // kernel -- smstart/smstop zero all of d8-d15,
-                                // so a caller's d9-d15 were silently destroyed)
 
     mov   x19, x0
     mov   x20, x1
@@ -71,9 +50,6 @@ SYMBOL(rms_norm_ssve_v1):
     lsl   x25, x6, #2
     fmov  s8,  s0
     str   s0,  [sp, #120]       // dedicated eps stash, stored BEFORE smstart
-                                // (streaming-mode entry clobbers D8 too, not just
-                                // D9-D15 — memory survives smstart, no register
-                                // does; verified empirically)
 
     cbz   x22, .Lrow_done_v1
 
@@ -85,9 +61,7 @@ SYMBOL(rms_norm_ssve_v1):
 
     mov    x0, #0
 
-    // -----------------------------------------------------------------------
     // Outer loop — one iteration per block of VL rows.
-    // -----------------------------------------------------------------------
 .Lblock_loop_v1:
     whilelo  p1.s, x0, x22
     b.none   .Lblock_done_v1

@@ -15,17 +15,18 @@ using I = mini_jit::InstGen;
  */
 static std::unordered_map<const Unary*, Unary::kernel_t> kernel_registry;
 
-// trans_b == 1 (B row-major while A is column-major — the transposing
-// copy the course's Unary.h always specified but this implementation
-// previously ignored): B[j*ld_b + i] = op(A[i + j*ld_a]). The transpose
-// is staged through ZA tile 0 per 16x16 sub-tile — contiguous column
-// loads of A into horizontal slices, contiguous row stores of B from
-// vertical slices (context.md §5's sanctioned ZA use: 2D movement;
-// streaming mode has no gather/scatter on this target). This path is
-// ld-aware; m and n must be multiples of 16 (course spec).
+// trans_b == 1: B row-major while A is column-major — the transposing copy
+// the course's Unary.h always specified and this implementation previously
+// ignored.  B[j*ld_b + i] = op(A[i + j*ld_a]).
 //
-// Register map (trans_b=1): x0=A x1=B x2=ld_a x3=ld_b -> x6/x7 byte
-// strides, x9/x10 walking pointers, x12=W12 slice base, x15/x17 scratch.
+// The transpose is staged through ZA tile 0 per 16x16 sub-tile: contiguous
+// column loads of A into horizontal slices, contiguous row stores of B from
+// vertical slices.  That is context.md §5's sanctioned ZA use (2-D movement),
+// and it is required here because streaming mode has no gather/scatter on
+// this target.  m and n must be multiples of 16 (course spec).
+//
+// Registers: x0=A x1=B x2=ld_a x3=ld_b -> x6/x7 byte strides, x9/x10 walking
+// pointers, x12=W12 slice base, x15/x17 scratch.
 static void emit_transposed(std::vector<uint32_t>& ops, uint32_t m, uint32_t n,
                             Unary::ptype_t ptype) {
     ops.push_back(I::base_lsl_x(I::x6, I::x2, 2));   // ld_a bytes

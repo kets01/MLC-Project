@@ -69,29 +69,25 @@ static std::vector<float> scalar_rms_norm(const std::vector<float>& a,
     return out;
 }
 
-// Check that every element of b matches ref within the given relative+absolute
-// tolerance.  We use a slightly wider margin than Approx's default (1e-5)
-// because reference.cpp converts through float→double→float.
+// Tolerances.  Each is the accuracy the kernels actually MEET, documented
+// here rather than widened silently to make a test pass (CLAUDE.md §7).
+//
+// kTol: the default.  Slightly wider than Approx's 1e-5 because the
+// reference converts through float->double->float.
 static constexpr float kTol = 1e-5f;
 
-// Multi-accumulator variants (V4+) reassociate the sum-of-squares: four
-// partial sums combined in tree order instead of the reference's sequential
-// order.  Neither order is more correct, but a single FP32 rounding
-// difference in sumsq can move the output by up to ~1.1e-5 relative (worst
-// observed, N=4 where each accumulator holds exactly one term).  Those
-// variants are verified against the honest tolerance they actually meet —
-// documented here rather than silently widening the gate for V0-V3.
+// kTolReassoc: V4/V5 combine four partial sums in tree order instead of the
+// reference's sequential order.  Neither is more correct, but one FP32
+// rounding difference in sumsq can move the output ~1.1e-5 relative (worst
+// observed at N=4, where each accumulator holds exactly one term).  V6
+// restores the reference's order and so is gated at the strict kTol.
 static constexpr float kTolReassoc = 2e-5f;
 
-// FRSQRTE+NR vs IEEE FSQRT+FDIV: one NR step (FRSQRTS) gives ~5e-6 relative
-// accuracy in inv_std (half the squared initial FRSQRTE error of ~2^-8.25).
-// LayerNorm adds a beta term that can partially cancel gamma*x_hat.  When
-// output y is near zero, a relative epsilon is inappropriate because the
-// absolute error in y from the inv_std approximation stays bounded even as y
-// approaches zero.  Bound: |delta_y| ≤ gamma * |x_hat| * 5e-6.  For our test
-// shapes (gamma ≤ 1.5, |x_hat| ≤ 3) this is ≤ ~2.25e-5; worst observed in
-// practice is ~5e-6.  We use an absolute margin of 5e-5 — documented here so
-// it is clear this is the actual accuracy of FRSQRTE+NR, not a silenced gate.
+// kAbsMarginNR: one Newton-Raphson step gives ~5e-6 relative accuracy in
+// inv_std.  LayerNorm's beta can cancel gamma*x_hat, so where the output is
+// near zero a RELATIVE epsilon is the wrong instrument — the absolute error
+// from the inv_std approximation stays bounded as y approaches zero.
+// Bound: |dy| <= gamma * |x_hat| * 5e-6, i.e. <= ~2.25e-5 at these shapes.
 static constexpr float kAbsMarginNR = 5e-5f;
 
 static void check_close(const std::vector<float>& got,
@@ -238,13 +234,9 @@ TEST_CASE("RMSNorm ref: non-square with stride", "[norm][sprint1][rmsnorm]") {
 }
 
 // ===========================================================================
-// Sprint 2c — LayerNorm SSVE kernel tests
-//
-// Every test calls layer_norm_ssve and compares its output element-by-element
-// against layer_norm_ref (the verified C++ reference from Sprint 1).
-//
-// All tests are guarded with cpu_supports_sme(): on CI (M1/M2) they are
-// skipped gracefully; on M4 they run in full.
+// LayerNorm SSVE kernel tests.  Every case compares against layer_norm_ref
+// element by element and is guarded with cpu_supports_sme(), so CI (M1/M2)
+// skips gracefully and the M4 runs them in full.
 // ===========================================================================
 
 // Helper: run both kernels and compare.
@@ -379,11 +371,8 @@ TEST_CASE("LayerNorm SSVE: large-magnitude stress input (stability)", "[norm][sp
 }
 
 // ===========================================================================
-// Sprint 2c ablation — LayerNorm SSVE V1 tests
-//
-// V1 replaces FSQRT+FDIV with FRSQRTE+NR in pass 2.  All other passes are
-// identical to V0.  The same six correctness cases are used so a regression
-// in any pass is caught even when V1 is only expected to change pass 2.
+// LayerNorm V1: FRSQRTE+NR in pass 2, everything else as V0.  The same six
+// cases run against it, so a regression in an unchanged pass is still caught.
 // ===========================================================================
 
 using LNKernelFn = void(*)(const float*, float*, const float*, const float*,
@@ -679,15 +668,11 @@ TEST_CASE("LayerNorm SSVE Welford: N=1 (single column, no loop body)", "[norm][s
 }
 
 // ---------------------------------------------------------------------------
-// Stress coverage for the remaining LayerNorm variants (Sprint 2c gap-fill).
-//
-// V0/V1/V2 already have large-magnitude stress cases; V4/V5/V6 change the
-// reduction structure (multi-accumulator, pipelining, 4-block grouping) and
-// Welford changes the ALGORITHM — exactly the cases where cancellation
-// behaviour could differ, so each gets the same SHIFT=1e4 input.  Welford's
-// claim to numerical stability (vs the catastrophic naive E[x2]-mean2) is
-// verified here, not assumed: the ablation verdict "slower than two-pass"
-// is only meaningful if its accuracy actually holds.
+// Stress coverage for the variants that change the reduction STRUCTURE
+// (V4/V5/V6) or the ALGORITHM (Welford) — exactly where cancellation
+// behaviour could differ.  Welford's claim to stability is verified here
+// rather than assumed: a "slower than two-pass" verdict is only meaningful
+// if its accuracy actually holds.
 // ---------------------------------------------------------------------------
 
 static void check_ln_variant_stress(LNKernelFn kernel) {
@@ -724,14 +709,11 @@ TEST_CASE("LayerNorm SSVE V6: large-magnitude stress input", "[norm][sprint2c][s
 
 
 // ---------------------------------------------------------------------------
-// Sprint 6 — LayerNorm V7: V6 with SME2 multi-vector LD1W/ST1W.
-//
-// Built to test whether RMSNorm V7's (surprising) DRAM win is norm-agnostic.
-// Like its RMSNorm twin this folds four accesses into one without changing a
-// single value, so the binding requirement is bit-identity with V6, and the
-// shape set walks the SME2 group path, the plain-SVE tail, and the boundary
-// between them.  Guarded on SME (not SME2) because the wrapper falls back to
-// V6, so the callable contract holds on any SME machine.
+// LayerNorm V7: V6 with SME2 multi-vector accesses.  It folds four accesses
+// into one without changing a value, so the binding requirement is
+// BIT-IDENTITY with V6.  The shape set walks the SME2 group path, the
+// plain-SVE tail, and the boundary between them.  Guarded on SME rather than
+// SME2 because the wrapper falls back to V6.
 // ---------------------------------------------------------------------------
 
 TEST_CASE("LayerNorm SSVE V7 (SME2): group, group+tail, tail-only",
@@ -786,14 +768,9 @@ TEST_CASE("LayerNorm SSVE Welford: large-magnitude stress input (the stability c
 
 
 // ===========================================================================
-// Sprint 2 — RMSNorm SSVE kernel tests (V0 baseline + V1/V2/V3 ablation)
-//
-// Every test skips gracefully on M1/M2 CI runners (no SME).
-// On M4 they run fully and verify rms_norm_ssve against rms_norm_ref.
-//
-// Tolerance kTol = 1e-5 (same as Sprint 1).  The SSVE kernel uses FP32
-// arithmetic throughout so its error vs the double-precision reference is
-// similar to rms_norm_ref itself.
+// RMSNorm SSVE kernel tests, V0 baseline and the V1/V2/V3 ablation.  The
+// kernels are FP32 throughout, so their error against the double-precision
+// reference is comparable to rms_norm_ref's own.
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
@@ -1108,21 +1085,11 @@ TEST_CASE("RMSNorm SSVE V6: large-magnitude stress input", "[norm][sprint2][abla
 
 
 // ---------------------------------------------------------------------------
-// Sprint 6 — V7: V6 with SME2 multi-vector LD1W/ST1W in the group path.
-//
-// V7 is V6 with four single-vector accesses folded into one 4-vector access,
-// so it must produce BIT-FOR-BIT what V6 produces: same memory, same order,
-// same arithmetic.  It therefore gets V6's shape set at V6's strict kTol (no
-// reassociation widening — the per-row-block accumulators still sum columns
-// sequentially), plus the two boundaries specific to this variant:
-//   - the SME2 group path vs the plain-SVE predicated tail (M < 4*VL), since
-//     only the group path uses multi-vector instructions;
-//   - the SME1 fallback, exercised implicitly whenever FEAT_SME2 is absent —
-//     on such a machine the wrapper runs V6 and these tests still pass, which
-//     is the point of the dispatch.
-//
-// Guarded on cpu_supports_sme() rather than sme2: the wrapper falls back to
-// V6, so the callable contract holds on any SME machine.
+// RMSNorm V7 gets V6's shape set at V6's strict kTol — folding four accesses
+// into one changes no value, so no reassociation widening applies — plus the
+// two boundaries specific to it: the SME2 group path vs the plain-SVE tail
+// (M < 4*VL), and the SME1 fallback, exercised implicitly wherever FEAT_SME2
+// is absent, since the wrapper then runs V6 and these tests still pass.
 // ---------------------------------------------------------------------------
 
 TEST_CASE("RMSNorm SSVE V7 (SME2): exactly one full group (M=4*VL)",
@@ -1157,22 +1124,19 @@ TEST_CASE("RMSNorm SSVE V7 (SME2): large-magnitude stress input",
     check_variant_stress(rms_norm_ssve_v7);
 }
 
-// The strongest statement available: V7 must agree with V6 EXACTLY. Folding
-// four loads into one multi-vector load changes no value, so any difference
-// at all — not merely one above a tolerance — means the operand mapping is
-// wrong (e.g. blocks transposed, or the counter predicate covering the wrong
-// element count). Skipped rather than trivially true without SME2, since the
-// wrapper would otherwise be comparing V6 against itself.
+// The strongest statement available: V7 must agree with V6 EXACTLY.  Folding
+// four loads into one changes no value, so ANY difference — not merely one
+// above a tolerance — means the operand mapping is wrong (blocks transposed,
+// or the counter predicate covering the wrong element count).  Skipped
+// without SME2, where the wrapper would compare V6 against itself.
 // ---------------------------------------------------------------------------
-// Sprint 6 — ZA residency rebuilt on SME2 multi-vector MOVA.
-//
-// Shapes chosen around the two things that actually broke while building it:
-//   - N > SVL: the vector-group cursor `za.s[w8, 0, vgx4]` addresses slice w8
-//     of EACH of the four tiles, so it runs 0..SVL_S-1 and steps by ONE.  An
-//     earlier version stepped by four and wrapped at N = 17, silently
-//     corrupting every shape wider than one vector — these cases pin that.
-//   - N % 4 != 0: the final chunk is zero-padded rather than reading past
-//     column N-1.
+// ZA residency on SME2 multi-vector MOVA.  Shapes chosen around the two
+// things that actually broke while building it:
+//   - N > SVL: the vector-group cursor za.s[w8,0,vgx4] addresses slice w8 of
+//     EACH of the four tiles, so it runs 0..SVL_S-1 and steps by ONE.  An
+//     earlier version stepped by four and wrapped at N = 17, corrupting every
+//     shape wider than one vector.
+//   - N % 4 != 0: the final chunk is zero-padded rather than read past N-1.
 // Plus row tails, mismatched leading dims, and the N > 4*SVL fallback.
 // ---------------------------------------------------------------------------
 TEST_CASE("RMSNorm ZA-SME2: residency window, N%4 padding, tails, fallback",
@@ -1281,18 +1245,11 @@ TEST_CASE("RMSNorm SSVE V7 (SME2): bit-identical to V6",
 
 
 // ===========================================================================
-// Sprint 3 — RMSNorm ZA-tile residency kernel (rms_norm_za)
-//
-// The ZA-resident fast path is taken when the row fits in ZA (N <= 4*SVL;
-// 64 on the M4's 512-bit SVL).  These cases deliberately walk the tile
-// boundaries so the four ZA_LOAD/ZA_STORE macro expansions and the
-// column/row tails are all exercised; the N > 4*SVL cases take the
-// streaming fallback.  rms_norm_za shares the canonical signature, so the
-// Sprint-2 check_variant / check_variant_stress helpers drive it directly.
-//
-// The kernel sums squares in a single accumulator in strict column order
-// (reference order), so the standard kTol = 1e-5 applies — no reassociation
-// widening.  All cases skip on CI (no SME) and run fully on the M4.
+// RMSNorm ZA-tile residency.  The fast path is taken when a row fits in ZA
+// (N <= 4*SVL); these cases walk the tile boundaries so all four macro
+// expansions and the column/row tails are exercised, and the N > 4*SVL cases
+// take the streaming fallback.  The kernel sums in a single accumulator in
+// strict column order, so the strict kTol applies.
 // ===========================================================================
 
 // ZA path, one tile: N < SVL (column tail inside tile 0) and N == SVL.
@@ -1338,20 +1295,11 @@ TEST_CASE("RMSNorm ZA: large-magnitude stress input (stability)", "[norm][sprint
 
 
 // ===========================================================================
-// Sprint 3 — LayerNorm ZA-tile residency kernel (layer_norm_za), gated
-//
-// Unlike rms_norm_za (2R+1W -> 1R+1W), this prototype stages x in ZA once
-// during the mean pass and reuses it from ZA for BOTH the variance pass and
-// the normalize pass: a full 3R+1W -> 1R+1W fusion. Same tile-boundary
-// walk as the RMSNorm ZA suite (single tile, multi-tile, the 4*SVL
-// residency boundary, row tails, mismatched leading dims, and the N > 4*SVL
-// fallback), reusing the Sprint-2c check_ln_variant / check_ln_variant_stress
-// helpers since layer_norm_za shares the canonical LayerNorm signature.
-//
-// Mean and variance each use a single accumulator in strict column order
-// (reference order) across all four tile sections, so no reassociation
-// tolerance is needed beyond the FRSQRTE+NR margin already used by V1/V6
-// (kAbsMarginNR). All cases skip on CI (no SME) and run fully on the M4.
+// LayerNorm ZA-tile residency.  Unlike rms_norm_za (2R+1W -> 1R+1W) this
+// stages x once and reuses it for BOTH later passes, a full 3R+1W -> 1R+1W.
+// Same tile-boundary walk as the RMSNorm ZA suite; mean and variance each
+// use a single accumulator in strict column order, so no reassociation
+// tolerance is needed beyond the FRSQRTE+NR margin.
 // ===========================================================================
 
 // ZA path, one tile: N < SVL (column tail inside tile 0) and N == SVL.
@@ -1396,13 +1344,11 @@ TEST_CASE("LayerNorm ZA: large-magnitude stress input (stability)", "[norm][spri
 
 
 // ===========================================================================
-// Sprint 2a — roofline-probe correctness (bw_probe_ssve)
-//
-// The probe is a STREAM scale-add (d[i] = s[i] + 1.0f), not a norm kernel,
-// but it feeds every % -of-peak figure, so it gets the same treatment: verify
-// the streaming-mode LD1W/ST1W path against the scalar loop before trusting
-// any bandwidth number derived from it.  Scale-add is a single exact FP32
-// operation, so vector and scalar results must match bit-for-bit (== 0 diff).
+// Roofline-probe correctness.  Not a norm kernel, but it feeds every
+// "% of peak" figure, so it gets the same treatment: verify the streaming
+// LD1W/ST1W path against a scalar loop before trusting any bandwidth number
+// derived from it.  Scale-add is one exact FP32 operation, so vector and
+// scalar must match bit-for-bit.
 // ===========================================================================
 
 static void check_probe(int64_t n) {
@@ -1436,29 +1382,24 @@ TEST_CASE("BW probe SSVE: n = 0 is a safe no-op", "[norm][sprint2][roofline]") {
 
 
 // ===========================================================================
-// Regression — eps register-stash clobber (found during Sprint 3, LayerNorm ZA)
+// Regression: the eps register-stash clobber.
 //
-// Every SSVE/ZA kernel stashed epsilon in the callee-saved S8/D8 register
-// before SMSTART, intending to read it back afterwards. Two shapes of that
-// pattern shipped, and BOTH were broken:
-//   - RMSNorm V1-V6 and rms_norm_za reloaded eps from [sp,#NN] — but that
-//     stack slot held the CALLER's old d8 (saved by "str d8" *before* the
-//     eps fmov overwrote the register), never eps itself.
-//   - RMSNorm V0 read eps directly back from S8/Z8 after SMSTART, no stack
-//     detour at all — but SMSTART clobbers D8 too, not just D9-D15 as
-//     assumed, so the register itself doesn't survive the transition either.
-// Every existing tolerance-based test passed regardless, because eps's
-// effect on non-degenerate data is far below the FP32 comparison tolerance.
-// The bug is only observable when sumsq/variance is EXACTLY zero, so eps is
-// the only thing standing between a valid reciprocal and 1/0 = inf, and
-// inf * 0 = NaN propagates through the normalize step.
+// Every SSVE/ZA kernel stashed eps in the callee-saved S8/D8 before SMSTART.
+// Two shapes of that pattern shipped and BOTH were broken: most reloaded eps
+// from a stack slot that actually held the CALLER's old d8 (saved by `str d8`
+// before the eps `fmov` overwrote the register), and V0 read S8/Z8 back
+// directly — but SMSTART clobbers D8 too, not just D9-D15 as assumed.
 //
-// The fix (all 13 affected kernels): stash eps to a dedicated stack slot
-// BEFORE smstart and reload from that same address after — memory, unlike
-// any register, is unaffected by a PSTATE.SM transition. These cases lock
-// that fix in place: an all-zero RMSNorm row (sumsq == 0 exactly) and an
-// all-constant LayerNorm row (var == 0 exactly) must produce a finite,
-// correct result, not NaN.
+// Every tolerance-based test passed regardless, because eps's effect on
+// non-degenerate data is far below the comparison tolerance.  The bug is only
+// observable when sumsq/variance is EXACTLY zero, where eps is all that
+// stands between a valid reciprocal and 1/0 = inf, and inf * 0 = NaN then
+// propagates through the normalize step.
+//
+// Fix: stash eps to a dedicated slot BEFORE smstart and reload from that same
+// address — memory, unlike any register, survives a PSTATE.SM transition.
+// These cases lock it in: an all-zero RMSNorm row and an all-constant
+// LayerNorm row must produce finite, correct output.
 // ===========================================================================
 
 TEST_CASE("RMSNorm SSVE kernels: all-zero row is finite (eps regression)",
@@ -1515,23 +1456,18 @@ TEST_CASE("LayerNorm SSVE kernels: all-constant row is finite (eps regression)",
 }
 
 // ===========================================================================
-// Sprint 4 — mini_jit::Norm JIT generator
-//
-// Three layers of verification, weakest to strongest:
+// mini_jit::Norm — three layers of verification, weakest to strongest:
 //   1. [encoders]      every new InstGen encoder reproduces the golden word
-//                      the toolchain assembled for the same instruction
-//                      (words taken from objdump of rms/layer_norm_ssve_v6.o).
-//   2. [encoding-diff] the generator's whole buffer is diffed word-by-word
-//                      against the LINKED hand-written kernel, read straight
-//                      from its function address at runtime — so the diff is
-//                      always against what the toolchain actually assembled,
-//                      never a stale copy.  A green diff proves the JIT
-//                      kernel byte-identical to a kernel that already passed
-//                      the full Sprint-2/3 suite.
-//   3. [jit]           the emitted kernel is executed and verified against
-//                      the C++ reference anyway (SME-guarded) — belt and
-//                      suspenders, and it also validates the JitEngine
-//                      buffer path (mmap/JIT-protect/icache-invalidate).
+//                      the toolchain assembled for the same instruction.
+//   2. [encoding-diff] the whole buffer is diffed word-by-word against the
+//                      LINKED hand-written kernel, read from its function
+//                      address at runtime — so the reference is what the
+//                      toolchain actually assembled and can never go stale.
+//                      A green diff makes the JIT kernel byte-identical to
+//                      one that already passed the full suite.
+//   3. [jit]           the emitted kernel is executed against the reference
+//                      anyway, which also exercises the JitEngine buffer path
+//                      (MAP_JIT, W^X toggling, icache invalidation).
 //
 // 1 and 2 are host-portable and run on CI; 3 skips without SME.
 // ===========================================================================
@@ -1664,15 +1600,10 @@ TEST_CASE("Sprint4 encoding diff: JIT LayerNorm == assembled layer_norm_ssve_v6"
 }
 
 // ---------------------------------------------------------------------------
-// Sprint 6 — the same guarantee for the SME2 path.
-//
-// Emission is host-portable, so these run even where FEAT_SME2 is absent:
-// the generator is asked for isa_t::sme2 explicitly rather than letting
-// `automatic` pick, which is exactly why generate() takes the parameter. A
-// green diff means the SME2 kernels the JIT emits are the same instruction
-// words as the hand-written V7 kernels that already passed the bit-identity
-// and reference tests above — the JIT inherits that trust instead of
-// re-earning it.
+// The same guarantee for the SME2 path.  Emission is host-portable, so these
+// run even where FEAT_SME2 is absent: the generator is asked for isa_t::sme2
+// explicitly rather than letting `automatic` pick, which is exactly why
+// generate() takes the parameter.
 // ---------------------------------------------------------------------------
 
 TEST_CASE("Sprint6 encoding diff: JIT RMSNorm SME2 == assembled rms_norm_ssve_v7",
@@ -1775,44 +1706,27 @@ TEST_CASE("Sprint4 JIT kernels: all-constant row is finite (eps regression)",
 }
 
 // ===========================================================================
-// Sprint 5 — AAPCS64 prerequisite: d8-d15 must survive the call
+// AAPCS64: d8-d15 must survive the call.
 //
-// The bug: rms_norm_ssve_v6 / layer_norm_ssve_v6 only saved/restored d8, not
-// the full d8-d15 range smstart/smstop clobber. Invisible to every other
-// test here because none of them hold a live value in d9-d15 across the
-// call — Catch2's own call sequence doesn't happen to. main_norm's bench
-// harness masked it caller-side with `volatile` doubles; a real TEIR caller
-// won't have that workaround, so this is a required fix, not cleanup.
+// The V6 kernels once saved only d8, not the full range smstart/smstop
+// clobber.  No other test here holds a live value in d9-d15 across a call, so
+// none of them could see it; the bench harness masked it caller-side with
+// `volatile`, which a real TEIR caller does not have.
 //
-// To actually observe the bug (or its fix) we need a value physically
-// resident in a specific d9-d15 register when the kernel is entered, then
-// re-read from that same physical register afterward — a plain C++ local
-// survives a call regardless of what the callee does, so it can't tell us
-// anything. GCC/Clang's local register variables (`register T x asm("dN")`)
-// pin a variable to an exact hardware register; combined with an `asm`
-// barrier before (to force materializing our test pattern into the
-// register, not just a compiler-tracked constant) and one after (to force
-// re-reading the register's actual contents instead of assuming the ABI
-// held), this reproduces exactly what a real callee-saved-register-holding
-// caller like TEIR would see.
+// Observing it needs a value physically resident in a specific register when
+// the kernel is entered and re-read from that same register afterwards — a
+// plain C++ local survives regardless of what the callee does and so proves
+// nothing.  Local register variables pin the value to the hardware register;
+// the asm barriers force a real materialise and re-read rather than a
+// compiler-tracked copy.
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// Sprint 6 — the same guarantee, for EVERY kernel.
-//
-// Sprint 5 fixed and tested only the two V6 winners, because those are what
-// TEIR calls.  The other 15 entry points kept saving just d8, and a Sprint-6
-// hardware probe found all 15 destroying the caller's d9-d15.  That is what
-// made whole benchmark tables read 0.00 GiB/s: main_norm's `volatile`
-// discipline is a caller-side workaround, and it only holds as long as
-// register allocation cooperates.
-//
-// Two tests below pin the property for every kernel at once, so a new variant
-// cannot ship without it.  The helper is the same construct as the V6 tests:
-// local register variables pin the pattern to the physical registers, and the
-// asm barriers force a real materialise/re-read rather than a compiler-tracked
-// copy (a plain C++ local would survive regardless of what the callee does,
-// and would therefore prove nothing).
+// The same guarantee, for EVERY kernel.  Sprint 5 fixed and tested only the
+// two V6 winners, because those are what TEIR calls; a hardware probe later
+// found the other 15 entry points destroying the caller's d9-d15, which is
+// what made whole benchmark tables read 0.00 GiB/s.  These two tests pin the
+// property for every kernel at once, so a new variant cannot ship without it.
 // ---------------------------------------------------------------------------
 
 template <typename F>
@@ -1994,22 +1908,18 @@ TEST_CASE("Sprint5 AAPCS64: d9-d15 survive the LayerNorm V6 kernel call",
 }
 
 // ===========================================================================
-// Sprint 7a — numerical stability of the three variance formulations.
+// Numerical stability of the three variance formulations.  These pin the
+// claims context.md §8 makes about why LayerNorm is two-pass and why RMSNorm
+// sidesteps the problem.  Host-portable, so they run on CI as well as the M4.
 //
-// These pin the claims context.md §8 makes about WHY LayerNorm is two-pass and
-// why RMSNorm sidesteps the problem.  They are host-portable (pure C++, no SME)
-// so they run on the CI runner as well as the M4.
+// The stress axis is a SHIFT: adding a constant leaves the variance unchanged
+// but scales the condition number by ~s^2, separating conditioning from every
+// other property of the data.
 //
-// The stress axis is a SHIFT: adding a constant s to every element leaves the
-// variance unchanged but scales the problem's condition number by ~s^2.  That
-// separates conditioning from every other property of the data.
-//
-// Methodological note carried into the report: past shift ~1e5 the FP32 INPUT
-// is itself quantized (the ULP of 1e6 in FP32 is 0.0625, larger than the
-// signal), so beyond that point every estimator is measuring the variance of
-// the quantized data.  That is fine for comparing them -- all three see the
-// same input, and the f64 oracle is computed from that same quantized input --
-// but it is why the "true" variance drifts slightly at the top of the sweep.
+// Past shift ~1e5 the FP32 INPUT is itself quantized (the ULP of 1e6 is
+// larger than the signal), so beyond that point every estimator measures the
+// variance of the quantized data.  They stay comparable — same input, same
+// oracle — but the "true" variance drifts slightly at the top of the sweep.
 // ===========================================================================
 
 #include "norm/stability.hpp"
@@ -2165,11 +2075,9 @@ TEST_CASE("Sprint7a: RMSNorm's reduction is shift-immune but overflows in FP32",
 }
 
 // ---------------------------------------------------------------------------
-// Sprint 7b — the streaming-transition probes.
-//
-// These are instruments, so they get the same treatment as bw_probe_ssve: a
-// test that they do what they claim before any number derived from them is
-// quoted.  SME-guarded (they execute smstart), so they skip on CI.
+// The streaming-transition probes are instruments, so they get the same
+// treatment as bw_probe_ssve: verify they do what they claim before any
+// number derived from them is quoted.  SME-guarded, so they skip on CI.
 // ---------------------------------------------------------------------------
 
 TEST_CASE("Sprint7b: RDSVL reports a sane streaming vector length",
@@ -2253,16 +2161,13 @@ TEST_CASE("Sprint7b: the probes preserve d9-d15 across the transition",
 }
 
 // ===========================================================================
-// Sprint 8 — the public dispatchers.
+// The public dispatchers.  These replace an API whose only entry points
+// silently RETURNED without SME, so a caller could not tell "computed" from
+// "did nothing" and would then read an untouched buffer.
 //
-// These replace an API whose only entry points SILENTLY RETURNED on a CPU
-// without SME, so a caller could not distinguish "computed" from "did
-// nothing" and would go on to read an untouched output buffer.
-//
-// Deliberately NOT SME-guarded: the whole point is that these compute a
-// correct result on ANY cpu, so they must run on the CI runner (no SME, hence
-// the scalar fallback path) as well as on the M4 (V7). A guard here would
-// leave the fallback untested on the only machine that exercises it.
+// Deliberately NOT SME-guarded: the point is that they compute a correct
+// result on ANY cpu, so they must run on the CI runner — the only machine
+// that exercises the scalar fallback at all.
 // ===========================================================================
 
 TEST_CASE("Sprint8 dispatch: layer_norm matches the reference on any CPU",

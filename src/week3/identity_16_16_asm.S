@@ -11,40 +11,32 @@
 SYMBOL(identity_16_16_asm):
 // x0: a (src), x1: b (dst), x2: ld_a, x3: ld_b, w4: trans_b
 //
-// Bare SMSTART/SMSTOP (not "smstart sm"): the trans_b == 1 path stages the
+// Bare SMSTART/SMSTOP (not `smstart sm`): the trans_b == 1 path stages the
 // transpose through a ZA tile, so PSTATE.ZA must be enabled too.  SMSTOP
-// disables both again before returning, so no ZA state is live across the
-// call (AAPCS64 lazy-save hazard avoided).
+// disables both before returning, so no ZA state is live across the call.
     smstart                        // Enter SSVE mode + enable ZA
     ptrue   p0.s, vl16             // Governing Predicate (16 fp32 lanes)
 
     cbz     w4, 2f          // If trans_b == 0, jump to col_major
     // -----------------------------------------------------------------
-    // CASE: trans_b == 1 — A column-major in, B row-major out, i.e.
-    //   b[i*ld_b + j] = a[i + j*ld_a]   (row i of B == row i of A)
+    // trans_b == 1 — A column-major in, B row-major out:
+    //   b[i*ld_b + j] = a[i + j*ld_a]
     //
-    // This is a real memory transpose: the 16 values of one A column are
-    // contiguous, but they belong to 16 DIFFERENT rows of B, 16 addresses
-    // ld_b apart.  A scatter store (ST1W with a vector of offsets) would
-    // express that directly, and this kernel used to do exactly that --
-    // but scatter/gather with vector offsets is NOT available inside
-    // streaming mode without FEAT_SME_FA64, which Apple has not
-    // implemented.  (Same constraint documented in src/norm/rms_norm_ssve.S,
-    // and the reason every norm kernel uses scalar-base LD1W/ST1W.)  The
-    // old version therefore never completed on M4; CI never caught it
-    // because the CI runners have no SME and skip the whole test case.
+    // A real memory transpose: the 16 values of one A column are contiguous
+    // but belong to 16 different rows of B.  A scatter store would express
+    // that directly, and this kernel used to do exactly that — but scatter
+    // with vector offsets is unavailable in streaming mode without
+    // FEAT_SME_FA64, which Apple has not implemented, so it never completed
+    // on the M4.  (CI never caught it: no SME, so the case is skipped.)
     //
-    // The fix uses the ZA array for what context.md 5 sanctions it for --
-    // 2-D data movement.  Load A's columns into ZA HORIZONTAL slices, then
-    // read VERTICAL slices back out: slice j holds A column j, so
-    // za0[j][i] = a[i + j*ld_a], and vertical slice i is
-    // { za0[j][i] for j } = row i of A -- exactly the 16 contiguous floats
-    // row i of B needs.  Every slice is written before it is read, so no
-    // "zero {za}" is required.
+    // The fix uses ZA for what it is good at — 2-D movement.  Load A's
+    // columns into HORIZONTAL slices, so za0[j][i] = a[i + j*ld_a]; vertical
+    // slice i is then row i of A, exactly the 16 contiguous floats row i of B
+    // needs.  Every slice is written before it is read, so no `zero {za}`.
     //
-    // The fp32 MOVA slice-offset immediate is only 2 bits (0-3); the full
-    // 0-15 slice index is W12 (which must be W12-W15) plus that offset,
-    // hence 4 groups of 4 with W12 stepping by 4.
+    // The fp32 MOVA slice-offset immediate is 2 bits (0-3); the full 0-15
+    // index is W12 (which must be W12-W15) plus that offset, hence 4 groups
+    // of 4 with W12 stepping by 4.
     // -----------------------------------------------------------------
     mov     x6, x0          // running A pointer (walks columns)
     mov     w12, #0         // ZA slice base

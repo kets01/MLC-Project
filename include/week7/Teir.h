@@ -40,13 +40,12 @@ namespace mini_jit::teir {
     struct Invocation : public Node {
         std::string kernel_name;
 
-        // Static per-invocation parameters for kernels whose call signature
-        // doesn't fit the (a,b,c,16,16[,16]) fixed-tile convention that
-        // identity/gemm use.  The norm primitives take a runtime row count,
-        // feature count, leading dimensions and epsilon (decision F in
-        // context.md: the kernel operates tile-at-a-time and must never
-        // assume it owns the whole tensor, so these travel per invocation
-        // rather than being hardcoded in the runtime's dispatch).
+        // Per-invocation parameters for kernels whose signature does not fit
+        // the fixed-tile (a,b,c,16,16) convention identity/gemm use.  The norm
+        // primitives take a runtime row count, feature count, leading
+        // dimensions and epsilon: decision F makes the kernel operate
+        // tile-at-a-time and never assume it owns the whole tensor, so these
+        // travel per invocation rather than being hardcoded in the dispatch.
         int64_t m = 0, n = 0, k = 0, ld_a = 0, ld_b = 0, ld_c = 0;
         float   eps = 1e-5f;
 

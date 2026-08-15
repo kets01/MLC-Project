@@ -317,10 +317,8 @@ class mini_jit::InstGen {
                                 sve_t  zm );
 
     // -----------------------------------------------------------------------
-    // Sprint 4 — encoders for the mini_jit::Norm generator.
-    // Each verified against the toolchain-assembled words of
-    // rms_norm_ssve_v6.S / layer_norm_ssve_v6.S (see tests/test_norm.cpp,
-    // tag [sprint4][encoders]) and the Arm ARM field layouts.
+    // Encoders for the mini_jit::Norm generator, each verified against the
+    // toolchain-assembled words of the V6 kernels and the Arm ARM.
     // -----------------------------------------------------------------------
 
     //! condition codes for B.<cond> (Arm ARM C1.2.4)
@@ -450,15 +448,13 @@ class mini_jit::InstGen {
     static uint32_t sve_sel_s( sve_t zd, pred_t pg, sve_t zn, sve_t zm );
 
     // -----------------------------------------------------------------------
-    // Sprint 6 — SME2 multi-vector encoders (for the V7 norm kernels).
+    // SME2 multi-vector encoders (for the V7 norm kernels).
     //
-    // These use a predicate-as-counter (PN8-PN15), a different register class
-    // from the P0-P15 governing predicates the SVE encoders above take: the
-    // pred_t value here is the PN number, so only p8..p15 are meaningful.
-    // Field layouts were derived from toolchain golden words (objdump of
-    // -march=armv9-a+sme2 assembly) and cross-checked across register, base
-    // and predicate variations — the Sprint-4 methodology, which is what
-    // makes the encoding diff meaningful rather than circular.
+    // These take a predicate-as-counter (PN8-PN15), a different register class
+    // from the P0-P15 governing predicates above: the pred_t value is the PN
+    // number, so only p8..p15 are meaningful.  Field layouts were derived from
+    // toolchain golden words cross-checked across register, base and predicate
+    // variations — which is what keeps the encoding diff from being circular.
     // -----------------------------------------------------------------------
 
     /**

@@ -1,81 +1,34 @@
-// rms_norm_ssve_v7.S — Sprint 6 ablation V7 (SME2 multi-vector load/store)
+// rms_norm_ssve_v7.S — RMSNorm V7: V6 with SME2 multi-vector accesses.
 //
-// THE HARDWARE CORRECTION THIS VARIANT RESTS ON: the project docs assumed
-// SME1 throughout (context.md §5 "confirm against the M4's SME level"), but
-// `sysctl hw.optional.arm.FEAT_SME2` reports 1 on the target M4.  Before any
-// kernel was written, the 4-vector LD1W/ST1W forms were assembled AND
-// executed inside a streaming region on the machine, so this is built on a
-// verified capability rather than a datasheet reading (CLAUDE.md §10).
+// V6's group loop already touches four consecutive VL-row blocks per column
+// at [x8], [x8,#1,MUL VL], [x8,#2,MUL VL], [x8,#3,MUL VL] — exactly the
+// operand shape of SME2's 4-vector contiguous access.  So V7 is V6 with
+//   4x LD1W -> ld1w {z0.s-z3.s}, pn8/z, [x8]
+//   4x ST1W -> st1w {z0.s-z3.s}, pn8, [x9]
+// Same addresses, same traffic, same arithmetic, same summation order: only
+// the instruction count changes, which makes it a clean test of whether V6 is
+// issue-bound or memory-bound.  The correctness gate is therefore BIT-IDENTITY
+// with V6, not a tolerance.  Measured +17% in the DRAM regime, ~0 in cache.
 //
-// THE LEVER.  V6's group loop already touches four consecutive VL-row blocks
-// per column, addressed as [x8], [x8,#1,MUL VL], [x8,#2,MUL VL],
-// [x8,#3,MUL VL] — that is *precisely* the operand shape of SME2's 4-vector
-// contiguous load.  So V7 is V6 with:
-//     4x LD1W  ->  1x  ld1w {z0.s-z3.s}, pn8/z, [x8]
-//     4x ST1W  ->  1x  st1w {z0.s-z3.s}, pn8, [x9]
-// Identical memory traffic, identical access pattern, identical arithmetic:
-// the ONLY thing that changes is instruction count in the hot loops (pass 1
-// drops 3 loads/column, pass 2 drops 3 loads + 3 stores/column).  That makes
-// this a clean single-variable test of one question: is V6 instruction-issue
-// bound, or memory bound?
+// NO TAIL PATH.  V6 needs one because its group path is unpredicated, and that
+// tail touches 64 B per column instead of 256 B — the exact low access density
+// V6 exists to fix.  SME2's predicate-as-counter removes it: `whilelo pn8.s,
+// x0, x22, vlx4` describes min(M - x0, 4*VL) active elements ACROSS the group,
+// so one loop body serves full and final partial groups alike.
 //
-// THE HYPOTHESIS, WRITTEN BEFORE MEASURING (ROADMAP Sprint 6 pre-registers
-// the expectation that SME2 "does not raise the DRAM roofline"):
-//   - True-DRAM shapes (256 MiB): V6 sustains ~20 GiB/s useful = ~30 GiB/s
-//     moved = ~51% of the 59.5 GiB/s streaming roofline, and Sprint 2b showed
-//     the binding constraint there is ACCESS DENSITY, not issue rate.  Folding
-//     4 instructions into 1 should therefore buy ~0.
-//   - Cache-resident shapes: V6 reaches ~38.6 GiB/s useful = ~58 GiB/s moved
-//     = ~97% of the streaming roofline.  There is almost nothing left to win;
-//     at best a small gain where per-column loop overhead still shows.
-//   Expected verdict: ≈0 everywhere, i.e. a *confirmation* that V6 is memory-
-//   bound rather than issue-bound.  A measured ≈0 here is a positive result:
-//   it closes the instruction-issue family the way V5 closed the
-//   outstanding-loads family, and it is the evidence for the report's claim
-//   that the remaining gap is DRAM behaviour, not code density.
+// Inactive-lane safety: loads are pn8/z, so inactive lanes read 0, contribute
+// 0 to the sum of squares, and a fully-inactive block ends at 0*(1/N)+eps,
+// which FRSQRTE handles finitely.  The store uses the same counter, so nothing
+// invalid reaches memory and no SEL is needed.
 //
-// NO TAIL PATH (Sprint 6 revision).  V6 needs a separate 1-3 block tail
-// because its group path is unpredicated: whatever does not fill a group of
-// four VL-row blocks falls into a single-block predicated loop that touches
-// only 64 B per column instead of 256 B — i.e. it reverts to exactly the low
-// access density V6 exists to fix.  That is a real cliff, not a rounding
-// error: with OpenMP row-chunking it made 6- and 10-thread runs ~45 % slower
-// than 4 and 8, because those chunk sizes are not multiples of 4*VL.
+// Registers: z0-z3 data quad (must be a consecutive 4-aligned group), z4-z7
+// accumulators (one per row block), z8 eps, z16 gamma, z17 1/N, z18 NR
+// scratch, z20-z23 inv_rms, p0 all-true, pn8 the VLx4 row counter.
 //
-// SME2's predicate-as-counter removes the need for the second path entirely.
-// `whilelo pn8.s, x0, x22, vlx4` describes min(M - x0, 4*VL) active elements
-// ACROSS the four-vector group, so one loop body serves both the full groups
-// (all-true counter) and the final partial group (partial counter).  The tail
-// is not "multi-vector" — it is gone, and every column touch in the kernel is
-// a 256 B multi-vector access.
+// Requires FEAT_SME2; the C++ bridge dispatches to V6 when it is absent.
 //
-// Inactive-lane safety: the loads are pn8/z (zeroing), so inactive lanes read
-// 0, contribute 0 to the sum of squares, and a fully-inactive block ends with
-// acc = 0 -> 0*(1/N) + eps = eps, which FRSQRTE handles finitely.  The store
-// is predicated by the same counter, so nothing invalid reaches memory and no
-// SEL is needed.
-//
-// The C++ bridge dispatches to V6 when FEAT_SME2 is absent, so the same
-// binary still runs on M1/M2 (ROADMAP: "degrades to the SME1 kernel").
-//
-// Register map (group path):
-//   z0-z3   data quad (must be a consecutive, 4-aligned Z group)
-//   z4-z7   sum-of-squares accumulators, one per row block (V6's ILP, kept)
-//   z8      {eps,...}          z16  gamma broadcast
-//   z17     {1/N,...}          z18  Newton-Raphson scratch
-//   z20-z23 inv_rms per block
-//   p0      all-true SVE predicate (governs FP ops and the gamma broadcast)
-//   pn8     row counter predicate, recomputed per group by WHILELO ...,VLx4
-//
-// C signature (identical to V0-V6):
-//   void rms_norm_ssve_v7(const float *a,     // x0
-//                         float       *b,     // x1
-//                         const float *gamma, // x2
-//                         int64_t      m,     // x3
-//                         int64_t      n,     // x4
-//                         int64_t      ld_a,  // x5
-//                         int64_t      ld_b,  // x6
-//                         float        eps);  // s0
+// C signature: identical to rms_norm_ssve (rms_norm_ssve.S).
+//   (a, b, gamma, m, n, ld_a, ld_b) in x0-x6, eps in s0.
 
 #ifdef __APPLE__
     #define SYMBOL(s) _##s
@@ -115,7 +68,6 @@ SYMBOL(rms_norm_ssve_v7):
     lsl   x24, x5, #2          // stride_a in bytes
     lsl   x25, x6, #2          // stride_b in bytes
     str   s0,  [sp, #120]      // dedicated eps stash, stored BEFORE smstart
-                                // (no register survives the PSTATE.SM change)
 
     cbz   x22, .Lrow_done_v7
 

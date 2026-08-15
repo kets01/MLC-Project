@@ -1,34 +1,15 @@
-// rms_norm_ssve_v3.S — Sprint 2 ablation V3
+// rms_norm_ssve_v3.S — RMSNorm V3: V2 with both column loops unrolled 2x.
 //
-// Change vs V2:
-//   Both inner column loops (pass 1 and pass 2) are unrolled by 2.
-//   Each iteration loads two consecutive columns, letting the out-of-order
-//   core overlap two independent memory streams and halving branch overhead.
+// A peel handles odd N so the main loop always sees pairs.  Measured gain
+// ~0: the out-of-order core already overlaps sequential column loads, and
+// unrolling does not break the single accumulator chain (V4 does, and wins).
 //
-//   When N is odd, a single-column peel executes first so the main loop
-//   always processes pairs.
+// Addressing note: LD1W {Zt.S}, Pg/Z, [Xn, Xm, LSL #2] scales Xm as an
+// ELEMENT count, so the second column uses x5/x6 (elements) and not the
+// byte strides in x24/x25.
 //
-// Additional registers vs V2:
-//   Z6 — second column of A (pass 1 + pass 2)
-//   Z7 — second gamma broadcast (pass 2)
-//
-// Addressing for the second column:
-//   LD1W  {Z6.S}, P1/Z, [X8, X24]   — load A col c+1  (byte offset x24 = ld_a_bytes)
-//   LD1RW {Z7.S}, P0/Z, [X10, #4]   — broadcast gamma[c+1] (#4 = 1 float = 4 bytes)
-//   ST1W  {Z6.S}, P1,   [X9,  X25]  — store B col c+1  (byte offset x25 = ld_b_bytes)
-//
-// Pointer advance for pairs:
-//   ADD Xd, Xn, Xm, LSL #1 — adds 2*Xm in one instruction.
-//
-// C signature (identical to V0/V1/V2):
-//   void rms_norm_ssve_v3(const float *a,     // x0
-//                         float       *b,     // x1
-//                         const float *gamma, // x2
-//                         int64_t      m,     // x3
-//                         int64_t      n,     // x4
-//                         int64_t      ld_a,  // x5
-//                         int64_t      ld_b,  // x6
-//                         float        eps);  // s0
+// C signature: identical to rms_norm_ssve (rms_norm_ssve.S).
+//   (a, b, gamma, m, n, ld_a, ld_b) in x0-x6, eps in s0.
 
 #ifdef __APPLE__
     #define SYMBOL(s) _##s
@@ -59,10 +40,6 @@ SYMBOL(rms_norm_ssve_v3):
     str  d13,      [sp, #96]
     str  d14,      [sp, #104]
     str  d15,      [sp, #112]
-                                // (Sprint 6: the Sprint-5 d8-d15 AAPCS64 fix,
-                                // extended from the two V6 winners to every
-                                // kernel -- smstart/smstop zero all of d8-d15,
-                                // so a caller's d9-d15 were silently destroyed)
 
     mov   x19, x0
     mov   x20, x1
@@ -73,9 +50,6 @@ SYMBOL(rms_norm_ssve_v3):
     lsl   x25, x6, #2
     fmov  s8,  s0
     str   s0,  [sp, #120]   // dedicated eps stash, stored BEFORE smstart
-                            // (streaming-mode entry clobbers D8 too, not just
-                            // D9-D15 — memory survives smstart, no register
-                            // does; verified empirically)
 
     cbz   x22, .Lrow_done_v3
 
@@ -91,9 +65,7 @@ SYMBOL(rms_norm_ssve_v3):
 
     mov    x0, #0
 
-    // -----------------------------------------------------------------------
     // Outer loop — one iteration per block of VL rows.
-    // -----------------------------------------------------------------------
 .Lblock_loop_v3:
     whilelo  p1.s, x0, x22
     b.none   .Lblock_done_v3

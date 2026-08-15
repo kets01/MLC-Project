@@ -1,32 +1,20 @@
 #!/usr/bin/env python3
-"""Sprint 7.5 - ExecuTorch baseline for LayerNorm / RMSNorm.
+"""ExecuTorch baseline for LayerNorm / RMSNorm.
 
-Same harness rules as torch_norm_bench.py (native row-major layout, one thread,
-useful-bytes convention, outputs dumped for cross-verification against our
-float64 reference before any number is quoted).
+Same harness rules as torch_norm_bench.py.  Three ExecuTorch-specific notes,
+because they change what the number MEANS:
 
-ExecuTorch-specific notes, because they change what the number MEANS:
-
-  * Two execution paths are measured, because they are different products:
-      - PORTABLE: reference kernels, no delegation.  This is what a bare
-        ExecuTorch runtime does and it is not meant to be fast.
-      - XNNPACK: the delegated path, which is what anyone actually deploys.
-        Quoting only the portable number would be the mirror image of the
-        Sprint-6 error - handicapping the baseline and calling the gap a win.
+  * Two execution paths are measured, because they are different products.
+    PORTABLE is the reference-kernel path a bare runtime takes and is not meant
+    to be fast; XNNPACK is the delegated path that is actually deployed.
+    Quoting only the portable number would handicap the baseline and call the
+    gap a win — the mirror image of the earlier vendor-comparison error.
   * The measured time includes ExecuTorch's per-invocation runtime dispatch.
-    That is honest for an on-device comparison (it is what the op costs in
-    that runtime), but it is NOT a pure kernel number, and the report says so.
-  * Versions are NOT pinned in this file; they are recorded at run time into
-    the output manifest, because that is the only version information that is
-    guaranteed to describe the run that produced the numbers.  The reported
-    measurements were taken with ExecuTorch 1.4.1 / torch 2.13.0 on Python
-    3.12.  (An earlier attempt on Python 3.9 could only install ExecuTorch
-    0.3.0, whose XNNPACK partitioner does not even import there -- staticmethod
-    objects became callable only in Python 3.10 -- so the delegated path, the
-    one that is actually deployed, could not be measured at all.  Reporting
-    only the portable kernels would have understated the baseline, which is the
-    mirror image of the Sprint-6 error, so a newer interpreter was used
-    instead.  Requires Python >= 3.10.)
+    Honest for an on-device comparison, but not a pure kernel number.
+  * Versions are recorded at run time into the manifest rather than pinned
+    here, because that is the only version information guaranteed to describe
+    the run that produced the numbers.  Requires Python >= 3.10: the XNNPACK
+    partitioner cannot be imported on 3.9.
 """
 
 import argparse

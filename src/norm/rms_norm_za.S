@@ -1,49 +1,34 @@
-// rms_norm_za.S — Sprint 3: RMSNorm with ZA-tile residency (Ketsia)
+// rms_norm_za.S — RMSNorm staged through the SME ZA array.  A measured,
+// explained NEGATIVE result kept in the tree as an ablation row.
 //
-// The lever ZA offers a bandwidth-bound RMSNorm (context.md §5, ROADMAP
-// Sprint 3 "honest expectation-setting"):
+// The idea: RMSNorm must see a row's entire sum of squares before it can
+// normalise, so V6 re-reads x in pass 2 (2R+1W).  That read is avoidable only
+// if the row-block stays on core between passes.  ZA offers ~4 KB beyond the
+// 32 Z-registers (four 32-bit tiles, SVL_S x SVL_S each), enough for one
+// SVL-row x (<=4*SVL)-col block — so stage x in ZA during the reduction and
+// read it back in pass 2: 1R+1W instead of 2R+1W.
 //
-//   RMSNorm must see a row's ENTIRE sum-of-squares before it can normalise,
-//   so the SSVE winner (V6) re-reads x in pass 2 -> 2R+1W of traffic.  That
-//   second read is only avoidable if the whole row-block stays resident on
-//   core between the two passes.  ZA gives ~4 KB of extra on-core storage
-//   (four 32-bit tiles ZA0..ZA3, each SVL_S x SVL_S = 16x16 FP32 on the M4)
-//   BEYOND the 32 Z-registers — exactly enough to hold one SVL-row x (<=4*SVL)
-//   -col block.  We use it as a residency buffer so pass 2 reads x from ZA,
-//   not from memory: 1R+1W instead of 2R+1W.
+// Verdict: 39-65% SLOWER than V6, at every footprint tested.  Each element
+// costs two extra `mova` ops, and mova throughput — not memory — is what
+// binds at these shapes; the kernel's own streaming fallback beats its ZA
+// path.  V6's grouping also keeps pass 2's re-read cache-resident, so the DRAM
+// read ZA "saves" was never a DRAM read.
 //
-//   The REDUCTION stays SSVE (fmla in Z-registers, per context.md §5 — a
-//   horizontal sum-of-squares maps poorly onto the ZA matrix accumulator).
-//   ZA is pure staging: it holds x, it does not compute the statistic.
+// The REDUCTION stays SSVE (context.md §5): a horizontal sum of squares maps
+// poorly onto a matrix accumulator, so ZA holds x and computes nothing.
 //
-// Structure per SVL-row block (rows are contiguous in column-major memory,
-// so one SVL-vector load grabs SVL consecutive rows of one column):
-//   pass 1  (1 memory read): for each column   z = ld1w x;  acc += z*z;
-//                            mova z -> ZA slice  (stage for pass 2)
-//   inv_rms = 1/sqrt(acc/N + eps)   (FRSQRTE + one Newton step, as in V6)
-//   pass 2  (1 memory write): for each column  z = mova ZA slice;
-//                             z *= gamma[col];  z *= inv_rms;  st1w z
+// Constraints designed around: the ZA tile number is an instruction immediate
+// (hence four macro expansions, not a loop), the slice-select register must be
+// W12-W15 (w13 here), and bare smstart/smstop manage PSTATE.ZA as well as
+// PSTATE.SM.  Every slice is written before it is read, so no `zero {za}` is
+// needed, and ZA is disabled before return (no AAPCS64 lazy-save hazard).
 //
-// The ZA-resident fast path only applies while the row fits in ZA
-// (N <= 4*SVL, derived at runtime — decision D, never a literal 64).  For
-// wider rows the block cannot stay resident; we fall back to a correct
-// streaming two-pass (2R+1W) so the kernel is right for every shape.  That
-// fallback is NOT the performance story — V6 remains the large-N incumbent;
-// rms_norm_za is measured for the small-N regime where residency can pay.
+// Fast path requires N <= 4*SVL (derived from cntw, decision D — never a
+// literal 64); wider rows take a correct streaming two-pass fallback.  One
+// accumulator runs in strict column order, matching the reference exactly.
 //
-// A single sum-of-squares accumulator (z2) runs strictly in column order
-// across all four tile sections, so the summation order matches the scalar
-// reference exactly — no reassociation tolerance needed (kTol = 1e-5).
-//
-// C signature (identical to the SSVE kernels):
-//   void rms_norm_za(const float *a,     // x0
-//                    float       *b,     // x1
-//                    const float *gamma, // x2
-//                    int64_t      m,     // x3
-//                    int64_t      n,     // x4
-//                    int64_t      ld_a,  // x5
-//                    int64_t      ld_b,  // x6
-//                    float        eps);  // s0
+// C signature: identical to rms_norm_ssve (rms_norm_ssve.S).
+//   (a, b, gamma, m, n, ld_a, ld_b) in x0-x6, eps in s0.
 
 #ifdef __APPLE__
     #define SYMBOL(s) _##s
@@ -125,10 +110,6 @@ SYMBOL(rms_norm_za):
     str  d13,      [sp, #96]
     str  d14,      [sp, #104]
     str  d15,      [sp, #112]
-                                // (Sprint 6: the Sprint-5 d8-d15 AAPCS64 fix,
-                                // extended from the two V6 winners to every
-                                // kernel -- smstart/smstop zero all of d8-d15,
-                                // so a caller's d9-d15 were silently destroyed)
 
     mov   x19, x0                // a
     mov   x20, x1                // b
@@ -139,9 +120,6 @@ SYMBOL(rms_norm_za):
     lsl   x25, x6, #2            // stride_b in bytes
     fmov  s8,  s0                // stash eps in d8 too (kept for consistency)
     str   s0,  [sp, #120]         // dedicated eps stash, stored BEFORE smstart
-                                  // (bare smstart clobbers D8 as well as
-                                  // D9-D15 — memory survives smstart, no
-                                  // register does; verified empirically)
 
     cbz   x22, .Lrow_done        // M == 0: nothing to do, no streaming region
 

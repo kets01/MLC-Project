@@ -385,8 +385,8 @@ accumulator does and doesn't help a bandwidth-bound vector op.
       `mini_jit::Norm::generate()` now takes an `isa_t` (`automatic` = V7 where `FEAT_SME2` is present,
       else V6). Three new `InstGen` encoders (`PTRUE PNn.S`, 4-vector `LD1W`/`ST1W`), field layouts
       derived from 13 toolchain golden words varying register/base/predicate independently and pinned by
-      unit test. **Encoding diff green for both SME2 kernels**; emitted size 157→148 (RMS) and 208→196
-      (LN) words, exactly the folded accesses. TEIR inherits it via the default: **single-thread RMSNorm
+      unit test. **Encoding diff green for both SME2 kernels**; emitted size 157→110 (RMS) and 208→144
+      (LN) words — the folded accesses plus the predicated tail path the counter predicate removes. TEIR inherits it via the default: **single-thread RMSNorm
       21.04 → 24.68 GiB/s (+17.3 %)**, every configuration verified.
 - [x] **SME2 multi-vector on the ZA path — the skip was RETRACTED and the experiment run.** The skip
       rested on an untested factor: `mova` had never been characterised as *issue*-bound vs *ZA-port*-bound,

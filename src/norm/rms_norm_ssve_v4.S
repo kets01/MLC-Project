@@ -1,38 +1,22 @@
-// rms_norm_ssve_v4.S — Sprint 2b ablation V4
+// rms_norm_ssve_v4.S — RMSNorm V4: four independent FMLA accumulator chains.
 //
-// Change vs V2 (the incumbent structure: FRSQRTE+NR, pre-computed 1/N):
-//   Pass 1 (sum of squares) uses FOUR independent FMLA accumulators
-//   (Z2, Z16, Z17, Z18), processing four columns per iteration, combined
-//   with two FADDs at the end before the inv_rms step.
+// V0-V3 accumulate into one Z register, so each FMLA waits ~3-4 cycles on the
+// previous one and the load stream can only run one column ahead.  Four
+// chains (z2/z16/z17/z18, four columns per iteration, combined by two FADDs)
+// let the OOO core keep four column loads in flight.  Measured +27-32% at
+// N >= 2048 — the single chain WAS the bottleneck, which is also why V3's
+// unrolling bought nothing.
 //
-// Hypothesis (the memory-level-parallelism lever): V0-V3 accumulate into a
-// single Z register, so every FMLA waits on the previous FMLA's result
-// (~3-4 cycle latency chain) and the load stream can run at most one
-// column ahead per chain step.  Four independent chains let the OOO core
-// keep four column loads in flight behind independent FMAs.  This is
-// distinct from V3's unroll, which kept ONE chain and only cut branch
-// overhead (measured: no gain).
+// Two pointers (x8, x12 = x8 + stride) each advance by 2*stride per pair, to
+// avoid the LD1W scalar+scalar form and its element-vs-byte index scaling.
+// N % 4 trailing columns fall into a single-accumulator remainder loop.
 //
-// Addressing: two pointers (X8, X12 = X8 + stride), each advanced by
-// 2*stride per pair of loads — avoids the LD1W scalar+scalar form whose
-// element-vs-byte index scaling caused the Sprint-2 debug-log bug #1.
+// Numerics: the four partial sums combine in tree order rather than the
+// reference's sequential order, so V4/V5 are verified at kTolReassoc (2e-5),
+// documented rather than silently widening the gate.  V6 removes the issue.
 //
-// Remainder: N % 4 trailing columns fall into a single-accumulator loop
-// (identical to V2's) accumulating into Z2.
-//
-// Inactive-lane safety: all four accumulators start as MOV #0 (all lanes)
-// and FMLA is p1/m, so inactive lanes stay 0 through the FADD combine —
-// the same invariant V1/V2 rely on before the SEL/FRSQRTE sequence.
-//
-// C signature (identical to V0-V3):
-//   void rms_norm_ssve_v4(const float *a,     // x0
-//                         float       *b,     // x1
-//                         const float *gamma, // x2
-//                         int64_t      m,     // x3
-//                         int64_t      n,     // x4
-//                         int64_t      ld_a,  // x5
-//                         int64_t      ld_b,  // x6
-//                         float        eps);  // s0
+// C signature: identical to rms_norm_ssve (rms_norm_ssve.S).
+//   (a, b, gamma, m, n, ld_a, ld_b) in x0-x6, eps in s0.
 
 #ifdef __APPLE__
     #define SYMBOL(s) _##s
@@ -63,10 +47,6 @@ SYMBOL(rms_norm_ssve_v4):
     str  d13,      [sp, #96]
     str  d14,      [sp, #104]
     str  d15,      [sp, #112]
-                                // (Sprint 6: the Sprint-5 d8-d15 AAPCS64 fix,
-                                // extended from the two V6 winners to every
-                                // kernel -- smstart/smstop zero all of d8-d15,
-                                // so a caller's d9-d15 were silently destroyed)
 
     mov   x19, x0
     mov   x20, x1
@@ -77,9 +57,6 @@ SYMBOL(rms_norm_ssve_v4):
     lsl   x25, x6, #2          // stride_b in bytes
     fmov  s8,  s0              // save eps into callee-saved S8
     str   s0,  [sp, #120]       // dedicated eps stash, stored BEFORE smstart
-                                // (streaming-mode entry clobbers D8 too, not
-                                // just D9-D15 — memory survives smstart, no
-                                // register does; verified empirically)
 
     cbz   x22, .Lrow_done_v4
 
@@ -98,9 +75,7 @@ SYMBOL(rms_norm_ssve_v4):
                                // the scratch register survives the function)
     mov   x0, #0
 
-    // -----------------------------------------------------------------------
     // Outer loop — one iteration per block of VL rows.
-    // -----------------------------------------------------------------------
 .Lblock_loop_v4:
     whilelo  p1.s, x0, x22
     b.none   .Lblock_done_v4

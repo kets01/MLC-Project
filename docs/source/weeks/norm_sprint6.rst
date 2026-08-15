@@ -289,8 +289,9 @@ Sprint-4 methodology, which is what keeps the encoding diff from being circular.
 Both SME2 kernels pass the whole-buffer encoding diff against their linked
 hand-written counterparts, so the emitted code inherits the trust of kernels
 that already passed bit-identity and reference verification. Emitted sizes drop
-from 157 → 148 words (RMSNorm) and 208 → 196 (LayerNorm), exactly the 9 and 12
-folded accesses.
+from 157 → 110 words (RMSNorm) and 208 → 144 (LayerNorm): the 9 and 12 folded
+accesses, plus the whole predicated tail path, which the counter predicate
+(``WHILELO …,VLx4`` governing full and partial groups alike) makes unnecessary.
 
 TEIR picks this up for free — its runtime constructs the generators with the
 default — so the integrated path improves without any change to the runtime:

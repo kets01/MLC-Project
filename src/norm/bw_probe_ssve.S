@@ -1,25 +1,27 @@
-// bw_probe_ssve.S — Sprint 2a roofline probe (NOT a norm kernel)
+// bw_probe_ssve.S — the single-core roofline probe.  NOT a norm kernel.
 //
-// STREAM-style scale-add executed the way the norm kernels actually access
-// memory: inside ONE streaming region, with contiguous LD1W/ST1W and
-// predicated tails.  This measures the single-core ceiling the SSVE kernels
-// can physically reach — the NEON figure from the C++ probe is a different
-// execution mode and therefore a different (possibly higher) ceiling.
+// A STREAM-style scale-add d[i] = s[i] + 1.0f, executed the way the norm
+// kernels access memory: one streaming region, contiguous LD1W/ST1W,
+// predicated VLA tail.  The compiler-vectorized C++ probe runs in NEON, a
+// different execution mode and therefore a different ceiling — measuring the
+// wrong one is the Sprint-2a "peak of what" error.
 //
-//   d[i] = s[i] + 1.0f          (counts 1 read + 1 write per element)
+// Scale-add rather than a copy so d != s after each pass, which stops macOS
+// copy-on-write from short-circuiting it.
 //
-// Same rationale as the C++ probe for scale-add rather than plain copy:
-// d != s after each pass, so macOS copy-on-write cannot short-circuit.
+// Four independent LD1W/FADD/ST1W chains per iteration keep enough loads in
+// flight to saturate one core; WHILELO handles any n (decision D).
 //
-// Structure: main loop processes 4 vectors per iteration (4 independent
-// LD1W/FADD/ST1W chains — enough outstanding loads to saturate one core),
-// then a predicated per-VL tail via WHILELO handles any remainder (VLA,
-// decision D: no hard-coded SVL anywhere).
+// The prologue saves d8-d15 even though the probe never names them: AAPCS64
+// makes them callee-saved and smstart/smstop zero all eight.  The omission
+// went unnoticed for exactly that reason, and this probe is the denominator of
+// every "% of peak" in the report — measured before the fix, it destroyed 6 of
+// the caller's 7 d9-d15 registers.
 //
 // C signature:
-//   void bw_probe_ssve(float       *d,   // x0
-//                      const float *s,   // x1
-//                      int64_t      n);  // x2  (element count)
+//   void bw_probe_ssve(float *d,          // x0
+//                      const float *s,    // x1
+//                      int64_t n);        // x2  (element count)
 
 #ifdef __APPLE__
     #define SYMBOL(s) _##s
@@ -36,14 +38,8 @@
 
 SYMBOL(bw_probe_ssve):
 
-    // No callee-saved GPRs are used (x0-x6, z0-z4, p0-p1 are all volatile),
-    // but a prologue IS still needed: smstart/smstop zero d8-d15 (they alias
-    // the low bits of z8-z15), and AAPCS64 makes those callee-saved.  This
-    // probe never names them, which is exactly why the omission went
-    // unnoticed — the hazard comes from the streaming-mode transition, not
-    // from the register allocation.  Measured on M4 before this fix: the
-    // probe destroyed 6 of the caller's 7 d9-d15 registers.  (Sprint 6,
-    // completing the Sprint-5 fix across every streaming kernel.)
+    // No callee-saved GPRs are used, but d8-d15 still must be saved: see the
+    // note above.
     stp  d8,  d9,  [sp, #-64]!
     stp  d10, d11, [sp, #16]
     stp  d12, d13, [sp, #32]
@@ -61,9 +57,7 @@ SYMBOL(bw_probe_ssve):
     cntw  x4                   // x4 = VL in 32-bit words (queried, decision D)
     lsl   x5, x4, #2           // x5 = 4*VL words per main-loop iteration
 
-    // -----------------------------------------------------------------------
     // Main loop: 4 full vectors per iteration, unpredicated.
-    // -----------------------------------------------------------------------
 .Lmain_loop:
     add   x6, x3, x5
     cmp   x6, x2
@@ -89,9 +83,7 @@ SYMBOL(bw_probe_ssve):
     mov   x3, x6
     b     .Lmain_loop
 
-    // -----------------------------------------------------------------------
     // Tail: one predicated vector at a time (handles any n, VLA).
-    // -----------------------------------------------------------------------
 .Ltail:
     whilelo p1.s, x3, x2
     b.none  .Ldone

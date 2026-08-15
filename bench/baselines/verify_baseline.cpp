@@ -1,20 +1,17 @@
-// Sprint 7.5 — cross-verify an external library's output against OUR reference.
+// Cross-verify an external library's output against OUR reference.
 //
-// Decision B says no throughput number is trusted for a kernel that has not
-// been verified against the C++ reference.  That applies to baselines too, and
-// for a sharper reason than usual: a vendor comparison can be wrong not because
-// the timing is wrong but because the two sides are computing DIFFERENT THINGS.
-// That is precisely how the Sprint-6 comparison failed — `vDSP_normalize` was
-// called "LayerNorm" when it has no eps, no gamma and no beta.
+// Decision B says no throughput number is trusted for an unverified kernel,
+// and that applies to baselines for a sharper reason than usual: a vendor
+// comparison can be wrong not because the timing is wrong but because the two
+// sides compute DIFFERENT THINGS.  That is exactly how the earlier comparison
+// failed — vDSP_normalize was called "LayerNorm" when it has no eps, no
+// gamma and no beta.  So this answers one question before any GiB/s is
+// quoted: does the library compute the same function we do?
 //
-// So this checker exists to answer one question before any GiB/s is quoted:
-// does the library compute the same function we do?
-//
-// Layout bridge: the library writes ROW-major [M rows, N features] with the
-// norm over the last (contiguous) axis.  Our reference is COLUMN-major,
-// a[row + col*ld], normalized over N.  The transpose happens here, in the
-// checker, and nowhere in either timed path — neither implementation is made to
-// pay for the other's layout (Sprint 7.5 harness rule 1).
+// Layout bridge: the library writes ROW-major with the norm over the last
+// contiguous axis; our reference is COLUMN-major.  The transpose happens
+// HERE and in neither timed path, so neither implementation is made to pay
+// for the other's layout.
 
 #include "norm/norm.hpp"
 
@@ -97,9 +94,9 @@ static int verify_shape(const std::string& dir, int64_t m, int64_t n, float eps)
     const double d_ln  = max_abs_diff(lib_ln,  ref_ln,  m, n, at_ln);
     const double d_rms = max_abs_diff(lib_rms, ref_rms, m, n, at_rms);
 
-    // FP32 tolerance: the library accumulates in FP32 like our kernels, so
-    // agreement to ~1e-4 means "same function", while a semantic mismatch
-    // (missing eps, unbiased variance, no gamma) shows up orders larger.
+    // The library accumulates in FP32 like our kernels, so agreement to ~1e-4
+    // means "same function"; a semantic mismatch (missing eps, unbiased
+    // variance, no gamma) shows up orders larger.
     const double kTol = 1e-4;
     const bool ok_ln = d_ln <= kTol, ok_rms = d_rms <= kTol;
     std::printf("  %-12s  LayerNorm %.3e %-6s   RMSNorm %.3e %-6s\n",
@@ -115,9 +112,9 @@ int main(int argc, char** argv) {
     }
     const std::string dir = argv[1];
 
-    // Sprint 8: verify EVERY shape the benchmark reported, not one of them.
-    // Checking a single shape and publishing three is an inference; the
-    // manifest lists exactly what was measured so the two cannot drift apart.
+    // Verify EVERY shape the benchmark reported: checking one and publishing
+    // three is an inference.  The manifest lists exactly what was measured, so
+    // the timed set and the gated set cannot drift apart.
     std::ifstream mf(dir + "/manifest.txt");
     if (!mf) {
         std::fprintf(stderr,

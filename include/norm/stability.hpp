@@ -1,30 +1,19 @@
 #pragma once
 #include <cstdint>
 
-// Sprint 7a — numerical-stability instruments.
+// Numerical-stability instruments.  ANALYSIS functions, not kernels and not
+// part of the primitive contract in norm.hpp — nothing in the library calls
+// them.  They exist so the report's stability claims are measured rather than
+// asserted; the project had never implemented the dangerous formulation, so
+// the claim about it had no counterexample.
 //
-// These are ANALYSIS functions, not kernels and not part of the primitive
-// contract in norm.hpp.  Nothing in the library calls them; they exist so the
-// report's stability claims can be measured rather than asserted.
+// They accumulate in FP32 on purpose: that is the kernels' precision, so a
+// float64 demonstrator would prove nothing about them.  (reference.cpp
+// accumulates in double on purpose too — it is the oracle.)
 //
-// The project's design (context.md §8) rests on three assertions:
-//   1. single-pass variance via E[x^2] - mean^2 suffers catastrophic
-//      cancellation in FP32 for large or shifted inputs,
-//   2. LayerNorm's centred two-pass formulation avoids it,
-//   3. RMSNorm sidesteps the problem entirely because it never forms a mean.
-// Until now the project simply never implemented (1), so the claim had no
-// measured counterexample.  These functions supply it.
-//
-// Why FP32 accumulation is deliberate: the kernels accumulate in FP32, so a
-// float64 demonstrator would prove nothing about them.  The reference in
-// reference.cpp accumulates in double ON PURPOSE (it is the oracle); these
-// mirror the kernels' precision instead.
-//
-// Why the summation order is trustworthy: the build sets no -ffast-math /
-// -funsafe-math-optimizations, so under strict IEEE the compiler may not
-// reassociate a floating-point reduction.  The sequential order written here
-// is the order that executes, which is what makes the three estimators
-// comparable to each other and to the kernels.
+// The summation order is trustworthy because the build sets no -ffast-math:
+// under strict IEEE the compiler may not reassociate a reduction, so the
+// sequential order written here is the order that executes.
 
 namespace mini_jit::norm::stability {
 

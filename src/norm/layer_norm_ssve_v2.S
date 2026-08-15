@@ -1,29 +1,21 @@
-// layer_norm_ssve_v2.S — LayerNorm SSVE Sprint 2c ablation V2
+// layer_norm_ssve_v2.S — LayerNorm V2: V1 with 1/N hoisted.
 //
-// Change vs V1: pre-compute 1/N once (scalar FDIV before the outer loop,
-// broadcast into z4).  Both per-block vector FDIVs for mean and variance
-// become vector FMULs by z4.  Passes 1–3 and the FRSQRTE+NR inv_std step
-// are otherwise identical to V1.
+// Both per-block vector FDIVs (mean = sum/N, variance = M2/N) become vector
+// FMULs by a broadcast 1/N computed once before the outer loop.
 //
-// Adopts the RMSNorm-style prologue (ADDVL/INCW outer loop, all arguments
-// moved to callee-saved registers before SMSTART) for consistency with the
-// rest of the ablation series.
+// Measured +9-12%, against RMSNorm V2's ~0 — the one lever whose verdict does
+// NOT transfer between the norms.  LayerNorm has two such divides and both sit
+// at serialization points between its three passes (mean gates pass 2,
+// variance gates inv_std and pass 3), so they are a far larger share of
+// runtime than RMSNorm's single once-per-block divide.
 //
-// C signature:
-//   void layer_norm_ssve_v2(const float *a, float *b,
-//                           const float *gamma, const float *beta,
-//                           int64_t m, int64_t n,
-//                           int64_t ld_a, int64_t ld_b, float eps);
+// Also adopts the RMSNorm-style ADDVL/INCW outer loop for consistency.
 //
-// Register map (post-prologue):
-//   x19 = a chunk base   x20 = b chunk base
-//   x21 = gamma          x22 = beta
-//   x23 = m              x24 = n
-//   x25 = stride_a(B)    x26 = stride_b(B)
-//   d8  = eps            x0  = row counter
-//   z4  = [1/N,...]      z7  = [eps,...]
-//   z8  = mean acc       z9  = var acc
-//   z5  = inv_std        z3  = NR scratch
+// Registers: z4 = 1/N, z7 = eps, z8 = mean acc, z9 = var acc, z5 = inv_std,
+// z3 = NR scratch.
+//
+// C signature: identical to layer_norm_ssve (layer_norm_ssve.S).
+//   (a, b, gamma, beta, m, n, ld_a, ld_b) in x0-x7, eps in s0.
 
 #ifdef __APPLE__
     #define SYM(s) _##s
@@ -49,10 +41,6 @@ SYM(layer_norm_ssve_v2):
     str  d13,      [sp, #104]
     str  d14,      [sp, #112]
     str  d15,      [sp, #120]
-                                // (Sprint 6: the Sprint-5 d8-d15 AAPCS64 fix,
-                                // extended from the two V6 winners to every
-                                // kernel -- smstart/smstop zero all of d8-d15,
-                                // so a caller's d9-d15 were silently destroyed)
 
     mov   x19, x0
     mov   x20, x1

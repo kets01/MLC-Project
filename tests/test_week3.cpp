@@ -164,12 +164,11 @@ TEST_CASE("SVE Unary Kernels Verification", "[week3][unary]") {
     }
 
 
-    // The trans_b == 1 ReLU path had never been exercised: the "ReLU Test"
-    // above only ever passed trans_b = 0, so the kernel's transposing path
-    // kept the streaming-mode scatter store (unavailable without
-    // FEAT_SME_FA64) long after the identical defect was fixed in
-    // identity_16_16_asm.  A test that runs the path is what makes the fix
-    // stick — on CI this still skips (no SME), so it must be run on M4.
+    // The trans_b == 1 ReLU path had never been exercised: the ReLU test above
+    // only passed trans_b = 0, so the kernel kept the streaming-mode scatter
+    // store (unavailable without FEAT_SME_FA64) long after the identical
+    // defect was fixed in identity_16_16_asm.  Running the path is what makes
+    // the fix stick — CI still skips it (no SME), so it must be run on M4.
     SECTION("ReLU Transpose Test") {
         // Mixed signs, and asymmetric across the diagonal so a missing or
         // wrong transpose cannot pass by coincidence.

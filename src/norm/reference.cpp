@@ -3,11 +3,10 @@
 
 namespace mini_jit::norm {
 
-// LayerNorm: two-pass per row.
-// Pass 1: accumulate mean and variance (Welford-style for stability is not
-//         needed here — the two-pass structure itself avoids catastrophic
-//         cancellation because variance is computed from (x - mean)^2).
-// Pass 2: normalize, scale, shift.
+// LayerNorm, two-pass per row.  Variance comes from (x - mean)^2 rather than
+// E[x^2] - mean^2, which is what avoids catastrophic cancellation; double
+// accumulation throughout, because this is the oracle, not a performance
+// target.
 void layer_norm_ref(const float* a,
                     float*       b,
                     const float* gamma,
@@ -44,9 +43,7 @@ void layer_norm_ref(const float* a,
     }
 }
 
-// RMSNorm: single-pass per row.
-// No mean subtraction and no beta — only the RMS of x is used.
-// Uses double accumulation to keep the reference numerically honest.
+// RMSNorm, one reduction stage per row.  No mean subtraction and no beta.
 void rms_norm_ref(const float* a,
                   float*       b,
                   const float* gamma,

@@ -28,13 +28,13 @@ add_library(norm_lib
     smstart_probe.S             # Sprint 7b: streaming-transition cost probe
 )
 
-# layer_norm_ssve.S and rms_norm_ssve*.S carry a .arch armv9-a+sme directive
-# themselves, but CMake still needs COMPILE_FLAGS so the assembler driver
-# accepts the file.  norm_ssve.cpp gets the flag so the compiler resolves any
-# SME-related intrinsics it may transitively see.
-# We must NOT apply -march=armv9-a+sme to reference.cpp: the compiler would
-# auto-vectorize with SVE, but non-streaming SVE is unavailable on Apple
-# Silicon (M4 exposes SVE only inside a streaming region).
+# The .S files carry their own .arch directive, but CMake still needs
+# COMPILE_FLAGS so the assembler driver accepts them; norm_ssve.cpp gets the
+# flag so the compiler resolves any SME intrinsics it transitively sees.
+#
+# reference.cpp must NOT get it: the compiler would auto-vectorize with
+# non-streaming SVE, which Apple Silicon does not expose outside a streaming
+# region.
 set_source_files_properties(
     norm_ssve.cpp
     layer_norm_ssve.S
@@ -58,11 +58,9 @@ set_source_files_properties(
     PROPERTIES COMPILE_FLAGS "-march=armv9-a+sme"
 )
 
-# V7 uses SME2 multi-vector LD1W/ST1W, so it needs +sme2 to ASSEMBLE.  That is
-# a build-time capability of the assembler, independent of the build host — CI
-# (M1/M2, no SME at all) still compiles this file fine.  Whether the kernel
-# RUNS is a separate, runtime question, handled by the cpu_supports_sme2()
-# dispatch in norm_ssve.cpp.
+# The SME2 variants need +sme2 to ASSEMBLE — a build-time capability of the
+# assembler, independent of the build host, so CI (no SME at all) still
+# compiles them.  Whether they RUN is the runtime cpu_supports_sme2() check.
 set_source_files_properties(
     rms_norm_ssve_v7.S
     rms_norm_ssve_v7x2.S
@@ -84,8 +82,7 @@ target_link_libraries(norm_lib PRIVATE week6_lib)
 add_executable(test_norm ../../tests/test_norm.cpp)
 target_link_libraries(test_norm PRIVATE norm_lib week3_lib Catch2::Catch2WithMain)
 
-# main_norm also drives the Sprint-5 TEIR path (week7_lib) and sets the
-# OpenMP thread count for the row-parallel scaling study.
+# main_norm also drives the TEIR path and sets the OpenMP thread count.
 add_executable(main_norm ../../apps/main_norm.cpp)
 # week7_lib already carries norm_lib as a static-library link dependency;
 # listing norm_lib again here makes Apple's ld warn about a duplicate.

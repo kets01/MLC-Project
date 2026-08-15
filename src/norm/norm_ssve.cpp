@@ -58,15 +58,13 @@ namespace mini_jit::norm {
 
 namespace {
 
-// Sprint 8.  These wrappers used to `return;` when SME was absent, which meant
-// a caller on an M1/M2 got no computation, no status and no diagnostic — it
-// could not distinguish success from a no-op, and would then read whatever was
-// in the output buffer.  CLAUDE.md §4 requires the opposite: fail fast and
-// clearly at the boundary rather than produce silent wrong numbers.
+// These wrappers used to `return;` when SME was absent, so a caller got no
+// computation, no status and no diagnostic, then read whatever was in the
+// output buffer.  CLAUDE.md §4 requires the opposite: fail fast and clearly
+// at the boundary rather than produce silent wrong numbers.
 //
-// So an ISA-specific entry point now aborts with a message naming itself and
-// the missing feature, and callers who want a result on any CPU use the
-// layer_norm()/rms_norm() dispatchers below.
+// So an ISA-specific entry point aborts with a message naming itself and the
+// missing feature; callers wanting a result on any CPU use the dispatchers.
 [[noreturn]] void isa_precondition_failed(const char* fn, const char* feature) {
     std::fprintf(stderr,
         "\nFATAL: %s requires %s, which this CPU does not report.\n"
@@ -162,8 +160,8 @@ void layer_norm_ssve_welford(const float* a, float* b, const float* gamma, const
     ::layer_norm_ssve_welford(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
 }
 
-// V7 needs SME2; on an SME1-only machine fall back to V6, the variant it is
-// derived from, so the SME2 path stays a pure opt-in optimisation.
+// On an SME1-only machine V7 falls back to V6, the variant it is derived
+// from, so the SME2 path is a pure opt-in optimisation.
 void layer_norm_ssve_v7(const float* a, float* b, const float* gamma, const float* beta,
                         int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
     require_sme("layer_norm_ssve_v7");
@@ -232,11 +230,8 @@ void rms_norm_ssve_v6(const float* a, float* b, const float* gamma,
     ::rms_norm_ssve_v6(a, b, gamma, m, n, ld_a, ld_b, epsilon);
 }
 
-// V7 needs SME2 for its multi-vector loads/stores.  Where SME2 is absent but
-// SME is present (an SME1-only machine), fall back to V6 — the variant V7 is
-// derived from — so callers get a correct result everywhere and the SME2 path
-// is a pure opt-in optimisation (ROADMAP Sprint 6: "guard the SME2 path
-// behind a FEAT_SME2 runtime check so it degrades to the SME1 kernel").
+// V7 falls back to V6 on an SME1-only machine, so callers get a correct
+// result everywhere and the SME2 path stays a pure opt-in optimisation.
 void rms_norm_ssve_v7(const float* a, float* b, const float* gamma,
                       int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
     require_sme("rms_norm_ssve_v7");
@@ -278,10 +273,9 @@ void bw_probe_ssve(float* d, const float* s, int64_t n) {
     ::bw_probe_ssve(d, s, n);
 }
 
-// Sprint 7b.  The `empty` control is guarded too, even though a loop with no
-// streaming instruction would run fine without SME: the two paths must differ
-// in ONE thing (the transition), and a guard that applies to one but not the
-// other would reintroduce a difference into the control.
+// The `empty` control is guarded too, even though a transition-free loop would
+// run fine without SME: the two paths must differ in exactly one thing, and a
+// guard on only one of them would reintroduce a difference into the control.
 void smstart_probe_pairs(int64_t iters) {
     require_sme("smstart_probe_pairs");
     ::smstart_probe_pairs(iters);
@@ -297,9 +291,8 @@ void smstart_probe_empty(int64_t iters) {
     ::smstart_probe_empty(iters);
 }
 
-// Returns 0 rather than a guessed default when SME is absent: a caller that
-// silently got "16" on a machine with no SME would be reintroducing exactly
-// the hard-coded SVL decision D forbids.
+// Returns 0, not a guessed default: silently handing back 16 on a machine
+// without SME would reintroduce the hard-coded SVL decision D forbids.
 int64_t svl_fp32_lanes() {
     if (!cpu_supports_sme()) return 0;
     return ::svl_fp32_lanes();
