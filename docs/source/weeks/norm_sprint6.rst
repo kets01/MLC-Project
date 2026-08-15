@@ -194,6 +194,22 @@ Measured (order-alternating A/B, 24 samples each way, medians):
      - —
      - ≈0
 
+.. note::
+
+   **Two numbers for the same effect, reconciled (Sprint 10).** This table is a
+   dedicated A/B study — order-alternating, 24 samples each way — and gives
+   **+17.2 %** (20.96 → 24.56). The consolidated ablation measures the same
+   pair in a different run and gives **+21.5 %** (20.29 → 24.65). Both are
+   real; they differ because they are separate measurement sets, and the
+   V6 figure is the more run-sensitive of the two.
+
+   **The A/B study is authoritative for this claim**, because alternating the
+   order of the two variants within one run is what controls for drift between
+   them — which is exactly what a paired comparison needs and what the
+   consolidated table, measuring each rung once in sequence, does not do. The
+   report quotes **+17.2 %**; where the consolidated table's own numbers are
+   shown, the implied ratio is the larger one, and that is why.
+
 **The prediction was wrong**, and the interesting part is why. Two mechanisms
 could explain an RMSNorm win, and they make opposite predictions for LayerNorm:
 
