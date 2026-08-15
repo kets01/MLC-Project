@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="440" viewBox="0 0 780 440">
+<rect width="780" height="440" fill="white"/>
+<text x="78.0" y="26.0" font-family="Helvetica,Arial,sans-serif" font-size="16" text-anchor="start" fill="#222222" font-weight="bold">FP32 variance: relative error vs input shift</text>
+<text x="78.0" y="43.0" font-family="Helvetica,Arial,sans-serif" font-size="11.5" text-anchor="start" fill="#777777" font-weight="normal">N=512. Naive single-pass tracks kappa and fails catastrophically; two-pass is flat across 12 orders.</text>
+<line x1="78.0" y1="378.0" x2="754.0" y2="378.0" stroke="#333333" stroke-width="1.0"/>
+<line x1="78.0" y1="52.0" x2="78.0" y2="378.0" stroke="#333333" stroke-width="1.0"/>
+<text x="416.0" y="424.0" font-family="Helvetica,Arial,sans-serif" font-size="12.5" text-anchor="middle" fill="#222222" font-weight="normal">input shift (condition number kappa ~ 1 + shift²)</text>
+<text x="18" y="215.0" font-family="Helvetica,Arial,sans-serif" font-size="12.5" text-anchor="middle" fill="#222222" transform="rotate(-90 18 215.0)">log10 relative error vs float64 oracle</text>
+<line x1="78.0" y1="345.4" x2="754.0" y2="345.4" stroke="#d9d9d9" stroke-width="1.0"/>
+<text x="70.0" y="349.4" font-family="Helvetica,Arial,sans-serif" font-size="11.5" text-anchor="end" fill="#222222" font-weight="normal">1e-6</text>
+<line x1="78.0" y1="301.9" x2="754.0" y2="301.9" stroke="#d9d9d9" stroke-width="1.0"/>
+<text x="70.0" y="305.9" font-family="Helvetica,Arial,sans-serif" font-size="11.5" text-anchor="end" fill="#222222" font-weight="normal">1e-4</text>
+<line x1="78.0" y1="258.5" x2="754.0" y2="258.5" stroke="#d9d9d9" stroke-width="1.0"/>
+<text x="70.0" y="262.5" font-family="Helvetica,Arial,sans-serif" font-size="11.5" text-anchor="end" fill="#222222" font-weight="normal">1e-2</text>
+<line x1="78.0" y1="215.0" x2="754.0" y2="215.0" stroke="#d9d9d9" stroke-width="1.0"/>
+<text x="70.0" y="219.0" font-family="Helvetica,Arial,sans-serif" font-size="11.5" text-anchor="end" fill="#222222" font-weight="normal">1e0</text>
+<line x1="78.0" y1="171.5" x2="754.0" y2="171.5" stroke="#d9d9d9" stroke-width="1.0"/>
+<text x="70.0" y="175.5" font-family="Helvetica,Arial,sans-serif" font-size="11.5" text-anchor="end" fill="#222222" font-weight="normal">1e2</text>
+<line x1="78.0" y1="128.1" x2="754.0" y2="128.1" stroke="#d9d9d9" stroke-width="1.0"/>
+<text x="70.0" y="132.1" font-family="Helvetica,Arial,sans-serif" font-size="11.5" text-anchor="end" fill="#222222" font-weight="normal">1e4</text>
+<line x1="78.0" y1="84.6" x2="754.0" y2="84.6" stroke="#d9d9d9" stroke-width="1.0"/>
+<text x="70.0" y="88.6" font-family="Helvetica,Arial,sans-serif" font-size="11.5" text-anchor="end" fill="#222222" font-weight="normal">1e6</text>
+<line x1="78.0" y1="378.0" x2="78.0" y2="383.0" stroke="#333333" stroke-width="1.0"/>
+<text x="78.0" y="396.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#222222" font-weight="normal">0</text>
+<line x1="190.7" y1="378.0" x2="190.7" y2="383.0" stroke="#333333" stroke-width="1.0"/>
+<text x="190.7" y="396.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#222222" font-weight="normal">1e1</text>
+<line x1="303.3" y1="378.0" x2="303.3" y2="383.0" stroke="#333333" stroke-width="1.0"/>
+<text x="303.3" y="396.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#222222" font-weight="normal">1e2</text>
+<line x1="416.0" y1="378.0" x2="416.0" y2="383.0" stroke="#333333" stroke-width="1.0"/>
+<text x="416.0" y="396.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#222222" font-weight="normal">1e3</text>
+<line x1="528.7" y1="378.0" x2="528.7" y2="383.0" stroke="#333333" stroke-width="1.0"/>
+<text x="528.7" y="396.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#222222" font-weight="normal">1e4</text>
+<line x1="641.3" y1="378.0" x2="641.3" y2="383.0" stroke="#333333" stroke-width="1.0"/>
+<text x="641.3" y="396.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#222222" font-weight="normal">1e5</text>
+<line x1="754.0" y1="378.0" x2="754.0" y2="383.0" stroke="#333333" stroke-width="1.0"/>
+<text x="754.0" y="396.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#222222" font-weight="normal">1e6</text>
+<polyline points="78.0,351.8 190.7,298.8 303.3,260.0 416.0,212.9 528.7,167.2 641.3,127.9 754.0,66.5" fill="none" stroke="#d62728" stroke-width="2.2" stroke-linejoin="round"/>
+<circle cx="78.0" cy="351.8" r="3.4" fill="#d62728"/>
+<circle cx="190.7" cy="298.8" r="3.4" fill="#d62728"/>
+<circle cx="303.3" cy="260.0" r="3.4" fill="#d62728"/>
+<circle cx="416.0" cy="212.9" r="3.4" fill="#d62728"/>
+<circle cx="528.7" cy="167.2" r="3.4" fill="#d62728"/>
+<circle cx="641.3" cy="127.9" r="3.4" fill="#d62728"/>
+<circle cx="754.0" cy="66.5" r="3.4" fill="#d62728"/>
+<polyline points="78.0,360.3 190.7,360.7 303.3,353.7 416.0,330.7 528.7,307.7 641.3,303.0 754.0,262.2" fill="none" stroke="#ff7f0e" stroke-width="2.2" stroke-linejoin="round"/>
+<circle cx="78.0" cy="360.3" r="3.4" fill="#ff7f0e"/>
+<circle cx="190.7" cy="360.7" r="3.4" fill="#ff7f0e"/>
+<circle cx="303.3" cy="353.7" r="3.4" fill="#ff7f0e"/>
+<circle cx="416.0" cy="330.7" r="3.4" fill="#ff7f0e"/>
+<circle cx="528.7" cy="307.7" r="3.4" fill="#ff7f0e"/>
+<circle cx="641.3" cy="303.0" r="3.4" fill="#ff7f0e"/>
+<circle cx="754.0" cy="262.2" r="3.4" fill="#ff7f0e"/>
+<polyline points="78.0,354.3 190.7,354.1 303.3,365.6 416.0,354.7 528.7,313.9 641.3,363.2 754.0,348.2" fill="none" stroke="#1f77b4" stroke-width="2.2" stroke-linejoin="round"/>
+<circle cx="78.0" cy="354.3" r="3.4" fill="#1f77b4"/>
+<circle cx="190.7" cy="354.1" r="3.4" fill="#1f77b4"/>
+<circle cx="303.3" cy="365.6" r="3.4" fill="#1f77b4"/>
+<circle cx="416.0" cy="354.7" r="3.4" fill="#1f77b4"/>
+<circle cx="528.7" cy="313.9" r="3.4" fill="#1f77b4"/>
+<circle cx="641.3" cy="363.2" r="3.4" fill="#1f77b4"/>
+<circle cx="754.0" cy="348.2" r="3.4" fill="#1f77b4"/>
+<line x1="641.3" y1="52.0" x2="641.3" y2="378.0" stroke="#b03060" stroke-width="1.3" stroke-dasharray="5,4"/>
+<text x="633.3" y="74.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="end" fill="#b03060" font-weight="bold">naive returns NEGATIVE variance</text>
+<text x="633.3" y="88.0" font-family="Helvetica,Arial,sans-serif" font-size="11" text-anchor="end" fill="#b03060" font-weight="normal">→ sqrt = NaN, not just inaccurate</text>
+<rect x="90.0" y="51.0" width="22.0" height="4.0" fill="#d62728" opacity="1.0"/>
+<text x="120.0" y="56.0" font-family="Helvetica,Arial,sans-serif" font-size="12" text-anchor="start" fill="#222222" font-weight="normal">naive E[x²]−mean² (1 pass)</text>
+<rect x="90.0" y="69.0" width="22.0" height="4.0" fill="#ff7f0e" opacity="1.0"/>
+<text x="120.0" y="74.0" font-family="Helvetica,Arial,sans-serif" font-size="12" text-anchor="start" fill="#222222" font-weight="normal">Welford (1 pass)</text>
+<rect x="90.0" y="87.0" width="22.0" height="4.0" fill="#1f77b4" opacity="1.0"/>
+<text x="120.0" y="92.0" font-family="Helvetica,Arial,sans-serif" font-size="12" text-anchor="start" fill="#222222" font-weight="normal">centred two-pass (ours)</text>
+</svg>
