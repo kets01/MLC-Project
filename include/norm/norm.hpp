@@ -52,8 +52,9 @@ const char* norm_dispatch_target();
 //
 // PRECONDITION: cpu_supports_sme(), and cpu_supports_sme2() for the SME2
 // variants.  Calling one without the required feature prints a diagnostic
-// naming the function and aborts — it never returns an uncomputed buffer.
-// Guard with cpu_supports_sme(), or call the dispatchers above.
+// naming the function and aborts — it never returns an uncomputed buffer, and
+// never quietly substitutes a different variant.  Guard the call, or use the
+// dispatchers above, which are the layer allowed to fall back.
 // ===========================================================================
 
 // LayerNorm: y = gamma * (x - mean(x)) / sqrt(var(x) + eps) + beta
@@ -165,8 +166,9 @@ void layer_norm_ssve_welford(const float* a,
                              float        epsilon);
 
 // V7: V6 with SME2 multi-vector loads/stores.  Same traffic and same summation
-// order as V6, so it must be bit-identical to it.  Requires FEAT_SME2; the
-// wrapper falls back to V6 when absent.
+// order as V6, so it must be bit-identical to it.
+// PRECONDITION: cpu_supports_sme2(); aborts otherwise, it does NOT fall back
+// to V6 — a benchmark labelled V7 must never silently measure V6.
 void layer_norm_ssve_v7(const float* a,
                         float*       b,
                         const float* gamma,
@@ -179,7 +181,7 @@ void layer_norm_ssve_v7(const float* a,
 
 // ZA residency rebuilt on SME2 multi-vector MOVA.  LayerNorm stages 3 MOVAs
 // per element to RMSNorm's 2, so it has proportionally more to gain from the
-// 4:1 fold.  Requires FEAT_SME2; falls back to V6.
+// 4:1 fold.  PRECONDITION: cpu_supports_sme2(); aborts otherwise.
 void layer_norm_za_sme2(const float* a,
                         float*       b,
                         const float* gamma,
@@ -280,7 +282,8 @@ void rms_norm_ssve_v6(const float* a,
 
 // V7: V6 with SME2 multi-vector loads/stores — same traffic and arithmetic,
 // fewer instructions, so a single-variable test of whether V6 is issue-bound
-// or memory-bound.  Requires FEAT_SME2; the wrapper falls back to V6.
+// or memory-bound.
+// PRECONDITION: cpu_supports_sme2(); aborts otherwise, it does NOT fall back.
 void rms_norm_ssve_v7(const float* a,
                       float*       b,
                       const float* gamma,
@@ -292,7 +295,7 @@ void rms_norm_ssve_v7(const float* a,
 
 // V7x2: the 2-vector CONTROL for V7 — identical work and identical 256 B per
 // column, issued as two 2-vector accesses.  Measurement variant; not emitted
-// by the JIT.
+// by the JIT.  PRECONDITION: cpu_supports_sme2(); aborts otherwise.
 void rms_norm_ssve_v7x2(const float* a,
                         float*       b,
                         const float* gamma,
@@ -303,7 +306,7 @@ void rms_norm_ssve_v7x2(const float* a,
                         float        epsilon);
 
 // ZA residency on SME2 multi-vector MOVA: four columns staged per MOVA instead
-// of one.  Requires FEAT_SME2; falls back to V6.
+// of one.  PRECONDITION: cpu_supports_sme2(); aborts otherwise.
 void rms_norm_za_sme2(const float* a,
                       float*       b,
                       const float* gamma,

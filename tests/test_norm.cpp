@@ -718,7 +718,7 @@ TEST_CASE("LayerNorm SSVE V6: large-magnitude stress input", "[norm][sprint2c][s
 
 TEST_CASE("LayerNorm SSVE V7 (SME2): group, group+tail, tail-only",
           "[norm][sprint6][sme2][v7]") {
-    if (!cpu_supports_sme()) SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required");
     check_ln_variant(layer_norm_ssve_v7, 64,  32,  64,  64, 1e-5f);   // one full group
     check_ln_variant(layer_norm_ssve_v7, 100, 50, 100, 100, 1e-5f);   // group + tail
     check_ln_variant(layer_norm_ssve_v7, 8,   37,   8,   8, 1e-5f);   // tail only
@@ -728,14 +728,14 @@ TEST_CASE("LayerNorm SSVE V7 (SME2): group, group+tail, tail-only",
 
 TEST_CASE("LayerNorm SSVE V7 (SME2): large-magnitude stress input",
           "[norm][sprint6][sme2][v7][stress]") {
-    if (!cpu_supports_sme()) SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required");
     check_ln_variant_stress(layer_norm_ssve_v7);
 }
 
 TEST_CASE("LayerNorm SSVE V7 (SME2): bit-identical to V6",
           "[norm][sprint6][sme2][v7]") {
     if (!cpu_supports_sme())  SKIP("SME required");
-    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required (V7 falls back to V6)");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required");
 
     for (auto shape : { std::pair<int64_t,int64_t>{64, 32},
                         std::pair<int64_t,int64_t>{100, 50},
@@ -1094,33 +1094,33 @@ TEST_CASE("RMSNorm SSVE V6: large-magnitude stress input", "[norm][sprint2][abla
 
 TEST_CASE("RMSNorm SSVE V7 (SME2): exactly one full group (M=4*VL)",
           "[norm][sprint6][sme2][v7]") {
-    if (!cpu_supports_sme()) SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required");
     check_variant(rms_norm_ssve_v7, 64, 32, 64, 64, 1e-5f);
 }
 
 TEST_CASE("RMSNorm SSVE V7 (SME2): group + full tail blocks + partial (M=100)",
           "[norm][sprint6][sme2][v7]") {
-    if (!cpu_supports_sme()) SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required");
     check_variant(rms_norm_ssve_v7, 100, 50, 100, 100, 1e-5f);
 }
 
 TEST_CASE("RMSNorm SSVE V7 (SME2): tail-only path (M < 4*VL, no multi-vector)",
           "[norm][sprint6][sme2][v7]") {
-    if (!cpu_supports_sme()) SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required");
     check_variant(rms_norm_ssve_v7, 8, 50, 8, 8, 1e-5f);
     check_variant(rms_norm_ssve_v7, 40, 37, 48, 40, 1e-5f);
 }
 
 TEST_CASE("RMSNorm SSVE V7 (SME2): multiple groups, mismatched ld, N=1",
           "[norm][sprint6][sme2][v7]") {
-    if (!cpu_supports_sme()) SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required");
     check_variant(rms_norm_ssve_v7, 192, 37, 200, 224, 1e-5f);
     check_variant(rms_norm_ssve_v7, 128,  1, 128, 128, 1e-5f);
 }
 
 TEST_CASE("RMSNorm SSVE V7 (SME2): large-magnitude stress input",
           "[norm][sprint6][sme2][v7][stress]") {
-    if (!cpu_supports_sme()) SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required");
     check_variant_stress(rms_norm_ssve_v7);
 }
 
@@ -1141,7 +1141,7 @@ TEST_CASE("RMSNorm SSVE V7 (SME2): large-magnitude stress input",
 // ---------------------------------------------------------------------------
 TEST_CASE("RMSNorm ZA-SME2: residency window, N%4 padding, tails, fallback",
           "[norm][sprint6][sme2][za]") {
-    if (!cpu_supports_sme()) SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required");
     // Small N uses the documented FRSQRTE+NR tolerance, not the strict kTol.
     // Measured worst deviation at these shapes is 1.1e-5 relative — the
     // accuracy one Newton-Raphson step actually delivers when few columns
@@ -1163,7 +1163,7 @@ TEST_CASE("RMSNorm ZA-SME2: residency window, N%4 padding, tails, fallback",
 
 TEST_CASE("LayerNorm ZA-SME2: residency window, N%4 padding, tails, fallback",
           "[norm][sprint6][sme2][za]") {
-    if (!cpu_supports_sme()) SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required");
     // Same boundary set as the RMSNorm ZA-SME2 case: N > SVL pins the
     // vector-group cursor stepping by ONE, N%4 pins the zero-padded final
     // chunk, plus row tails, mismatched lds and the N > 4*SVL fallback.
@@ -1180,13 +1180,13 @@ TEST_CASE("LayerNorm ZA-SME2: residency window, N%4 padding, tails, fallback",
 
 TEST_CASE("LayerNorm ZA-SME2: large-magnitude stress input",
           "[norm][sprint6][sme2][za][stress]") {
-    if (!cpu_supports_sme()) SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required");
     check_ln_variant_stress(layer_norm_za_sme2);
 }
 
 TEST_CASE("RMSNorm ZA-SME2: large-magnitude stress input",
           "[norm][sprint6][sme2][za][stress]") {
-    if (!cpu_supports_sme()) SKIP("SME required");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required");
     check_variant_stress(rms_norm_za_sme2);
 }
 
@@ -1198,7 +1198,7 @@ TEST_CASE("RMSNorm ZA-SME2: large-magnitude stress input",
 TEST_CASE("RMSNorm SSVE V7x2 (SME2 control): bit-identical to V6",
           "[norm][sprint6][sme2][v7x2]") {
     if (!cpu_supports_sme())  SKIP("SME required");
-    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required (V7x2 falls back to V6)");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required");
     for (auto shape : { std::pair<int64_t,int64_t>{64, 32},
                         std::pair<int64_t,int64_t>{100, 50},
                         std::pair<int64_t,int64_t>{192, 37},
@@ -1222,7 +1222,7 @@ TEST_CASE("RMSNorm SSVE V7x2 (SME2 control): bit-identical to V6",
 TEST_CASE("RMSNorm SSVE V7 (SME2): bit-identical to V6",
           "[norm][sprint6][sme2][v7]") {
     if (!cpu_supports_sme())  SKIP("SME required");
-    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required (V7 falls back to V6)");
+    if (!cpu_supports_sme2()) SKIP("FEAT_SME2 required");
 
     for (auto shape : { std::pair<int64_t,int64_t>{64, 32},
                         std::pair<int64_t,int64_t>{100, 50},
@@ -1425,7 +1425,7 @@ TEST_CASE("RMSNorm SSVE kernels: all-zero row is finite (eps regression)",
     check(rms_norm_ssve_v4, "rms_norm_ssve_v4");
     check(rms_norm_ssve_v5, "rms_norm_ssve_v5");
     check(rms_norm_ssve_v6, "rms_norm_ssve_v6");
-    check(rms_norm_ssve_v7, "rms_norm_ssve_v7");
+    if (cpu_supports_sme2()) check(rms_norm_ssve_v7, "rms_norm_ssve_v7");
     check(rms_norm_za,      "rms_norm_za");
 }
 
@@ -1451,7 +1451,7 @@ TEST_CASE("LayerNorm SSVE kernels: all-constant row is finite (eps regression)",
     check(layer_norm_ssve_v4,       "layer_norm_ssve_v4");
     check(layer_norm_ssve_v5,       "layer_norm_ssve_v5");
     check(layer_norm_ssve_v6,       "layer_norm_ssve_v6");
-    check(layer_norm_ssve_v7,       "layer_norm_ssve_v7");
+    if (cpu_supports_sme2()) check(layer_norm_ssve_v7, "layer_norm_ssve_v7");
     check(layer_norm_ssve_welford,  "layer_norm_ssve_welford");
 }
 
@@ -1786,7 +1786,8 @@ TEST_CASE("Sprint6 AAPCS64: every RMSNorm kernel preserves d9-d15",
     // extern "C" rms_norm_ssve_v6, so the bare name is ambiguous here.
     // The namespaced wrapper is what real callers (TEIR, the bench) use.
     check(mini_jit::norm::rms_norm_ssve_v6);
-    check(mini_jit::norm::rms_norm_ssve_v7);   // qualified — raw extern "C" twin exists
+    if (cpu_supports_sme2())
+        check(mini_jit::norm::rms_norm_ssve_v7);   // qualified — extern "C" twin exists
     check(rms_norm_za);
 
     // The roofline probe is not a norm kernel, but every "% of peak" in the
@@ -1816,7 +1817,8 @@ TEST_CASE("Sprint6 AAPCS64: every LayerNorm kernel preserves d9-d15",
     check(layer_norm_ssve_v4);
     check(layer_norm_ssve_v5);
     check(mini_jit::norm::layer_norm_ssve_v6);   // qualified — see RMSNorm note
-    check(mini_jit::norm::layer_norm_ssve_v7); // qualified — raw extern "C" twin exists
+    if (cpu_supports_sme2())
+        check(mini_jit::norm::layer_norm_ssve_v7); // qualified — extern "C" twin exists
     check(layer_norm_ssve_welford);
     check(layer_norm_za);
 }

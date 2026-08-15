@@ -82,6 +82,16 @@ inline void require_sme(const char* fn) {
     if (!cpu_supports_sme()) isa_precondition_failed(fn, "FEAT_SME");
 }
 
+// The SME2-specific variants require SME2 and do NOT fall back.  A silent
+// fallback would let someone benchmark "V7" on an SME1 machine and actually
+// measure V6, which makes an experimental label untrustworthy.  Callers who
+// want a result on any CPU use the layer_norm()/rms_norm() dispatchers, whose
+// job is exactly that.
+inline void require_sme2(const char* fn) {
+    require_sme(fn);
+    if (!cpu_supports_sme2()) isa_precondition_failed(fn, "FEAT_SME2");
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -160,25 +170,15 @@ void layer_norm_ssve_welford(const float* a, float* b, const float* gamma, const
     ::layer_norm_ssve_welford(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
 }
 
-// On an SME1-only machine V7 falls back to V6, the variant it is derived
-// from, so the SME2 path is a pure opt-in optimisation.
 void layer_norm_ssve_v7(const float* a, float* b, const float* gamma, const float* beta,
                         int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    require_sme("layer_norm_ssve_v7");
-    if (!cpu_supports_sme2()) {
-        ::layer_norm_ssve_v6(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
-        return;
-    }
+    require_sme2("layer_norm_ssve_v7");
     ::layer_norm_ssve_v7(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
 }
 
 void layer_norm_za_sme2(const float* a, float* b, const float* gamma, const float* beta,
                         int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    require_sme("layer_norm_za_sme2");
-    if (!cpu_supports_sme2()) {
-        ::layer_norm_ssve_v6(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
-        return;
-    }
+    require_sme2("layer_norm_za_sme2");
     ::layer_norm_za_sme2(a, b, gamma, beta, m, n, ld_a, ld_b, epsilon);
 }
 
@@ -230,35 +230,21 @@ void rms_norm_ssve_v6(const float* a, float* b, const float* gamma,
     ::rms_norm_ssve_v6(a, b, gamma, m, n, ld_a, ld_b, epsilon);
 }
 
-// V7 falls back to V6 on an SME1-only machine, so callers get a correct
-// result everywhere and the SME2 path stays a pure opt-in optimisation.
 void rms_norm_ssve_v7(const float* a, float* b, const float* gamma,
                       int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    require_sme("rms_norm_ssve_v7");
-    if (!cpu_supports_sme2()) {
-        ::rms_norm_ssve_v6(a, b, gamma, m, n, ld_a, ld_b, epsilon);
-        return;
-    }
+    require_sme2("rms_norm_ssve_v7");
     ::rms_norm_ssve_v7(a, b, gamma, m, n, ld_a, ld_b, epsilon);
 }
 
 void rms_norm_ssve_v7x2(const float* a, float* b, const float* gamma,
                         int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    require_sme("rms_norm_ssve_v7x2");
-    if (!cpu_supports_sme2()) {
-        ::rms_norm_ssve_v6(a, b, gamma, m, n, ld_a, ld_b, epsilon);
-        return;
-    }
+    require_sme2("rms_norm_ssve_v7x2");
     ::rms_norm_ssve_v7x2(a, b, gamma, m, n, ld_a, ld_b, epsilon);
 }
 
 void rms_norm_za_sme2(const float* a, float* b, const float* gamma,
                       int64_t m, int64_t n, int64_t ld_a, int64_t ld_b, float epsilon) {
-    require_sme("rms_norm_za_sme2");
-    if (!cpu_supports_sme2()) {
-        ::rms_norm_ssve_v6(a, b, gamma, m, n, ld_a, ld_b, epsilon);
-        return;
-    }
+    require_sme2("rms_norm_za_sme2");
     ::rms_norm_za_sme2(a, b, gamma, m, n, ld_a, ld_b, epsilon);
 }
 

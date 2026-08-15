@@ -640,6 +640,12 @@ static void sprint7_streaming_overhead_section() {
         return;
     }
 
+    // The named V7 entry point requires FEAT_SME2 and does not fall back, so
+    // the per-call and crossover measurements name the variant they ran.
+    const bool  have_sme2 = cpu_supports_sme2();
+    const auto  best_rms  = have_sme2 ? rms_norm_ssve_v7 : rms_norm_ssve_v6;
+    const char* best_name = have_sme2 ? "V7" : "V6";
+
     std::cout << "\n" << std::string(96, '=') << "\n"
               << "SPRINT 7b - STREAMING-MODE OVERHEAD: what the transition actually costs\n"
               << std::string(96, '=') << "\n";
@@ -700,12 +706,13 @@ static void sprint7_streaming_overhead_section() {
     std::vector<float> a1(1, 1.0f), b1(1, 0.0f), g1(1, 1.0f);
     volatile double t_floor_batch = bench([&] {
         for (int64_t i = 0; i < CALLS; ++i)
-            rms_norm_ssve_v7(a1.data(), b1.data(), g1.data(), 1, 1, 1, 1, 1e-5f);
+            best_rms(a1.data(), b1.data(), g1.data(), 1, 1, 1, 1, 1e-5f);
     }, 20);
     const double floor_ns =
         static_cast<double>(t_floor_batch) * 1e9 / static_cast<double>(CALLS);
 
-    std::cout << "\nThe per-call floor (RMSNorm V7 at its smallest possible call, M=1, N=1):\n\n"
+    std::cout << "\nThe per-call floor (RMSNorm " << best_name
+              << " at its smallest possible call, M=1, N=1):\n\n"
               << "  measured floor                     : " << std::fixed << std::setprecision(1)
               << std::setw(8) << floor_ns << " ns/call\n"
               << "  of which the streaming transition  : " << std::setw(8)
@@ -752,7 +759,7 @@ static void sprint7_streaming_overhead_section() {
               << "(RMSNorm, N=512 — a realistic transformer feature dimension — sweeping rows)\n\n"
               << std::left << std::setw(10) << "  M rows"
               << std::right << std::setw(14) << "scalar us"
-              << std::setw(14) << "V7 us"
+              << std::setw(14) << (std::string(best_name) + " us")
               << std::setw(12) << "speedup"
               << std::setw(16) << "groups touched" << "\n";
 
@@ -769,7 +776,7 @@ static void sprint7_streaming_overhead_section() {
             rms_norm_ref(a.data(), b.data(), g.data(), m, Nf, ldm, ldm, 1e-5f);
         }, 2000);
         volatile double s_sme = bench([&] {
-            rms_norm_ssve_v7(a.data(), b.data(), g.data(), m, Nf, ldm, ldm, 1e-5f);
+            best_rms(a.data(), b.data(), g.data(), m, Nf, ldm, ldm, 1e-5f);
         }, 2000);
 
         // V6/V7 process a GROUP of 4 VL-row blocks at a time; on this machine
@@ -1429,7 +1436,9 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
         rms_row({"V4", "+ 4 accumulator chains (ILP)"},           rms_norm_ssve_v4);
         rms_row({"V5", "+ software-pipelined loads"},             rms_norm_ssve_v5);
         rms_row({"V6 (incumbent)", "4-row-block contiguity"},     rms_norm_ssve_v6);
-        rms_row({"V7 (SME2)", "4-vector LD1W/ST1W, same traffic"}, rms_norm_ssve_v7);
+        if (cpu_supports_sme2())
+            rms_row({"V7 (SME2)", "4-vector LD1W/ST1W, same traffic"},
+                    rms_norm_ssve_v7);
         rms_row({"ZA residency", "ZA staging, 1R+1W"},            rms_norm_za);
         rms_row({"JIT (auto ISA)", "emitted: V7 on SME2, else V6"},  krms);
 
@@ -1473,7 +1482,9 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
         ln_row({"V4", "+ 4 accumulator chains (ILP)"},            layer_norm_ssve_v4);
         ln_row({"V5", "+ software-pipelined loads"},              layer_norm_ssve_v5);
         ln_row({"V6 (incumbent)", "4-row-block contiguity"},      layer_norm_ssve_v6);
-        ln_row({"V7 (SME2)", "4-vector LD1W/ST1W, same traffic"}, layer_norm_ssve_v7);
+        if (cpu_supports_sme2())
+            ln_row({"V7 (SME2)", "4-vector LD1W/ST1W, same traffic"},
+                   layer_norm_ssve_v7);
         ln_row({"Welford", "online single-pass, 2R+1W"},          layer_norm_ssve_welford);
         ln_row({"ZA residency", "ZA staging, 1R+1W"},             layer_norm_za);
         ln_row({"JIT (auto ISA)", "emitted: V7 on SME2, else V6"},   kln);
@@ -1623,11 +1634,12 @@ static void openmp_scaling_section(double peak_ssve, double peak_chip) {
     // ---- RMSNorm variants ------------------------------------------------
     rms_norm_ref(a.data(), expect.data(), gamma.data(), M, N, ld, ld, 1e-5f);
     struct RmsV { const char* name; KernelFnBench fn; };
-    const RmsV rms_variants[] = {
+    std::vector<RmsV> rms_variants = {
         { "RMSNorm V0 (baseline)", rms_norm_ssve    },
         { "RMSNorm V6 (SME1)",     rms_norm_ssve_v6 },
-        { "RMSNorm V7 (SME2)",     rms_norm_ssve_v7 },
     };
+    if (cpu_supports_sme2())
+        rms_variants.push_back({ "RMSNorm V7 (SME2)", rms_norm_ssve_v7 });
     for (const auto& v : rms_variants) {
         header(v.name, 1.5);
         double base = 0.0;
@@ -1646,7 +1658,11 @@ static void openmp_scaling_section(double peak_ssve, double peak_chip) {
     // ---- The alignment cliff, isolated -----------------------------------
     // Same kernel, same threads, same data — only the chunk boundaries move.
     // This is the evidence for the group-aligned distribution above.
-    std::cout << "Work-distribution alignment (RMSNorm V7, identical work, only chunking differs)\n"
+    const bool  omp_sme2  = cpu_supports_sme2();
+    const auto  align_k   = omp_sme2 ? rms_norm_ssve_v7 : rms_norm_ssve_v6;
+    std::cout << "Work-distribution alignment (RMSNorm "
+              << (omp_sme2 ? "V7" : "V6")
+              << ", identical work, only chunking differs)\n"
               << std::left  << std::setw(9)  << "threads"
               << std::right << std::setw(12) << "naive"
               << std::setw(12) << "aligned"
@@ -1655,8 +1671,8 @@ static void openmp_scaling_section(double peak_ssve, double peak_chip) {
               << std::string(62, '-') << "\n";
     for (int t : threads) {
         std::fill(b.begin(), b.end(), -1.0f);
-        double sec_n = bench([&] { run_rms(rms_norm_ssve_v7, t, false); }, reps);
-        double sec_a = bench([&] { run_rms(rms_norm_ssve_v7, t, true ); }, reps);
+        double sec_n = bench([&] { run_rms(align_k, t, false); }, reps);
+        double sec_a = bench([&] { run_rms(align_k, t, true ); }, reps);
         double gn = to_gibs(bytes, sec_n), ga = to_gibs(bytes, sec_a);
         std::cout << std::left  << std::setw(9) << t
                   << std::right << std::fixed << std::setprecision(2)
@@ -1670,11 +1686,12 @@ static void openmp_scaling_section(double peak_ssve, double peak_chip) {
     layer_norm_ref(a.data(), expect.data(), gamma.data(), beta.data(),
                    M, N, ld, ld, 1e-5f);
     struct LnV { const char* name; LNKernelFnBench fn; };
-    const LnV ln_variants[] = {
+    std::vector<LnV> ln_variants = {
         { "LayerNorm V0 (baseline)", layer_norm_ssve    },
         { "LayerNorm V6 (SME1)",     layer_norm_ssve_v6 },
-        { "LayerNorm V7 (SME2)",     layer_norm_ssve_v7 },
     };
+    if (cpu_supports_sme2())
+        ln_variants.push_back({ "LayerNorm V7 (SME2)", layer_norm_ssve_v7 });
     for (const auto& v : ln_variants) {
         header(v.name, 2.0);
         double base = 0.0;
