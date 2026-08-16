@@ -6,15 +6,18 @@ Research question
 -----------------
 
 Transformer normalization runs in every block, twice per layer, and touches
-every element of the activation tensor while doing very little arithmetic per
-element. It is therefore a **data-movement problem**. The question this project
-asks is:
+every element of the activation tensor while performing very little arithmetic
+per element. It is therefore a **data-movement problem**. The question this
+project asks is:
 
    *How close to the machine's achievable memory bandwidth can hand-written and
    JIT-generated SME/SSVE kernels bring LayerNorm and RMSNorm on Apple silicon,
-   and what actually limits them?*
+   and what limits them?*
 
-
+The second half of that question proved the more informative one. A GiB/s
+figure is meaningful only against a correctly chosen ceiling, and much of what
+this project learned came from discovering that its own ceiling, along with
+several of its own claims, was wrong.
 
 System and hardware
 -------------------
@@ -32,10 +35,10 @@ tensor-expression runtime. The norms are the *new primitive* added on top.
 Algorithmic choices
 -------------------
 
-The two norms differ in **reduction structure**, and the project treats that as
-a deliberate ablation axis. The distinction that matters for
-performance is *reduction stages* versus *input traversals* — the common
-shorthand "two-pass / single-pass" conflates them:
+The two norms differ in **reduction structure**, and the project treats that
+difference as a deliberate ablation axis rather than a configuration flag. The
+distinction that matters for performance is *reduction stages* versus *input
+traversals*; the common shorthand "two-pass / single-pass" conflates the two.
 
 .. figure:: ../_static/figures/traversals.svg
    :width: 100%
@@ -43,17 +46,20 @@ shorthand "two-pass / single-pass" conflates them:
    LayerNorm needs two reduction stages, hence three traversals of the input;
    RMSNorm needs one, hence two. The 1.33× traffic ratio is structural.
 
-* **LayerNorm** — :math:`y = \gamma(x-\mu)/\sqrt{\sigma^2+\varepsilon} + \beta`.
-  Two reduction stages (mean, then variance from **centred** values) plus output
-  generation → **three traversals**, 3R+1W.
-* **RMSNorm** — :math:`y = \gamma x/\sqrt{\mathrm{mean}(x^2)+\varepsilon}`.
-  One reduction stage plus output → **two traversals**, 2R+1W.
+* **LayerNorm** (:math:`y = \gamma(x-\mu)/\sqrt{\sigma^2+\varepsilon} + \beta`):
+  two reduction stages (mean, then variance from **centred** values) plus output
+  generation, giving **three traversals**, 3R+1W.
+* **RMSNorm** (:math:`y = \gamma x/\sqrt{\mathrm{mean}(x^2)+\varepsilon}`):
+  one reduction stage plus output generation, giving **two traversals**, 2R+1W.
 
-Three claims are kept separate throughout, because they are separate:
-**semantics** (RMSNorm omits mean-centering, hence one fewer traversal);
-**literature** (Zhang & Sennrich report comparable task performance with runtime
-reductions of roughly 7–64 % across their experiments); and **our measurement**
-(1.8–2.3× on the shapes evaluated here).
+Three claims are kept separate throughout, because they are separate.
+**Semantics:** RMSNorm omits mean-centering, hence one fewer traversal.
+**Literature:** Zhang & Sennrich report comparable task performance with runtime
+reductions of roughly 7–64 % across their experiments. **Our measurement:**
+1.8–2.3× on the shapes evaluated here. Kernel numerical agreement is *not* model
+accuracy: our tests show that our RMSNorm matches an *RMSNorm reference*, which
+says nothing about whether substituting one norm for the other preserves
+accuracy in a network.
 
 Performance methodology
 -----------------------
@@ -72,10 +78,11 @@ configurations timed and the set verified cannot drift apart.
 
 **2. Bytes are counted one way, and moved bytes differ per norm.** All GiB/s
 figures count **useful bytes** = 1 read + 1 write per element. Moved bytes are
-1.5× that for RMSNorm and 2.0× for LayerNorm — the two must not be conflated,
-which an earlier version of the benchmark header did.
+1.5× that for RMSNorm and 2.0× for LayerNorm. The two must not be conflated, as
+an earlier version of the benchmark header did.
 
-**3. The ceiling is a curve, not a constant.** 
+**3. The ceiling is a curve, not a constant.** This is the project's largest
+correction, and it invalidated percentages across five report sections.
 
 .. figure:: ../_static/figures/ceiling_curve.svg
    :width: 100%
@@ -85,10 +92,11 @@ which an earlier version of the benchmark header did.
    (58.8 GiB/s in this run), including for cache-resident shapes whose real
    ceiling is ~116 GiB/s.
 
-Consequences worth stating explicitly:
+Three consequences are worth stating explicitly.
 
 * A cache-resident kernel divided by the DRAM ceiling is credited for a
-  constraint it never met. 
+  constraint it never met. The most-quoted number in earlier drafts, RMSNorm V6
+  at "~95 % of the moved-bytes roofline", is really **~50 %**.
 * Streaming mode costs ~25 % against NEON at DRAM, so "streaming is a
   structural handicap" is a DRAM-regime statement. In the cache-resident range
   the two modes are comparable, but the ratio is not stable between runs (0.93×
@@ -109,7 +117,7 @@ on the same harness.
 
    The ablation in the true-DRAM regime, where the levers separate most clearly.
 
-What each lever bought, and — as importantly — what it did not:
+What each lever bought, and equally importantly what it did not:
 
 .. list-table::
    :header-rows: 1
@@ -120,16 +128,14 @@ What each lever bought, and — as importantly — what it did not:
    * - V1 arithmetic (``FRSQRTE`` + NR)
      - ≈0. Reciprocal-sqrt latency is off the critical path.
    * - V2 hoisted ``1/N``
-     - ≈0 on RMSNorm, **+9–12 % on LayerNorm** — the one verdict that does not
-       transfer, because LayerNorm has two per-block divisions at serialization
-       points.
+     - ≈0 on RMSNorm, **+9–12 % on LayerNorm**. This is the one verdict that
+       does not transfer, because LayerNorm has two per-block divisions at
+       serialization points.
    * - V3 unrolling
      - ≈0. The out-of-order core already overlaps sequential loads.
    * - V4 accumulator ILP
-     - **+27–33 %**. The single dependency chain *was* the bottleneck — which
+     - **+27–33 %**. The single dependency chain *was* the bottleneck, which
        also explains why V3 alone did nothing.
-   * - V5 load pipelining
-     - ≈0 vs V4, as pre-registered. Register renaming already covers it.
    * - **V6 access density**
      - **+131 % (RMS) / +71 % (LN)** in the DRAM regime. Grouping four VL-row
        blocks makes each column touch 256 contiguous bytes. The winning lever.
@@ -140,44 +146,47 @@ What each lever bought, and — as importantly — what it did not:
        improved the ZA variants by 62 % for RMSNorm and 114 % for LayerNorm,
        but neither surpassed the SSVE implementation.
 
-Two results are worth more than the speed-ups.
+Two outcomes carry more weight than the speed-ups.
 
 **ZA is a measured, explained negative.** The ZA tile is a matrix accumulator;
-using it as a residency buffer costs 2–3 ``mova`` operations per element to save
-a memory read that, thanks to V6's grouping, was already cache-resident. The
-hypothesis was written down before measuring and the outcome recorded rather
-than discarded. When SME2 made ``mova`` 4× cheaper, ZA got much faster and still
-lost — converting an extrapolation into a measurement.
+using it as a residency buffer costs 2–3 ``mova`` operations per element in
+order to save a memory read that, thanks to V6's grouping, was already
+cache-resident. The hypothesis was written down before measuring and the outcome
+recorded rather than discarded. When SME2 made ``mova`` 4× cheaper, ZA became
+much faster and still lost, which converted an extrapolation into a measurement.
 
 **V7's mechanism is narrower than either hypothesis.** Two hypotheses predicted
 opposite LayerNorm outcomes; LayerNorm's +2.7 % does not support a simple
-proportional instruction-count explanation. A 2-vector control then showed the
-gain *saturates* (4→2 loads captures 90 % of it), which also rules out a simple
-monotonic memory-level-parallelism explanation. What the data supports is a
-threshold effect on load-instruction count, in load-dominated loops, in the
+proportional instruction-count explanation. A 2-vector control then showed that
+the gain *saturates* (4→2 loads captures 90 % of it), which also rules out a
+simple monotonic memory-level-parallelism explanation. What the data supports is
+a threshold effect on load-instruction count, in load-dominated loops, in the
 latency-exposed regime; we do not claim to have identified the mechanism.
 
 Correctness and numerical behaviour
 -----------------------------------
-
 
 .. figure:: ../_static/figures/stability.svg
    :width: 100%
 
    FP32 relative error against a float64 oracle as the input is shifted.
 
+The first two findings concern the scalar **estimators** (``stability.cpp``),
+the third the **shipped kernels** on the same stress data:
+
 * **Naive single-pass error tracks the condition number**, and past shift 1e4 it
-  returns a **negative variance** — so a kernel built on it emits ``NaN``, not
-  merely an inaccurate number. That is a qualitative failure, which is why
-  stability is treated as part of correctness rather than a separate concern.
-* **The centred two-pass stays below ~3e-5 relative error across the tested
-  shift sweep**, i.e. it does not degrade with conditioning the way the naive
-  estimator does. That is what LayerNorm's extra traversal buys.
-* **RMSNorm stays below ~1.8e-5 across the sweep** — about 2300× better than
-  LayerNorm at shift 1e5 — because it never forms a mean and so never performs the cancelling
-  subtraction. Its stability is structural, and it is the same property that
-  makes it faster. Its own limit is elsewhere: :math:`\sum x^2` overflows FP32
-  at :math:`|x| \approx \sqrt{\mathrm{FLT\_MAX}/N}`.
+  returns a **negative variance**, so a kernel built on it emits ``NaN`` rather
+  than merely an inaccurate number. That is a qualitative failure, which is why
+  stability is treated as part of correctness rather than as a separate concern.
+* **The centred two-pass estimator stays below ~3e-5 relative error across the
+  tested shift sweep**, i.e. it does not degrade with conditioning the way the
+  naive estimator does. That is what LayerNorm's extra traversal buys.
+* **The shipped RMSNorm kernel stays below ~1.8e-5 across the same sweep**,
+  about 2300× better than the shipped LayerNorm kernel at shift 1e5, because it
+  never forms a mean and so never performs the cancelling subtraction. Its
+  stability is structural, and it is the same property that makes it faster. Its
+  own limit lies elsewhere: :math:`\sum x^2` overflows FP32 at
+  :math:`|x| \approx \sqrt{\mathrm{FLT\_MAX}/N}`.
 
 At high shift, LayerNorm's residual error is
 **not** the variance at all — two-pass fixed that — but the FP32 representation
@@ -194,7 +203,7 @@ through the **TEIR** runtime.
 
 * **Verification by encoding diff.** The generator's buffer is compared
   word-by-word against the *linked* hand-written kernel read from its function
-  address at runtime — 157/157 and 208/208 words identical (110/144 with SME2).
+  address at runtime: 157/157 and 208/208 words identical (110/144 with SME2).
   The JIT inherits the trust of kernels that already passed the full suite.
 * **Feature-dependent emission.** ``generate()`` takes an ``isa_t``: SME2 emits
   V7, otherwise V6.
@@ -213,16 +222,17 @@ When the SME kernel is worth using
 
 The crossover is at **M ≈ 16 rows**, and the cause is *not* streaming-mode
 overhead. A direct probe measures one ``smstart``/``smstop`` round trip at
-**9.04 ns** — about a fifth of the 45.8 ns per-call floor — and SM+ZA costs the
-same as SM-only. What actually makes small calls expensive is **group
-granularity**: V6/V7 process four VL-row blocks at a time (64 rows), and a
-partially filled group costs the same as a full one. A 9 ns transition cannot
-explain a 6 µs plateau; the group explains it exactly.
+**9.04 ns**, about a fifth of the 45.8 ns per-call floor, and SM+ZA costs the
+same as SM-only. What makes small calls expensive is **group granularity**:
+V6/V7 process four VL-row blocks at a time (64 rows), and a partially filled
+group costs the same as a full one. A 9 ns transition cannot explain a 6 µs
+plateau; the group explains it exactly.
 
 This also quantifies a design decision previously taken on intuition: one
 streaming region per call rather than one per row saves 128 × 9.04 ns ≈ 1.16 µs
-at M=128, about 22× the entire per-call floor. *"Streaming mode is expensive" is
-true per row and false per call*, and only the second is what these kernels do.
+at M=128, roughly 22× the entire per-call floor. *"Streaming mode is expensive"
+is true per row and false per call*, and only the second is what these kernels
+do.
 
 External comparison
 -------------------
@@ -246,8 +256,8 @@ about what its delegate does internally.
 That produces a clean inversion. *Our* RMSNorm is faster than our LayerNorm, as
 the traffic ratio says it should be; *PyTorch's* LayerNorm is 2.6× faster than
 its RMSNorm. A fused implementation of the expensive norm beats a decomposed
-implementation of the cheap one — the clearest argument in this report for why
-writing the kernel was worth doing.
+implementation of the cheap one, which is the clearest argument in this report
+for why writing the kernel was worth doing.
 
 
 Threats to validity
@@ -256,13 +266,13 @@ Threats to validity
 * **One machine, one OS.** Every number is from a single M4 on macOS 15.2.
   Nothing here establishes behaviour on other SME implementations; the kernels
   are VLA precisely because SVL is not guaranteed to be 512 bits.
-* **Best-case reporting, now bounded.** Headline GiB/s is a best-of-N minimum —
-  a ceiling estimate, not a typical value. Median and p10–p90 are now reported
-  alongside. For the medium and large headline shapes the median is generally
-  close to the best case, so those figures are typical; the smallest tensors
-  show visibly greater relative timing variability. That was an assumption
-  until it was measured.
-* **No specialist vendor baseline.** The largest gap. Apple's BNNS was
+* **Best-case reporting, now bounded.** Headline GiB/s is a best-of-N minimum,
+  i.e. a ceiling estimate rather than a typical value. Median and p10–p90 are
+  now reported alongside. For the medium and large headline shapes the median is
+  generally close to the best case, so those figures are typical; the smallest
+  tensors show visibly greater relative timing variability. That was an
+  assumption until it was measured.
+* **No specialist vendor baseline.** This is the largest gap. Apple's BNNS was
   investigated and produced no number: on macOS 15.2 its LayerNorm entry point
   is deprecated and could not be executed, and **the Accelerate/BNNS API
   available on that system does not expose a direct RMSNorm operation**. This
@@ -297,7 +307,8 @@ Threats to validity
   attempt in two**, not the one in three first estimated; its reported figures
   come from successful, verified runs but carry less confidence than the rest.
 * **Group granularity distorts small shapes.** Below 64 rows the kernel does a
-  full group's work regardless, so small-M figures reflect that, not bandwidth.
+  full group's work regardless, so small-M figures reflect that rather than
+  bandwidth.
 
 Reproducibility
 ---------------
@@ -322,14 +333,14 @@ Both norms were taken from a scalar reference to JIT-generated SME kernels
 invoked through a compiler runtime, verified at every step against a float64
 oracle. The best kernels reach **~33 % of the footprint-matched ceiling on
 useful bytes (~50 % on moved bytes)** at cache-resident shapes and **~42 %** at
-DRAM, and beat two general-purpose frameworks by 1.5–5.8×.
+DRAM, and outperform two general-purpose frameworks by 1.5–5.8×.
 
 The more useful outcomes are the negative and corrective ones: the ZA tile is
-the wrong tool for this operator, and it took a measurement to say so; SME2
-helps, but not for the reason predicted; the streaming transition is 9 ns, not
-the dominant per-call cost; and the project's own roofline was mis-stated for
-five sprints in a way that inflated its results by ~2×. Each is recorded with
-the experiment that produced it.
+the wrong tool for this operator, and establishing that required a measurement;
+SME2 helps, but not for the reason predicted; the streaming transition costs
+9 ns rather than dominating the per-call cost; and the project's own roofline
+was mis-stated for five sprints in a way that inflated its results by ~2×. Each
+is recorded together with the experiment that produced it.
 
 Scope note: SME was course material; **SME2-specific multi-vector optimization
 was not**, and was reached here by detecting the hardware's actual feature set
@@ -339,9 +350,9 @@ Appendices — development record
 -------------------------------
 
 The sprint-by-sprint chronology, the error logs and the debugging histories are
-kept as appendices. They are the development record rather than the report: the
-argument above is meant to stand without them, and they exist because a
-corrected claim is worth more when the correction is visible.
+kept as appendices. They constitute the development record rather than the
+report: the argument above is intended to stand without them, and they exist
+because a corrected claim carries more weight when the correction is visible.
 
 .. toctree::
    :maxdepth: 1

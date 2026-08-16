@@ -1,5 +1,5 @@
-MLC-Norm Sprint 7.5 — External Baselines
-=========================================
+MLC-Norm Sprint 7.5: External Baselines
+=======================================
 
 External framework comparison
 -------------------------------
@@ -12,17 +12,18 @@ norms against two widely-used implementations on the same machine.
 .. warning::
 
    **This project already got a vendor comparison wrong once**
-   (``docs/dev-notes/sprint-errors/sprint6_errors.md`` §2.7–2.8), and the harness rules below each exist
-   because of one of those failures:
+   (``docs/dev-notes/sprint-errors/sprint6_errors.md`` §2.7–2.8), and each of
+   the harness rules below exists because of one of those failures:
 
    * an "Accelerate RMSNorm" that was really our own ``vDSP_svesq`` +
-     ``vDSP_vsmul`` composition — Accelerate has no RMSNorm;
+     ``vDSP_vsmul`` composition, since Accelerate has no RMSNorm;
    * ``vDSP_normalize`` called "LayerNorm" when it has no eps, no γ and no β;
    * a headline "16–37× faster" that **measured a layout mismatch, not a
-     kernel** — vDSP forced to walk our column-major matrix at ``stride = ld``,
-     one cache miss per element. Re-run in its own contiguous layout the same
-     composition was recorded as *faster* than us (65.77 vs 38.47 GiB/s at
-     16 MiB), which is what turned the headline from a win into an error.
+     kernel**, with vDSP forced to walk our column-major matrix at
+     ``stride = ld``, one cache miss per element. Re-run in its own contiguous
+     layout, the same composition was recorded as *faster* than us (65.77
+     against 38.47 GiB/s at 16 MiB), which is what turned the headline from a
+     win into an error.
 
    Neither of those vDSP figures is used anywhere in this report: both come
    from the error log rather than from the correctness-gated harness below, and
@@ -34,9 +35,9 @@ Method
 
 * **Native layout for everyone.** Our kernels are column-major over a strided
   feature axis; the libraries normalize the last, contiguous axis of a
-  row-major tensor. Both are efficient *in their own* layout — V6's grouping
-  makes each of our column touches 256 contiguous bytes — so each is measured
-  in the layout it was designed for. The transpose lives only in the
+  row-major tensor. Both are efficient *in their own* layout, since V6's
+  grouping makes each of our column touches 256 contiguous bytes, so each is
+  measured in the layout it was designed for. The transpose lives only in the
   correctness checker, never in a timed path.
 
   .. important::
@@ -52,8 +53,8 @@ Method
        *What would it cost to replace a framework's operator with our kernel,
        for the same incoming tensor representation?*
 
-     Those are different questions and the second is the one a compiler
-     integrator actually faces — it would have to include any layout conversion
+     Those are different questions, and the second is the one a compiler
+     integrator faces, since it would have to include any layout conversion
      at the boundary, which this comparison deliberately excludes from both
      sides. We answer only the first, and every margin below should be read
      with that scope attached. (The Sprint-6 failure was the mirror image:
@@ -62,22 +63,21 @@ Method
 * **Correctness gates the comparison** (decision B, applied to baselines).
   Every library output is dumped to raw FP32 and verified against our float64
   reference *before* its throughput is quoted. This is what catches the failure
-  mode above — two sides computing different functions.
+  mode above, namely two sides computing different functions.
 * **One thread**, same shapes, same byte convention (useful = 1R + 1W). One
-  thread has to be enforced *per framework*, not once — see below.
+  thread has to be enforced *per framework*, not once; see below.
 * **Versions used for the reported run**, on a standalone Python 3.12 installed
   specifically for this: **PyTorch 2.13.0** and **ExecuTorch 1.4.1**, with the
-  **XNNPACK delegate** — the path that is actually deployed on device —
-  exercised rather than skipped. Nothing is patched; both libraries are
-  stock.
+  **XNNPACK delegate**, the path that is deployed on device, exercised rather
+  than skipped. Nothing is patched; both libraries are stock.
 
 .. note::
 
    An earlier attempt ran on the project's Python 3.9 environment, where the
    newest installable ExecuTorch is 0.3.0 and the XNNPACK partitioner cannot
-   even be imported (``TypeError: 'staticmethod' object is not callable`` —
-   staticmethod objects only became callable in Python 3.10). Reporting only
-   the portable reference kernels would have been the mirror image of the
+   even be imported (``TypeError: 'staticmethod' object is not callable``,
+   since staticmethod objects only became callable in Python 3.10). Reporting
+   only the portable reference kernels would have been the mirror image of the
    Sprint-6 error: handicapping the baseline and calling the gap a win. A
    newer interpreter was installed instead, so the strongest available path is
    the one measured.
@@ -188,8 +188,8 @@ and published but never checked.
 Results
 ~~~~~~~~~
 
-Single-threaded, useful bytes (1R+1W), each in its native layout. Best baseline
-per row is the one our margin is quoted against.
+Single-threaded, useful bytes (1R+1W), each in its native layout. The best
+baseline per row is the one our margin is quoted against.
 
 .. list-table:: LayerNorm — GiB/s, higher is better
    :header-rows: 1
@@ -262,7 +262,7 @@ about our kernels.
 Fusion, not kernel quality, explains the asymmetry
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Profiling what each PyTorch module actually dispatches to on CPU:
+Profiling what each PyTorch module dispatches to on CPU:
 
 .. list-table::
    :header-rows: 1
@@ -270,7 +270,7 @@ Profiling what each PyTorch module actually dispatches to on CPU:
    * - module
      - ATen ops, by self time
    * - ``torch.nn.LayerNorm``
-     - ``aten::native_layer_norm`` — a single fused kernel
+     - ``aten::native_layer_norm``, a single fused kernel
    * - ``torch.nn.RMSNorm``
      - ``aten::mul``, ``aten::pow``, ``aten::sum``, ``aten::_fused_rms_norm``,
        ``aten::div_``
@@ -278,7 +278,7 @@ Profiling what each PyTorch module actually dispatches to on CPU:
 ``_fused_rms_norm`` exists at the dispatcher level, but the CPU self time is
 dominated by the elementwise ops around it: **on CPU, eager RMSNorm decomposes**,
 each pass reading and writing the whole tensor. That is why eager RMSNorm sits
-at 2.82 GiB/s while ``torch.compile`` — which fuses the decomposition —
+at 2.82 GiB/s while ``torch.compile``, which fuses the decomposition,
 roughly doubles it to 6.04.
 
 The consequence is a clean, attributable inversion:
@@ -296,19 +296,21 @@ The consequence is a clean, attributable inversion:
      - LayerNorm
      - 2.6× faster than its RMSNorm
 
-The mathematics says RMSNorm should be the *cheaper* operation — one pass, no
-mean, 2R+1W against LayerNorm's 3R+1W, which is exactly decision C's premise and
-what our own ablation measures. PyTorch eager reverses that ordering, and the
-reason is an implementation artifact: the cheaper operation is the one that
-happens not to have a fused CPU kernel. **A fused implementation of the
-expensive norm beats a decomposed implementation of the cheap one** — which is
-the clearest argument in this report for why writing the kernel was worth doing.
+The mathematics says RMSNorm should be the *cheaper* operation: one reduction
+stage, no mean, 2R+1W against LayerNorm's 3R+1W, which is exactly decision C's
+premise and what our own ablation measures. PyTorch eager reverses that
+ordering, and the reason is an implementation artifact, namely that the cheaper
+operation is the one that happens not to have a fused CPU kernel. **A fused
+implementation of the expensive norm beats a decomposed implementation of the
+cheap one**, which is the clearest argument in this report for why writing the
+kernel was worth doing.
 
 Against the pre-registration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The expectations were written into the ROADMAP and committed *before* any
-measurement, which is the practice ``docs/dev-notes/sprint-errors/sprint6_errors.md`` credits for every claim
+measurement, which is the practice
+``docs/dev-notes/sprint-errors/sprint6_errors.md`` credits for every claim
 that survived contact.
 
 .. list-table::
@@ -329,11 +331,11 @@ that survived contact.
        the ExecuTorch threadpool, not the kernel (see the threading note
        above).
    * - **P3** — RMSNorm decomposes rather than running a fused kernel
-     - **Confirmed, and in PyTorch as well as ExecuTorch** — which was not
+     - **Confirmed, and in PyTorch as well as ExecuTorch**, which was not
        predicted. The profiler trace above is the evidence, and the
        eager-vs-compile gap (2.82 → 6.12) is its cost.
    * - **P4** — we may lose
-     - **Not realized against these two.** See the limits below — it is not
+     - **Not realized against these two.** See the limits below; it is not
        settled by this experiment.
 
 Baselines move between versions
@@ -367,7 +369,7 @@ against the current one. **The kernels did not change; the baseline did.** Any
 "N× faster than library X" claim is a statement about a specific version on a
 specific day, and is quoted here with versions attached for that reason.
 
-The honest limit of this result
+The limit of this result
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Beating PyTorch and ExecuTorch is not the same as being state of the art**,
@@ -379,7 +381,7 @@ and the report does not claim it is:
    *deprecated* generic filter that we could create but not execute
    (``BNNSFilterApply`` → −1 in every configuration tried, including a minimal
    single-sample case), and **the Accelerate/BNNS API available on the macOS 15.2
-   reference system does not expose a direct RMSNorm operation** — every
+   reference system does not expose a direct RMSNorm operation**, since every
    "RMS" symbol in those headers is ``RMSProp``. Apple's current BNNSGraph
    does provide ``layerNorm(axes:epsilon:)`` and ``rmsNorm(scale:epsilon:)``,
    but both are absent from this SDK and post-date this OS. Full evidence in
@@ -388,10 +390,10 @@ and the report does not claim it is:
    whose CPU RMSNorm decomposes in eager mode is a baseline for "what you get
    without a kernel", not a state-of-the-art bar for RMSNorm.
 3. **The comparison includes runtime dispatch.** ExecuTorch times are
-   per-invocation through its runtime, which is honest for an on-device
+   per-invocation through its runtime, which is appropriate for an on-device
    comparison but is not a pure kernel number.
 4. **Single-threaded only.** The frameworks parallelize by default and our TEIR
-   path scales 2.1×; a threaded comparison is a separate question against a
+   path scales 2.1×, so a threaded comparison is a separate question against a
    separate ceiling.
 
 .. note::
@@ -399,12 +401,13 @@ and the report does not claim it is:
    **A claim withdrawn.** An earlier version of this section stated that a
    specialist vendor library "still beats us", citing Apple's vDSP at
    65.77 GiB/s against our 38.46 at 16 MiB. That figure came from the Sprint-6
-   error log, not from this correctness-gated harness — it was never verified
-   to compute the same function, and the vDSP composition it referred to was
-   the very thing §2.7 identified as mislabelled. It is therefore withdrawn
-   rather than restated: we do not have a verified vendor number in either
-   direction. The §2.7–2.8 entries stay in ``docs/dev-notes/sprint-errors/sprint6_errors.md``, because that
-   is the record of our own mistake.
+   error log rather than from this correctness-gated harness: it was never
+   verified to compute the same function, and the vDSP composition it referred
+   to was the very thing §2.7 identified as mislabelled. It is therefore
+   withdrawn rather than restated, since we do not have a verified vendor
+   number in either direction. The §2.7–2.8 entries stay in
+   ``docs/dev-notes/sprint-errors/sprint6_errors.md``, because that is the
+   record of our own mistake.
 
 The defensible claim is therefore narrow and worth stating precisely: *against
 two general-purpose frameworks at current versions, in their own layouts,
@@ -454,12 +457,12 @@ What is left open
 ~~~~~~~~~~~~~~~~~~~
 
 * **A specialist vendor kernel.** This is the most valuable missing baseline
-  and it remains missing by decision, not oversight. Apple's BNNS was
+  and it remains missing by decision, not by oversight. Apple's BNNS was
   investigated and could not be driven on macOS 15.2, and it has no RMSNorm
-  there at all (``docs/dev-notes/tooling/bnns_investigation.md``); the remaining route would be
-  BNNSGraph via CoreML, which was scoped out. Until such a number exists,
-  **this report makes no claim about how our kernels compare to a specialist
-  vendor implementation, in either direction.**
+  there at all (``docs/dev-notes/tooling/bnns_investigation.md``); the
+  remaining route would be BNNSGraph via CoreML, which was scoped out. Until
+  such a number exists, **this report makes no claim about how our kernels
+  compare to a specialist vendor implementation, in either direction.**
 * **Threaded comparison.** Everything here is single-threaded; the frameworks
   parallelize by default and our TEIR path scales to 2.1×, so a multi-thread
   comparison is a separate question with a separate ceiling. **Answered in
@@ -468,5 +471,5 @@ What is left open
   our own decomposition show up that one thread could not expose.
 * **The integration question.** As stated in the method, this measures each
   implementation in its preferred layout. What it would cost to substitute our
-  kernel for a framework operator on the framework's own tensor representation
-  — including any boundary conversion — is not measured.
+  kernel for a framework operator on the framework's own tensor representation,
+  including any boundary conversion, is not measured.

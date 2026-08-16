@@ -1,11 +1,12 @@
-MLC-Norm Sprint 0 & 1 — Scaffold and Reference Harness
-======================================================
+MLC-Norm Sprint 0 & 1: Scaffold and Reference Harness
+=====================================================
 
-Sprint 0 — Scaffold
--------------------
+Sprint 0: Scaffold
+------------------
 
-**Goal:** prove the norm module is wired into the existing build/test/CI/Sphinx
-pipeline with placeholder logic — no real kernel yet.
+**Goal:** prove that the norm module is wired into the existing
+build/test/CI/Sphinx pipeline with placeholder logic, before any real kernel
+exists.
 
 Module layout
 ~~~~~~~~~~~~~
@@ -37,18 +38,18 @@ the existing lab foundation (weeks 1–7). The full stack target is:
 
 The two norms differ in reduction structure:
 
-- **LayerNorm** — **two reduction stages** (mean, then variance) plus output
+- **LayerNorm:** **two reduction stages** (mean, then variance) plus output
   generation, hence **three input traversals**, 3R+1W; more arithmetic
   intensity, numerically stable
-- **RMSNorm** — **one reduction stage** (sum of squares, no mean, no β) plus
+- **RMSNorm:** **one reduction stage** (sum of squares, no mean, no β) plus
   output generation, hence **two traversals**, 2R+1W
 
 That 1.33× traffic ratio is the structural source of RMSNorm's advantage. Both
 are bandwidth-dominated at the shapes measured here; the evaluation metric is
 **effective GiB/s** against a measured, footprint-matched peak.
 
-Sprint 1 — C++ reference, correctness harness, and bandwidth baseline
-----------------------------------------------------------------------
+Sprint 1: C++ reference, correctness harness, and bandwidth baseline
+--------------------------------------------------------------------
 
 **Goal:** an obviously-correct scalar reference for both norms, a Catch2
 verification harness (including numerical-stability stress cases), and a
@@ -61,7 +62,7 @@ Canonical kernel signature
 Both norms share a single interface defined in ``include/norm/norm.hpp`` under
 ``namespace mini_jit::norm``.  The same signatures are used by the C++
 reference, the future ``mini_jit::Norm`` JIT generator, and the TEIR
-registration — no layer invents its own.
+registration, so no layer invents its own.
 
 **Layout convention:** column-major, explicit leading dimension
 (``data[row + col * ld]``), matching the rest of the lab code.
@@ -86,7 +87,7 @@ Reference implementations
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``src/norm/reference.cpp`` implements both norms as deliberately simple scalar
-C++ using ``double`` accumulation throughout — this makes it the trusted oracle
+C++ using ``double`` accumulation throughout, which makes it the trusted oracle
 against which every future kernel is verified.
 
 **LayerNorm — two-pass per row:**
@@ -99,25 +100,35 @@ against which every future kernel is verified.
 **RMSNorm — single-pass per row:**
 
 Sum of squares ``Σx²``, divide by N, add ε, take the inverse square root, then
-scale by γ.  No mean subtraction and no β — one reduction stage instead of two,
-so two traversals of the input instead of three.
+scale by γ.  There is no mean subtraction and no β: one reduction stage instead
+of two, so two traversals of the input instead of three.
 
 
+   Three separate claims, kept separate (Sprint 10). **Semantics:** RMSNorm
+   omits mean-centering, hence one fewer reduction and one fewer traversal.
+   **Literature:** Zhang & Sennrich (NeurIPS 2019) report *comparable task
+   performance* with runtime reductions of roughly **7–64 %** across their
+   experiments, not a single "10–40 %" figure. **Our measurement:** 1.8–2.3×
+   on the shapes evaluated here (Sprint 2). Earlier revisions collapsed these
+   into "~10–40 % faster at equal accuracy", which overstated the literature
+   and conflated kernel numerics with model accuracy: our tests show that our
+   RMSNorm matches an *RMSNorm reference*, which says nothing about whether
+   substituting RMSNorm for LayerNorm preserves accuracy in a given network.
 
 Correctness harness
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``tests/test_norm.cpp`` covers four cases for each norm:
 
-- **Identity / unit-vector input** — analytically checkable output (e.g. all-equal
-  input → LayerNorm output equals β; unit-vector input → RMSNorm output scales
-  by ``sqrt(N)``).
-- **Normal random-ish input** — verified against an independent scalar ``double``
+- **Identity / unit-vector input**, giving analytically checkable output (e.g.
+  all-equal input → LayerNorm output equals β; unit-vector input → RMSNorm
+  output scales by ``sqrt(N)``).
+- **Normal random-ish input**, verified against an independent scalar ``double``
   computation in the same test file.
-- **Non-square matrix with ``ld_a ≠ ld_b``** — exercises leading-dimension
+- **Non-square matrix with ``ld_a ≠ ld_b``**, which exercises leading-dimension
   handling.
-- **Large-magnitude stress input** (``SHIFT = 1e4f`` plus small variation) —
-  documents that the two-pass LayerNorm and the mean-free RMSNorm both remain
+- **Large-magnitude stress input** (``SHIFT = 1e4f`` plus small variation),
+  documenting that the two-pass LayerNorm and the mean-free RMSNorm both remain
   accurate on inputs where a naive single-pass variance would lose bits.
 
 All tests run on the CI runner (M1/M2, no SME required) with tolerance
@@ -128,12 +139,12 @@ Bandwidth harness and roofline
 
 ``apps/main_norm.cpp`` measures:
 
-1. **Peak bandwidth** — a STREAM-style ``dst[i] = src[i] + 1.0f`` loop,
+1. **Peak bandwidth**, via a STREAM-style ``dst[i] = src[i] + 1.0f`` loop,
    best-of-10 runs, to establish the roofline target.  Originally run at a
    single size (128 MiB per array, beyond M-series L3); since Sprint 6 it is
    swept across footprints from 64 KiB to 256 MiB, because the ceiling turned
    out to depend strongly on working-set size (§1.2 of the Sprint-6 log).
-2. **Norm effective bandwidth** — ``bytes = 2 × M × N × 4`` (one FP32 read +
+2. **Norm effective bandwidth**, with ``bytes = 2 × M × N × 4`` (one FP32 read +
    one FP32 write; γ/β assumed L1-resident), best-of-50 runs, for six shapes:
 
 .. admonition:: Corrected in Sprint 6 — this table was measured twice wrong
@@ -145,19 +156,20 @@ Bandwidth harness and roofline
    1. **The build was unoptimized.** ``CMAKE_BUILD_TYPE`` was empty, so the C++
       reference and the C++ probe compiled at ``-O0`` (Sprint 5 defect log).
       The "roofline target" of **10.62 GiB/s** was a debug-build scalar probe,
-      not a hardware ceiling — the same probe in Release reads ~80 GiB/s in
+      not a hardware ceiling: the same probe in Release reads ~80 GiB/s in
       NEON.  Every original percentage divided one ``-O0`` number by another.
    2. **The ceiling is a curve, not a constant** (Sprint 6 §1.2).  Percentages
       are now taken against the streaming-mode ceiling measured *at each
       shape's own footprint*, which ranges from ~104 GiB/s at 64 KiB to
       59.5 GiB/s at 256 MiB.
 
-   The re-measured numbers are Release-build, and the percentages fall sharply
-   — not because the reference got slower, but because it is finally being
-   compared against a real ceiling.  This is what the scalar oracle actually
-   costs, and it is the honest starting point for Sprint 2's speed-ups.
+   The re-measured numbers are Release-build, and the percentages fall sharply,
+   not because the reference got slower, but because it is finally being
+   compared against a real ceiling.  This is what the scalar oracle costs, and
+   it is the defensible starting point for Sprint 2's speed-ups.
 
-**Roofline target:** the streaming-mode ceiling at the shape's own footprint.  For these six shapes that is 104.7–117.2 GiB/s — all of them
+**Roofline target:** the streaming-mode ceiling at the shape's own footprint
+(Sprint 6 §1.2).  For these six shapes that is 104.7–117.2 GiB/s; all of them
 are cache-resident, so none of them faces the 59.5 GiB/s DRAM figure.
 
 .. list-table:: Sprint 1 — reference GiB/s (scalar C++, Apple M4, Release, re-measured in Sprint 6)
@@ -207,17 +219,17 @@ are cache-resident, so none of them faces the 59.5 GiB/s DRAM figure.
      - 1.03 (0.9 %)
      - Large tensor, pressure on caches
 
-Two patterns visible in the data:
+Two patterns are visible in the data:
 
 - **RMSNorm is faster than LayerNorm at every shape, but by a margin that
-  shrinks with M** — 1.6× at M=128, N=64 down to 1.08× at M=1024, N=2048
-  (the original text claimed a uniform 1.3–1.6×, which the Release numbers do
-  not support).  The single-pass structure removes the second pass over the
+  shrinks with M**, from 1.6× at M=128, N=64 down to 1.08× at M=1024, N=2048.
+  (The original text claimed a uniform 1.3–1.6×, which the Release numbers do
+  not support.)  The single-pass structure removes the second pass over the
   feature axis and the mean subtraction; as M grows, per-row scalar overhead
   comes to dominate both norms equally and the structural advantage is diluted.
-- **Performance degrades as M grows** — the scalar loop overhead (branch,
-  pointer arithmetic, FP divide) accumulates per row.  The SSVE kernel will
-  amortise this by processing multiple elements per cycle.
+- **Performance degrades as M grows**, because the scalar loop overhead
+  (branch, pointer arithmetic, FP divide) accumulates per row.  The SSVE kernel
+  will amortise this by processing multiple elements per cycle.
 
 The reference sits at **0.8–6.3 %** of the ceiling at its own footprint.  That
 gap is the target for Sprint 2's SSVE kernel.
@@ -232,4 +244,3 @@ Sprint 1 status
   large-magnitude stability-stress inputs.
 - **Benchmark:** GiB/s harness + STREAM peak-bandwidth probe in place;
   numbers recorded from M4 (see table above).
-

@@ -1,9 +1,13 @@
-MLC-Norm Sprint 8 — Correctness, Dispatch & Provenance Hardening
-=================================================================
+MLC-Norm Sprint 8: Correctness, Dispatch & Provenance Hardening
+===============================================================
 
-Sprint 8 — making the results defensible
-------------------------------------------
-Complete exploration of the project for improvement
+Sprint 8: making the results defensible
+---------------------------------------
+
+This sprint contains no new kernel and no new optimization. It fixes a genuine
+API defect, and it closes the gap between "these numbers are true" and "these
+numbers are *demonstrably* true", which for a performance project is the
+difference between a result and a claim.
 
 The API defect: a silent no-op
 --------------------------------
@@ -18,8 +22,8 @@ ISA-specific ones, and every one of them was written as:
        ::layer_norm_ssve(...);
    }
 
-So on any CPU without SME — an M1/M2 CI runner, or any non-Arm host — ordinary
-calling code
+So on any CPU without SME, such as an M1/M2 CI runner or any non-Arm host,
+ordinary calling code
 
 .. code-block:: cpp
 
@@ -31,10 +35,12 @@ distinguish success from a no-op, and would go on to consume stale or
 uninitialized memory.
 
 This is worth stating plainly because the project's own rules already forbade
-it.The guard was added so tests could
-skip on CI, which is a real need — but it solved a test-harness
+it. ``CLAUDE.md`` §4 says to *"fail fast and clearly… error loudly at the
+boundary — not with silent wrong numbers"*, and decision B makes correctness the
+precondition for every performance claim. The guard was added so that tests
+could skip gracefully on CI, which is a real need, but it solved a test-harness
 problem by degrading the library's contract, and a silent no-op is the worst of
-the available options: it is indistinguishable from success.
+the available options because it is indistinguishable from success.
 
 The fix is a two-layer API:
 
@@ -53,10 +59,10 @@ The fix is a two-layer API:
        missing feature, then aborts. It never returns an uncomputed buffer.
 
 ``norm_dispatch_target()`` reports which of the three the current host selects,
-so a benchmark row can always say which code actually ran.
+so a benchmark row can always say which code ran.
 
 The tests for this are deliberately **not** SME-guarded. The whole point is that
-the dispatchers work everywhere, so they must execute on the CI runner — which
+the dispatchers work everywhere, so they must execute on the CI runner, which
 is the only machine that exercises the scalar fallback at all. One of them is a
 direct regression test for the original defect: fill the output with a sentinel,
 call the dispatcher, and require that no element still holds the sentinel.
@@ -84,10 +90,10 @@ The run then states the total, which is the sentence this earns:
 
 The external baselines got the same treatment. Previously the Python drivers
 dumped one shape (128×64) for cross-verification while the results table
-reported three — verifying one and publishing three is an inference, not a
-check, and a kernel can be right at one shape and wrong at a tail or boundary.
-Both drivers now dump **every** benchmarked shape and write a manifest listing
-them; the C++ checker walks the manifest:
+reported three, and verifying one while publishing three is an inference rather
+than a check, since a kernel can be right at one shape and wrong at a tail or
+boundary. Both drivers now dump **every** benchmarked shape and write a manifest
+listing them; the C++ checker walks the manifest:
 
 .. code-block:: text
 
@@ -101,10 +107,10 @@ them; the C++ checker walks the manifest:
 Best-case is not the only number
 ----------------------------------
 
-Every table in this harness reported best-of-N — the minimum sample. That is a
-defensible instrument for estimating a *ceiling*: taking the minimum suppresses
-preemption, migration and unrelated system activity, so it answers "what can
-this kernel do when nothing interferes".
+Every table in this harness reported best-of-N, i.e. the minimum sample. That is
+a defensible instrument for estimating a *ceiling*, since taking the minimum
+suppresses preemption, migration and unrelated system activity, so it answers
+"what can this kernel do when nothing interferes".
 
 It is a poor number to present **alone**, because it cannot distinguish
 
@@ -153,7 +159,7 @@ machine and which CPU features produced it. ``main_norm`` now opens with:
 Two details are deliberate. The commit is marked ``-dirty`` when the working
 tree has uncommitted changes, because a run from a modified tree is not
 reproducible from its SHA and saying so is the point. And the SME lines are the
-**detected** values from ``sysctl``, not a datasheet claim — this project
+**detected** values from ``sysctl``, not a datasheet claim: this project
 carried a stale "the M4 is SME1" assumption in its own documents for several
 sprints while the hardware was reporting ``FEAT_SME2 = 1``.
 
@@ -162,7 +168,7 @@ Sprint 8 status
 
 * **API:** public ``layer_norm()``/``rms_norm()`` dispatchers with a scalar
   fallback; 25 ISA-specific entry points converted from silent no-op to
-  documented precondition + loud abort; ``norm_dispatch_target()`` added.
+  documented precondition plus loud abort; ``norm_dispatch_target()`` added.
 * **Tests:** 4 new host-portable dispatch cases (they run on CI, where the
   scalar fallback is the path taken), including a sentinel-based regression
   test for the original defect. Suite green on the M4: **137 cases, 780 264
@@ -179,5 +185,5 @@ What this sprint deliberately did not do
 * **No kernel changed**, so no performance number moved. The tables here should
   reproduce the Sprint 6/7 values, and they do.
 * **CMake presets and the terminology/claim corrections** are the next steps,
-  not this one — this sprint was scoped to the correctness and provenance
+  not this one, since this sprint was scoped to the correctness and provenance
   defects.
