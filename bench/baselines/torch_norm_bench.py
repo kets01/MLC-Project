@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Single-threaded PyTorch baseline for the MLC-Norm comparison."""
+"""PyTorch baseline for the MLC-Norm comparison, at a chosen thread count."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ import sys
 import time
 
 import torch
+
+from pcore import Occupancy, request_p_core
 
 
 SHAPES = [(128, 64), (1024, 2048), (4096, 8192)]
@@ -32,14 +34,15 @@ def dump(path: str, tensor: torch.Tensor) -> None:
     tensor.detach().contiguous().to(torch.float32).numpy().tofile(path)
 
 
-def samples(fn, reps: int) -> list[float]:
+def samples(fn, reps: int) -> tuple[list[float], float]:
     fn()  # warm-up
     out = []
-    for _ in range(reps):
-        t0 = time.perf_counter_ns()
-        fn()
-        out.append((time.perf_counter_ns() - t0) * 1e-9)
-    return out
+    with Occupancy() as occ:
+        for _ in range(reps):
+            t0 = time.perf_counter_ns()
+            fn()
+            out.append((time.perf_counter_ns() - t0) * 1e-9)
+    return out, occ.ratio
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -67,13 +70,15 @@ def gibs(m: int, n: int, seconds: float) -> float:
     return (2.0 * m * n * 4.0 / (1024 ** 3)) / seconds
 
 
-def format_stats(values: list[float], m: int, n: int) -> str:
+def format_stats(sampled: tuple[list[float], float], m: int, n: int) -> str:
+    values, occupancy = sampled
     best, median, p10, p90 = stats(values)
     # Time percentiles reverse when expressed as throughput.
     return (
         f"best {gibs(m, n, best):7.2f}  "
         f"median {gibs(m, n, median):7.2f}  "
-        f"p10-p90 {gibs(m, n, p90):7.2f}-{gibs(m, n, p10):7.2f}"
+        f"p10-p90 {gibs(m, n, p90):7.2f}-{gibs(m, n, p10):7.2f}  "
+        f"cpu/wall {occupancy:5.2f}"
     )
 
 
@@ -81,23 +86,30 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--reps", type=int, default=20)
+    parser.add_argument("--threads", type=int, default=1)
     args = parser.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
-    torch.set_num_threads(1)
+    # Before the first torch op: the intra-op pool inherits the QoS of the
+    # thread that creates it, and is created lazily on first use.
+    pinned = request_p_core()
+
+    torch.set_num_threads(args.threads)
     try:
         torch.set_num_interop_threads(1)
     except RuntimeError:
         pass
 
-    print(f"torch {torch.__version__}, threads={torch.get_num_threads()}")
+    print(f"torch {torch.__version__}, threads={torch.get_num_threads()}, "
+          f"p-core qos={'yes' if pinned else 'no'}")
     print("GiB/s: useful bytes (1R+1W); native row-major layout\n")
 
     manifest = [
         "# m n epsilon norm implementation filename",
         f"# framework torch {torch.__version__}",
         f"# python {sys.version.split()[0]}",
-        f"# threads {torch.get_num_threads()}",
+        f"# threads {torch.get_num_threads()} (requested {args.threads}, "
+        f"p-core qos {'yes' if pinned else 'no'})",
     ]
 
     for m, n in SHAPES:
