@@ -324,11 +324,18 @@ Threats to validity
   default; our threaded results are reported separately against a chip ceiling.
   Enforcing one thread took two separate settings — PyTorch's and ExecuTorch's
   pthreadpool — and we verified it by measuring CPU-time over wall-time rather
-  than by trusting either setting.
+  than by trusting either setting. The threaded five-way comparison is
+  :doc:`norm_sprint7_6`.
+* **Our row-parallel decomposition has no minimum problem size**, and threading
+  it below roughly 1 MiB is catastrophic — 12.6× slower at 32 KiB, where the
+  OpenMP fork/join costs more than the kernel. Its 256-row group alignment also
+  caps usable threads at ``M/256``, which is why our lead narrows as cores are
+  added. Both are measured in :doc:`norm_sprint7_6`.
 * **One baseline configuration is intermittently unreproducible.** ExecuTorch
   1.4.1's XNNPACK RMSNorm at 1024×2048 fails non-deterministically
-  (``error: 0x23``) in roughly one run out of three; its reported figure comes
-  from a successful, verified run but carries less confidence than the rest.
+  (``error: 0x23``). Measured deliberately over 40 trials it fails about **one
+  attempt in two**, not the one in three first estimated; its reported figures
+  come from successful, verified runs but carry less confidence than the rest.
 * **Group granularity distorts small shapes.** Below 64 rows the kernel does a
   full group's work regardless, so small-M figures reflect that, not bandwidth.
 
@@ -388,5 +395,6 @@ corrected claim is worth more when the correction is visible.
    norm_sprint6
    norm_sprint7
    norm_sprint7_5
+   norm_sprint7_6
    norm_sprint8
    sprint2_debug_log
