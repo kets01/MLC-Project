@@ -462,7 +462,10 @@ What is left open
   vendor implementation, in either direction.**
 * **Threaded comparison.** Everything here is single-threaded; the frameworks
   parallelize by default and our TEIR path scales to 2.1×, so a multi-thread
-  comparison is a separate question with a separate ceiling.
+  comparison is a separate question with a separate ceiling. **Answered in
+  Sprint 7.6** (:doc:`norm_sprint7_6`), which repeats this comparison at 1/2/4/10
+  threads: the margins survive at the two larger shapes, and two new limits of
+  our own decomposition show up that one thread could not expose.
 * **The integration question.** As stated in the method, this measures each
   implementation in its preferred layout. What it would cost to substitute our
   kernel for a framework operator on the framework's own tensor representation
