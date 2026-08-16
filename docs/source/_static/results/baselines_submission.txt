@@ -1,0 +1,110 @@
+External baseline run — MLC-Norm
+generated: 2026-08-16T06:11:22Z  host: arm64 macOS 15.2
+git commit: d5bfde3 (clean; benchmark drivers and manifests as committed at
+            this revision -- the run predates only the doc edits above it,
+            which do not affect measurement)
+
+Throughput is best-of-N GiB/s under the useful-bytes convention (1R+1W),
+each implementation in its native row-major layout, one thread everywhere
+(PyTorch intra-/inter-op AND the ExecuTorch pthreadpool).
+
+==============================================================
+PyTorch  (bench/baselines/torch_norm_bench.py)
+==============================================================
+  
+  128x64
+    LayerNorm eager   best   12.85  median   12.57  p10-p90   11.40-  12.74
+    RMSNorm   eager   best    9.04  median    8.77  p10-p90    7.65-   8.99
+    LayerNorm compile best    3.97  median    3.84  p10-p90    3.34-   3.95
+    RMSNorm   compile best    4.48  median    4.40  p10-p90    4.27-   4.47
+  
+  1024x2048
+    LayerNorm eager   best    8.53  median    7.76  p10-p90    7.67-   7.87
+    RMSNorm   eager   best    5.21  median    2.90  p10-p90    2.81-   2.99
+    LayerNorm compile best    4.60  median    4.52  p10-p90    4.47-   4.55
+    RMSNorm   compile best    6.51  median    6.44  p10-p90    6.35-   6.49
+  
+  4096x8192
+    LayerNorm eager   best    7.36  median    7.21  p10-p90    7.11-   7.31
+    RMSNorm   eager   best    2.82  median    2.75  p10-p90    2.68-   2.81
+    LayerNorm compile best    4.45  median    4.40  p10-p90    4.35-   4.44
+    RMSNorm   compile best    6.04  median    4.57  p10-p90    1.94-   5.47
+  
+  Each timed implementation has a separate output entry in manifest.txt.
+  
+==============================================================
+ExecuTorch  (bench/baselines/executorch_norm_bench.py)
+==============================================================
+  executorch 1.4.1, torch 2.13.0, torch threads=1, et threadpool=1
+  GiB/s: useful bytes (1R+1W); native row-major layout
+  
+  128x64
+    LayerNorm portable best    5.05  median    4.98  p10-p90    4.71-   5.02
+    LayerNorm xnnpack  best    4.95  median    4.92  p10-p90    4.19-   4.95
+    RMSNorm   portable best    2.53  median    2.50  p10-p90    2.33-   2.53
+    RMSNorm   xnnpack  best    8.42  median    8.09  p10-p90    6.89-   8.42
+  
+  1024x2048
+    LayerNorm portable best    6.12  median    6.01  p10-p90    5.98-   6.11
+    LayerNorm xnnpack  best    6.18  median    6.15  p10-p90    6.09-   6.17
+    RMSNorm   portable best    1.92  median    1.89  p10-p90    1.88-   1.91
+    RMSNorm   xnnpack  best    5.10  median    4.36  p10-p90    4.32-   4.45
+  
+  4096x8192
+    LayerNorm portable best    5.95  median    5.83  p10-p90    5.78-   5.91
+    LayerNorm xnnpack  best    5.98  median    5.89  p10-p90    5.74-   5.97
+    RMSNorm   portable best    1.85  median    1.84  p10-p90    1.83-   1.84
+    RMSNorm   xnnpack  best    4.14  median    4.09  p10-p90    4.06-   4.14
+  
+  Each timed implementation has a separate output entry in manifest.txt.
+  
+==============================================================
+Correctness gate  (bench/baselines/verify_baseline.cpp)
+==============================================================
+  Cross-verification against the C++ float64 reference
+    # m n epsilon norm implementation filename
+    # framework torch 2.13.0
+    # python 3.12.14
+    # threads 1
+  
+    implementation       norm   shape        max|diff|   verdict
+    torch_eager          layer  128x64       1.192e-06   PASS
+    torch_eager          rms    128x64       2.384e-07   PASS
+    torch_compile        layer  128x64       5.960e-07   PASS
+    torch_compile        rms    128x64       2.384e-07   PASS
+    torch_eager          layer  1024x2048    4.768e-07   PASS
+    torch_eager          rms    1024x2048    2.384e-07   PASS
+    torch_compile        layer  1024x2048    9.537e-07   PASS
+    torch_compile        rms    1024x2048    3.576e-07   PASS
+    torch_eager          layer  4096x8192    5.960e-07   PASS
+    torch_eager          rms    4096x8192    2.384e-07   PASS
+    torch_compile        layer  4096x8192    1.311e-06   PASS
+    torch_compile        rms    4096x8192    9.537e-07   PASS
+  
+  12 / 12 checks passed.
+  Every implementation/shape row in the manifest computes the same
+  function as our reference, which is what makes the comparison valid.
+
+  Cross-verification against the C++ float64 reference
+    # m n epsilon norm implementation filename
+    # framework executorch 1.4.1 (torch 2.13.0)
+    # python 3.12.14
+    # threads 1 (executorch threadpool 1)
+  
+    implementation       norm   shape        max|diff|   verdict
+    et_portable          layer  128x64       3.099e-06   PASS
+    et_xnnpack           layer  128x64       3.099e-06   PASS
+    et_portable          rms    128x64       3.576e-07   PASS
+    et_xnnpack           rms    128x64       3.576e-07   PASS
+    et_portable          layer  1024x2048    7.153e-07   PASS
+    et_xnnpack           layer  1024x2048    7.153e-07   PASS
+    et_portable          rms    1024x2048    1.073e-06   PASS
+    et_xnnpack           rms    1024x2048    1.073e-06   PASS
+    et_portable          layer  4096x8192    7.153e-07   PASS
+    et_xnnpack           layer  4096x8192    7.153e-07   PASS
+    et_portable          rms    4096x8192    2.265e-06   PASS
+    et_xnnpack           rms    4096x8192    2.265e-06   PASS
+  
+  12 / 12 checks passed.
+  Every implementation/shape row in the manifest computes the same
+  function as our reference, which is what makes the comparison valid.
