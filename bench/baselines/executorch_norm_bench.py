@@ -105,6 +105,23 @@ def load_runtime(buffer):
     return _load_for_executorch_from_buffer(buffer)
 
 
+def pin_single_thread() -> int:
+    """Force ExecuTorch onto one worker and return the resulting count.
+
+    torch.set_num_threads(1) does NOT reach here: ExecuTorch runs its own
+    pthreadpool, which both the portable kernels and the XNNPACK delegate use,
+    and it defaults to the machine's core count (10 on this M4).  Measured
+    without this, the portable RMSNorm path ran at 2.5 CPU-seconds per wall
+    second and the XNNPACK one at 1.7 -- so a comparison labelled
+    single-threaded was not, and the portable RMSNorm figure was inflated
+    roughly 2x (4.23 -> 1.93 GiB/s at 1024x2048).
+    """
+    from executorch.extension.pybindings import portable_lib
+
+    portable_lib._unsafe_reset_threadpool(1)
+    return portable_lib._threadpool_get_thread_count()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--outdir", required=True)
@@ -118,20 +135,22 @@ def main() -> int:
         torch.set_num_interop_threads(1)
     except RuntimeError:
         pass
+    et_threads = pin_single_thread()
 
     try:
         et_version = importlib.metadata.version("executorch")
     except importlib.metadata.PackageNotFoundError:
         et_version = "unknown"
 
-    print(f"executorch {et_version}, torch {torch.__version__}, threads={torch.get_num_threads()}")
+    print(f"executorch {et_version}, torch {torch.__version__}, "
+          f"torch threads={torch.get_num_threads()}, et threadpool={et_threads}")
     print("GiB/s: useful bytes (1R+1W); native row-major layout\n")
 
     manifest = [
         "# m n epsilon norm implementation filename",
         f"# framework executorch {et_version} (torch {torch.__version__})",
         f"# python {sys.version.split()[0]}",
-        f"# threads {torch.get_num_threads()}",
+        f"# threads {torch.get_num_threads()} (executorch threadpool {et_threads})",
     ]
 
     for m, n in SHAPES:
