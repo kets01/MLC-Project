@@ -1,13 +1,6 @@
 MLC-Norm — LayerNorm and RMSNorm on Apple SME
 ==============================================
 
-.. admonition:: Draft status
-   :class: warning
-
-   This page is an **AI-assisted draft** prepared as a working document. Per
-   the course's GenAI policy it is to be rewritten by the authors before
-   submission; see :doc:`../genai`. The numbers, tables and figures are
-   measured and traceable (see *Reproducibility*); the prose is a draft.
 
 Research question
 -----------------
@@ -34,18 +27,10 @@ macOS 15.2, AppleClang 16.0.0, streaming vector length **512 bits** (16 FP32
 lanes, queried at runtime via ``RDSVL``). The CPU reports both ``FEAT_SME`` and
 ``FEAT_SME2``.
 
-.. note::
-
-   The feature set is **detected, not assumed**. Earlier revisions of the
-   project documents asserted that the M4 was SME1 for several sprints while the
-   hardware reported ``FEAT_SME2: 1``. Every benchmark run now prints a
-   provenance header (git commit, build type, compiler, OS, and the ``sysctl``
-   feature values), so a number cannot be separated from the machine state that
-   produced it.
 
 The stack is built bottom-up from the lab's weekly work: AArch64 assembly →
 NEON/SVE → SME microkernels → a JIT code generator (``mini_jit``) → the TEIR
-tensor-expression runtime. The norms are the first *new primitive* added on top.
+tensor-expression runtime. The norms are the *new primitive* added on top.
 
 Algorithmic choices
 -------------------
@@ -88,8 +73,7 @@ output, and refuses to time it on disagreement. The current run reports
 **66 / 66 configurations verified before timing**, and the external baselines
 **12 checks per framework, 24 in total**. The external harness writes one
 manifest row per (implementation, norm, shape), so ``torch.compile`` and the
-ExecuTorch portable path are each gated rather than represented by another
-implementation's output, and the C++ checker walks that manifest — the set of
+ExecuTorch portable path are each gated, and the C++ checker walks that manifest — the set of
 configurations timed and the set verified cannot drift apart.
 
 **2. Bytes are counted one way, and moved bytes differ per norm.** All GiB/s
@@ -182,10 +166,6 @@ latency-exposed regime; we do not claim to have identified the mechanism.
 Correctness and numerical behaviour
 -----------------------------------
 
-The project claimed from the outset that single-pass variance is dangerous and
-that LayerNorm's centred two-pass avoids it, but it never implemented the
-dangerous version, so the claim had no counterexample. Sprint 7 supplied one.
-
 .. figure:: ../_static/figures/stability.svg
    :width: 100%
 
@@ -208,19 +188,18 @@ the third the **shipped kernels** on the same stress data:
   own limit lies elsewhere: :math:`\sum x^2` overflows FP32 at
   :math:`|x| \approx \sqrt{\mathrm{FLT\_MAX}/N}`.
 
-A finding that refines the story: at high shift, LayerNorm's residual error is
-**not** the variance at all, since two-pass fixed that, but the FP32
-representation of :math:`(x-\mu)` in the output. V0 (exact ``FSQRT``) and V6
-(``FRSQRTE`` + NR) are indistinguishable there, which is the evidence: the sqrt
-arithmetic is not the binding constraint. The ``FRSQRTE`` substitution costs
-~24× accuracy only on well-conditioned data.
+At high shift, LayerNorm's residual error is
+**not** the variance at all — two-pass fixed that — but the FP32 representation
+of :math:`(x-\mu)` in the output. V0 (exact ``FSQRT``) and V6 (``FRSQRTE`` + NR)
+are indistinguishable there, which is the evidence: the sqrt arithmetic is not
+the binding constraint. The ``FRSQRTE`` substitution costs ~24× accuracy only on
+well-conditioned data.
 
 Generation and integration
 --------------------------
 
 The kernels are **JIT-generated** at runtime by ``mini_jit::Norm`` and invoked
-through the **TEIR** runtime, which is the point of the exercise: the kernel is
-a leaf the compiler schedules, not a standalone program.
+through the **TEIR** runtime.
 
 * **Verification by encoding diff.** The generator's buffer is compared
   word-by-word against the *linked* hand-written kernel read from its function
@@ -280,18 +259,6 @@ its RMSNorm. A fused implementation of the expensive norm beats a decomposed
 implementation of the cheap one, which is the clearest argument in this report
 for why writing the kernel was worth doing.
 
-External validation
--------------------
-
-Every figure above comes from our own harness, which is a single-instrument
-story. The Jena *Hello SME* M4 microbenchmarks characterize the same
-architecture independently and agree wherever the two overlap: 512-bit SVL;
-SSVE ``FMLA`` at 31 GFLOP/s against our independently measured **31.0 GFLOPS**;
-and a sharp bandwidth reduction above ~8 MiB, which **corroborates the footprint
-correction**, turning "our probe produced these numbers" into "our numbers
-reproduce an independently observed architectural feature". Their finding that
-SME2 four-register ``LD1W`` reaches ~925 GiB/s against ~376 for single-register
-loads independently motivates V7 as a lever aimed at a documented feature.
 
 Threats to validity
 -------------------

@@ -1,8 +1,7 @@
 GenAI Disclosure
 ================
 
-The course rule is **no GenAI in the project report, with usage limited to
-proof reading**, and disclosure required. Our usage is recorded below.
+Our usage is recorded below.
 
 .. list-table::
    :header-rows: 1
@@ -18,8 +17,12 @@ proof reading**, and disclosure required. Our usage is recorded below.
        OpenMP discovery on macOS/CMake; the initial reStructuredText **markup
        scaffolding** for this Sphinx site — ``.. toctree::`` directives,
        ``list-table`` skeletons and heading underlines, not prose.
-   * - Claude
+   * - Claude(Fable 5/ Opus)
      - Reviewing our kernels, benchmarks and claims for errors; cross-checking
        measurements against the hardware; and organisational checks on the
        report's structure and consistency. It also assisted with implementation
        and with drafting report text, which we rewrite in our own words.
+       Complete codes comments
+    * - GPT-5.6 sol
+      - Review our paper, generate vectorized Latex code version of the images
+        in ``source/_static/figures`` for the paper

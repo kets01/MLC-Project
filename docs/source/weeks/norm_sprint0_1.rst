@@ -56,7 +56,7 @@ verification harness (including numerical-stability stress cases), and a
 reproducible GiB/s measurement that sets the roofline target for all future
 kernels.
 
-Canonical kernel signature (decision A)
+Canonical kernel signature
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Both norms share a single interface defined in ``include/norm/norm.hpp`` under
@@ -83,7 +83,7 @@ registration, so no layer invents its own.
                       int64_t ld_a, int64_t ld_b,
                       float epsilon);
 
-Reference implementations (decision B/C)
+Reference implementations 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``src/norm/reference.cpp`` implements both norms as deliberately simple scalar
@@ -103,7 +103,6 @@ Sum of squares ``Σx²``, divide by N, add ε, take the inverse square root, the
 scale by γ.  There is no mean subtraction and no β: one reduction stage instead
 of two, so two traversals of the input instead of three.
 
-.. note::
 
    Three separate claims, kept separate (Sprint 10). **Semantics:** RMSNorm
    omits mean-centering, hence one fewer reduction and one fewer traversal.
@@ -116,7 +115,7 @@ of two, so two traversals of the input instead of three.
    RMSNorm matches an *RMSNorm reference*, which says nothing about whether
    substituting RMSNorm for LayerNorm preserves accuracy in a given network.
 
-Correctness harness (decision B)
+Correctness harness
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``tests/test_norm.cpp`` covers four cases for each norm:
@@ -135,7 +134,7 @@ Correctness harness (decision B)
 All tests run on the CI runner (M1/M2, no SME required) with tolerance
 ``epsilon = 1e-5``.
 
-Bandwidth harness and roofline (decision E)
+Bandwidth harness and roofline
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``apps/main_norm.cpp`` measures:
@@ -239,7 +238,7 @@ Sprint 1 status
 ~~~~~~~~~~~~~~~
 
 - **Reference:** both ``layer_norm_ref`` and ``rms_norm_ref`` implemented and
-  merged (PR #24).
+  merged.
 - **Signature:** canonical interface pinned in ``include/norm/norm.hpp``.
 - **Tests:** 8 Catch2 cases (4 per norm), all green on CI, including
   large-magnitude stability-stress inputs.
