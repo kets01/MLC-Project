@@ -40,6 +40,12 @@ static void request_p_core() {
 #endif
 }
 
+// Everything from here to the end of this block serves the threaded sections
+// only, so it is compiled out without OpenMP — otherwise the strict-warning
+// build fails on unused functions, which is how CI (whose runner has no
+// libomp) caught this.
+#if BENCH_HAS_OMP
+
 // What QoS the OpenMP workers should request.  Three states because the two
 // non-default ones answer different questions:
 //
@@ -97,6 +103,8 @@ static double cpu_seconds() {
     return (double)ru.ru_utime.tv_sec + 1e-6 * (double)ru.ru_utime.tv_usec
          + (double)ru.ru_stime.tv_sec + 1e-6 * (double)ru.ru_stime.tv_usec;
 }
+
+#endif  // BENCH_HAS_OMP
 
 // ---------------------------------------------------------------------------
 // Timing helpers
@@ -1581,6 +1589,8 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
 //
 // ---------------------------------------------------------------------------
 
+#if BENCH_HAS_OMP
+
 // GROUP-ALIGNED WORK DISTRIBUTION — measured, not cosmetic.
 //
 // V6/V7 process 4*VL rows per group and send the remainder to a single-block
@@ -1628,7 +1638,6 @@ static std::pair<int64_t, int64_t> row_span(int64_t M, int t, int nthreads,
     return { r0, std::min<int64_t>(nb * rb, M - r0) };
 }
 
-#if BENCH_HAS_OMP
 // One row-parallel invocation of an RMSNorm / LayerNorm kernel.
 //
 // request_p_core() is called INSIDE the parallel region, per worker, and that
