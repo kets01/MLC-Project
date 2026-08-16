@@ -1,7 +1,7 @@
 # m n epsilon norm implementation filename
 # framework executorch 1.4.1 (torch 2.13.0)
 # python 3.12.14
-# threads 1
+# threads 1 (executorch threadpool 1)
 128 64 1e-05 layer et_portable ln_et_portable_128x64.f32
 128 64 1e-05 layer et_xnnpack ln_et_xnnpack_128x64.f32
 128 64 1e-05 rms et_portable rms_et_portable_128x64.f32
