@@ -60,8 +60,8 @@ GROUP_ROWS = 64
 
 BASE_LABELS = ["ours (V7)", "torch\neager", "torch\ncompile",
                "ExecuTorch\nportable", "ExecuTorch\nXNNPACK"]
-BASE_RMS = [24.63, 2.76, 5.90, 3.26, 4.19]
-BASE_LN = [13.52, 7.35, 4.44, 5.92, 5.93]
+BASE_RMS = [24.63, 2.82, 6.12, 3.27, 4.22]
+BASE_LN = [13.52, 7.52, 4.43, 5.87, 5.98]
 
 
 def _bar_group(f, i, n, values_colours, label, label_size=10.5,
