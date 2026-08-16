@@ -1,12 +1,12 @@
-MLC-Norm Sprint 6 — Optimization, Roofline & the Ablation Study
-================================================================
+MLC-Norm Sprint 6: Optimization, Roofline & the Ablation Study
+==============================================================
 
-Sprint 6 — the evaluation deliverable
---------------------------------------
+Sprint 6: the evaluation deliverable
+------------------------------------
 
 Goal: consolidate five sprints of scattered measurements into one attributable
 ablation, state every number against both validated ceilings, and test the one
-instruction-set lever left untried — SME2.
+instruction-set lever left untried, SME2.
 
 Two things came out of it that were not on the plan: a correctness defect that
 made most of the existing benchmark tables unreadable, and an SME2 result that
@@ -17,13 +17,13 @@ The blocker: the Sprint-5 ABI fix was only half-applied
 ---------------------------------------------------------
 
 The sprint opened by re-running ``main_norm`` for a baseline. **65 rows printed
-0.00 GiB/s** — Section 1 after the first SME call, and both ZA tables in their
+0.00 GiB/s**: Section 1 after the first SME call, and both ZA tables in their
 entirety. That is the ``d8-d15`` clobber signature already logged twice
 (``docs/dev-notes/sprint-errors/sprint4_errors.md`` #6 and #8).
 
 Sprint 5 fixed the two V6 winners, because those are what TEIR calls, and left
 everything else. A hardware probe over every entry point found **15 of 17
-destroying the caller's d9-d15**, including ``bw_probe_ssve`` — the roofline
+destroying the caller's d9-d15**, including ``bw_probe_ssve``, the roofline
 probe that every "% of peak" figure in this report is divided by.
 
 The reason it resurfaced now rather than then: ``main_norm`` defends itself with
@@ -38,8 +38,8 @@ established. Two notes on how it went, because both are the point:
   that asserts each expected prologue/epilogue block appears exactly once and
   refuses to touch a file otherwise. It still introduced a bug: the eps-slot
   rewrite also matched the freshly-inserted ``d9`` line, so ``d9`` and eps
-  collided in one stack slot. **Every functional test still passed** — eps
-  remained self-consistent — and only the register probe caught it. A
+  collided in one stack slot. **Every functional test still passed**, because
+  eps remained self-consistent, and only the register probe caught it. A
   behavioural test cannot see a register it does not hold a value in.
 * The pre-existing ABI test covered only the two V6 kernels, which is precisely
   how the other 15 drifted. There is now a test pinning all 17 at once
@@ -51,21 +51,22 @@ documented values.
 The consolidated ablation
 --------------------------
 
-``main_norm`` now opens with a single table covering the whole ladder — scalar
-reference → V0 → V1/V2/V3 → V4/V5 → V6 → V7 → ZA → JIT — for both norms, on
+``main_norm`` now opens with a single table covering the whole ladder (scalar
+reference → V0 → V1/V2/V3 → V4/V5 → V6 → V7 → ZA → JIT) for both norms, on
 three shapes chosen to separate the regimes, with each row **verified against
-the C++ reference before its GiB/s is printed** (decision B) and the measured
-maximum deviation printed beside it, against **both** ceilings (decision E).
+the C++ reference before its GiB/s is printed** (decision B), the measured
+maximum deviation printed beside it, and figures given against **both**
+ceilings (decision E).
 
 It is written deliberately without the ``volatile`` discipline the older
 sections use: that workaround is no longer load-bearing, and if the ABI fix ever
 regresses this section shows it first, as 0.00 rows.
 
 The harness also caught a flaw in itself. At the small shape the hand-written V6
-first measured 10 % *below* its own word-identical JIT twin — impossible for
-identical code, so it was sampling noise, not signal. Repetitions now scale with
-working-set size instead of being a fixed count, after which the two agree to
-the last printed digit (38.56 / 38.56).
+first measured 10 % *below* its own word-identical JIT twin, which is
+impossible for identical code, so it was sampling noise rather than signal.
+Repetitions now scale with working-set size instead of being a fixed count,
+after which the two agree to the last printed digit (38.56 / 38.56).
 
 .. list-table:: Consolidated ablation, useful bytes (1R+1W), % of the ceiling at each footprint
    :header-rows: 1
@@ -121,14 +122,14 @@ the last printed digit (38.56 / 38.56).
      - 16.49 (14.3 %)
      - 13.55 (22.8 %)
 
-Every row verified; maximum deviation from the reference across the whole table
-is 1.9e-5 absolute, which is the accuracy FRSQRTE+NR actually delivers rather
-than a tolerance chosen to pass.
+Every row is verified; the maximum deviation from the reference across the whole
+table is 1.9e-5 absolute, which is the accuracy FRSQRTE+NR delivers rather than
+a tolerance chosen to pass.
 
 .. admonition:: Denominator corrected after this table was first published (§1.2)
    :class: warning
 
-   As originally printed, every column divided by **59.5 GiB/s** — the ceiling
+   As originally printed, every column divided by **59.5 GiB/s**, the ceiling
    the Sprint-2a probe measured at a 256 MiB working set.  The 16 MiB columns
    are cache-resident and their real ceiling is **115.56 GiB/s**, so those
    percentages were inflated ~2× (V6 at 16 MiB read "65 %"; it is 33.3 %).
@@ -140,18 +141,18 @@ than a tolerance chosen to pass.
    that happens to suit one regime.
 
    The correction inverts one reading of this table.  At 16 MiB RMSNorm looked
-   like it was close to saturating its execution mode; it is at a third of the
-   available bandwidth.  What binds there is not memory at all — see the FP
-   issue-rate measurement below — which is also why V7 buys nothing at that
+   as though it was close to saturating its execution mode; it is at a third of
+   the available bandwidth.  What binds there is not memory at all (see the FP
+   issue-rate measurement below), which is also why V7 buys nothing at that
    footprint and +17 % at DRAM.
 
 SME2: the lever, and a wrong prediction
 -----------------------------------------
 
-The ROADMAP recorded a hardware correction — ``sysctl`` reports
+The ROADMAP recorded a hardware correction: ``sysctl`` reports
 ``FEAT_SME2 = 1`` on the target M4, so the machine is not SME1-only as the docs
-assumed — and pre-registered the expectation that SME2 **cannot help**, since it
-does not raise the DRAM roofline.
+assumed.  It also pre-registered the expectation that SME2 **cannot help**,
+since it does not raise the DRAM roofline.
 
 V6's group loop already touches four consecutive VL-row blocks per column at
 ``[x8]``, ``[x8,#1,MUL VL]``, ``[x8,#2,MUL VL]``, ``[x8,#3,MUL VL]``. That is
@@ -164,7 +165,7 @@ with four accesses folded into one**:
     4x  st1w {zN.s}, p0,   [x9, #k, mul vl]   ->  st1w {z0.s-z3.s}, pn8, [x9]
 
 Same addresses, same traffic, same arithmetic, same summation order. The only
-variable is instruction count — which makes it a clean test of whether V6 is
+variable is instruction count, which makes it a clean test of whether V6 is
 issue-bound or memory-bound. Because no value changes, the correctness gate is
 **bit-identity with V6**, not a tolerance.
 
@@ -197,7 +198,7 @@ Measured (order-alternating A/B, 24 samples each way, medians):
 .. note::
 
    **Two numbers for the same effect, reconciled (Sprint 10).** This table is a
-   dedicated A/B study — order-alternating, 24 samples each way — and gives
+   dedicated A/B study (order-alternating, 24 samples each way) and gives
    **+17.2 %** (20.96 → 24.56). The consolidated ablation measures the same
    pair in a different run and gives **+21.5 %** (20.29 → 24.65). Both are
    real; they differ because they are separate measurement sets, and the
@@ -205,7 +206,7 @@ Measured (order-alternating A/B, 24 samples each way, medians):
 
    **The A/B study is authoritative for this claim**, because alternating the
    order of the two variants within one run is what controls for drift between
-   them — which is exactly what a paired comparison needs and what the
+   them, which is exactly what a paired comparison needs and what the
    consolidated table, measuring each rung once in sequence, does not do. The
    report quotes **+17.2 %**; where the consolidated table's own numbers are
    shown, the implied ratio is the larger one, and that is why.
@@ -215,7 +216,7 @@ could explain an RMSNorm win, and they make opposite predictions for LayerNorm:
 
 * *Fewer instructions retire faster.* LayerNorm folds **more** accesses per
   element (three passes, not two), so it should gain **more**.
-* *Relieved memory-level parallelism* — one instruction requesting 256
+* *Relieved memory-level parallelism.* One instruction requesting 256
   contiguous bytes occupies less load-tracking capacity than four requesting 64,
   which only matters where outstanding-request capacity is the constraint.
   LayerNorm does far more FP work per byte and is the less memory-starved of the
@@ -257,19 +258,19 @@ instruction should land halfway between V6 and V7, around +9 %.
      - +17.9 %
 
 **The curve saturates**: going 4 → 2 captures 90 % of the win, and 2 → 1 adds
-only 1.5 %. That is inconsistent with a proportional bytes-per-slot model — the
-memory-level-parallelism hypothesis — *and* with a "256 B burst matches the
+only 1.5 %. That is inconsistent with a proportional bytes-per-slot model, i.e.
+the memory-level-parallelism hypothesis, *and* with a "256 B burst matches the
 prefetcher" model. Both pre-registered explanations are dead.
 
-So the honest statement is narrower than the one this section originally made
-("the memory-level-parallelism one survives"): what is supported is a
-**threshold effect on load-instruction count**, in load-dominated loops, in the
-latency-exposed regime only. Why the threshold sits between four and two
+The defensible statement is therefore narrower than the one this section
+originally made ("the memory-level-parallelism one survives"): what is supported
+is a **threshold effect on load-instruction count**, in load-dominated loops, in
+the latency-exposed regime only. Why the threshold sits between four and two
 instructions per column is not established here.
 
 This still refines Sprint 2b rather than contradicting it: V6 made the
 *addresses* contiguous, V7 makes the *request* singular. SME2 did not raise the
-roofline — the ROADMAP was right about that — it changed how much of the
+roofline, as the ROADMAP correctly predicted; it changed how much of the
 existing roofline one core can reach.
 
 Promotion into the JIT and TEIR
@@ -283,18 +284,20 @@ build host.
 
 Three new ``InstGen`` encoders were needed (``PTRUE PNn.S``, 4-vector ``LD1W``
 and ``ST1W``). Field layouts were derived from 13 toolchain golden words varying
-register, base and predicate independently, then pinned by unit test — the
-Sprint-4 methodology, which is what keeps the encoding diff from being circular.
+register, base and predicate independently, then pinned by unit test, following
+the Sprint-4 methodology, which is what keeps the encoding diff from being
+circular.
 
 Both SME2 kernels pass the whole-buffer encoding diff against their linked
 hand-written counterparts, so the emitted code inherits the trust of kernels
 that already passed bit-identity and reference verification. Emitted sizes drop
-from 157 → 110 words (RMSNorm) and 208 → 144 (LayerNorm): the 9 and 12 folded
-accesses, plus the whole predicated tail path, which the counter predicate
-(``WHILELO …,VLx4`` governing full and partial groups alike) makes unnecessary.
+from 157 → 110 words (RMSNorm) and 208 → 144 (LayerNorm), accounting for the 9
+and 12 folded accesses plus the whole predicated tail path, which the counter
+predicate (``WHILELO …,VLx4`` governing full and partial groups alike) makes
+unnecessary.
 
-TEIR picks this up for free — its runtime constructs the generators with the
-default — so the integrated path improves without any change to the runtime:
+TEIR picks this up for free, since its runtime constructs the generators with
+the default, so the integrated path improves without any change to the runtime:
 
 .. list-table:: TEIR + OpenMP, 256 MiB working set, before/after V7 emission
    :header-rows: 1
@@ -330,7 +333,7 @@ This section previously recorded SME2-on-ZA as a *reasoned skip*, on Sprint 3's
 finding that ZA is ``mova``-bound at ~10 GiB/s and the arithmetic that "even a
 2× ``mova`` speed-up only reaches ~20 GiB/s, a tie at best with V6".
 
-That skip rested on an untested factor. ``mova`` had never been characterised
+That skip rested on an untested factor. ``mova`` had never been characterized
 as **issue**-bound versus **ZA-port**-bound, and the assumed 2× was a guess.
 Measured directly, with no memory traffic and 16 vectors moved either way:
 
@@ -347,8 +350,8 @@ Measured directly, with no memory traffic and 16 vectors moved either way:
      - **15.50**
      - **4.00×**
 
-``mova`` is issue-bound, and the fold is 4:1, not the assumed 2:1 — so the
-skip's own arithmetic did not hold, and the kernels were built:
+``mova`` is issue-bound, and the fold is 4:1 rather than the assumed 2:1, so
+the skip's own arithmetic did not hold and the kernels were built:
 ``rms_norm_za_sme2.S`` and ``layer_norm_za_sme2.S``, bit-identical to their
 Sprint-3 counterparts on every shape tested.
 
@@ -371,15 +374,15 @@ Sprint-3 counterparts on every shape tested.
      - **+114 %**
      - −24 %
 
-**The verdict is unchanged — ZA still loses — but it is now a measured verdict
-rather than an extrapolation from an assumed factor.** And the residual cause
-is different from the original diagnosis: the ZA kernels process **one** SVL-row
-block per iteration (64 B per column touch) against V6/V7's **four** (256 B).
-What limits them is the Sprint-2b access-density lever, not ``mova`` throughput
-— which is why making ``mova`` 4× faster still left them behind.
+**The verdict is unchanged, since ZA still loses, but it is now a measured
+verdict rather than an extrapolation from an assumed factor.** And the residual
+cause is different from the original diagnosis: the ZA kernels process **one**
+SVL-row block per iteration (64 B per column touch) against V6/V7's **four**
+(256 B). What limits them is the Sprint-2b access-density lever, not ``mova``
+throughput, which is why making ``mova`` 4× faster still left them behind.
 
-External validation — an independent M4 characterization
-----------------------------------------------------------
+External validation: an independent M4 characterization
+-------------------------------------------------------
 
 Every bandwidth and issue-rate figure in this report comes from our own
 harness. That is a single-instrument story, and a reader is entitled to ask
@@ -416,30 +419,32 @@ Three things follow, and the middle one is the most useful:
 **The FP issue rate is an exact independent match.** Our 31.0 GFLOPS for SSVE
 ``FMLA`` was measured to explain why V7 gains nothing cache-resident; their
 31 GFLOP/s was measured to characterize the ISA. Two harnesses, two purposes,
-same number — which is meaningful corroboration that our instrument is sound.
+the same number, which is meaningful corroboration that our instrument is sound.
 
 **Their cache cliff independently supports the footprint correction.** The
-single largest correction in this report (§1.2 — the ceiling is a curve, not a
-constant) rests on the claim that a major memory-hierarchy transition occurs
-around this scale. An external measurement of the same machine reports exactly
-such a transition above ~8 MiB. That turns "our probe produced these numbers"
-into "our numbers reproduce an independently observed architectural feature".
+single largest correction in this report (§1.2, the ceiling is a curve rather
+than a constant) rests on the claim that a major memory-hierarchy transition
+occurs around this scale. An external measurement of the same machine reports
+exactly such a transition above ~8 MiB. That turns "our probe produced these
+numbers" into "our numbers reproduce an independently observed architectural
+feature".
 
 **Their multi-vector result independently motivates V7.** They report SME2
 four-register ``LD1W`` reaching ~925 GiB/s against ~376 for single-register
-loads, cache-resident. Our V7 change — folding four single-vector accesses into
-one 4-vector access — is precisely that lever. This does *not* predict a 2.46×
+loads, cache-resident. Our V7 change, folding four single-vector accesses into
+one 4-vector access, is precisely that lever. This does *not* predict a 2.46×
 kernel speed-up: a norm is not a pure load benchmark, and our own result is
 +17 % at DRAM and ≈0 in cache. But it does establish V7 as a design decision
-pointed at a documented architectural feature, not opportunistic ISA trickery.
+pointed at a documented architectural feature rather than opportunistic ISA
+trickery.
 
 .. note::
 
    **Absolute bandwidth numbers should not be expected to match**, and ours do
    not: we measure ~292 GiB/s at 64 KiB where they report 376–925 GiB/s
    cache-resident. That is not a contradiction. Their figures are read-only
-   loads with a specific instruction selection — and they show that instruction
-   choice *alone* moves cache bandwidth from ~376 to ~925 GiB/s — whereas ours
+   loads with a specific instruction selection, and they show that instruction
+   choice *alone* moves cache bandwidth from ~376 to ~925 GiB/s, whereas ours
    is a 1R+1W scale-add under the useful-bytes convention. Different traffic
    definitions and different instruction streams give different absolute
    numbers; the *qualitative behaviour* is what agrees, and that is what is
@@ -458,26 +463,26 @@ Instrument readings from this sprint
 Several measurements taken to settle the arguments above are worth recording in
 their own right, independently of the conclusions they supported.
 
-* **The ceiling is footprint-dependent in both execution modes** — the curve in
-  §1.2 above. Streaming mode costs ~25 % against NEON at DRAM (0.75×) but is
-  nearly free in cache (0.93×), so "streaming is a structural handicap" is a
-  DRAM-regime statement, not a property of the mode.
+* **The ceiling is footprint-dependent in both execution modes**, as the curve
+  in §1.2 above shows. Streaming mode costs ~25 % against NEON at DRAM (0.75×)
+  but is nearly free in cache (0.93×), so "streaming is a structural handicap"
+  is a DRAM-regime statement rather than a property of the mode.
 * **SSVE FP issue rate:** ``FMLA`` 0.97 G instructions/s (= 31.0 GFLOPS);
-  ``FMUL`` 0.97 G instructions/s. The ratio is **1.00×** — an ``FMUL`` costs
-  exactly what an ``FMLA`` costs, so instructions, not flops, are the unit that
-  makes these comparable.
+  ``FMUL`` 0.97 G instructions/s. The ratio is **1.00×**, so an ``FMUL`` costs
+  exactly what an ``FMLA`` costs, and instructions rather than flops are the
+  unit that makes these comparable.
 * **Cache-resident RMSNorm V7 is FP-issue-bound, not memory-bound.** At 16 MiB
-  it sustains 0.97 G FP vector instructions/s — **100 % of the measured SSVE
-  issue ceiling** — against 0.65 G (67 %) in the true-DRAM regime. This is the
+  it sustains 0.97 G FP vector instructions/s, **100 % of the measured SSVE
+  issue ceiling**, against 0.65 G (67 %) in the true-DRAM regime. This is the
   explanation for something the ablation shows but does not account for: V7
   gains ~0 % at cache-resident footprints because bandwidth was never the
   binding constraint there.
-* **SME FMOPA issue rate:** 3.87 G instructions/s (1983.9 GFLOPS) — 3.99× the
-  ``FMLA`` *issue* rate and 64× its flop rate, reproducing the Jena "Hello SME"
-  figure.
+* **SME FMOPA issue rate:** 3.87 G instructions/s (1983.9 GFLOPS), which is
+  3.99× the ``FMLA`` *issue* rate and 64× its flop rate, reproducing the Jena
+  "Hello SME" figure.
 * **FMOPA and SSVE FP are disjoint resources.** 8 ``FMLA`` = 8.26 ns, 8
-  ``FMOPA`` = 2.07 ns, 8 of each interleaved = **8.26 ns** — exactly ``max``,
-  not ``sum``. They overlap completely.
+  ``FMOPA`` = 2.07 ns, 8 of each interleaved = **8.26 ns**, exactly ``max``
+  rather than ``sum``. They overlap completely.
 * **Multi-vector MOVA round-trips exactly:** two groups, all Z registers
   clobbered between write and read-back, 0 of 128 elements wrong.
 
@@ -485,8 +490,8 @@ their own right, independently of the conclusions they supported.
 
    A guard against a tempting misreading of the FMOPA numbers: normalization
    has an arithmetic intensity of ~0.33 flops/byte, and reaching a 1984 GFLOPS
-   matrix-unit peak would need ~31 flops/byte — about 100× more. "We are at
-   1 % of FMOPA peak" is not a defect to optimise away; it is what the roofline
+   matrix-unit peak would need ~31 flops/byte, about 100× more. "We are at
+   1 % of FMOPA peak" is not a defect to optimize away; it is what the roofline
    permits for this operator. Decision E already settles the metric: GiB/s, not
    GFLOPS.
 
@@ -499,22 +504,24 @@ Sprint 6 status
 * **Ablation:** one consolidated, per-row-verified table covering the full
   ladder for both norms across three regimes, with the byte convention restated
   in the header and each row divided by the ceiling **measured at its own
-  footprint** — the §1.2 correction, which also required making ``main_norm``
-  sweep the ceiling as a curve.
+  footprint**, i.e. the §1.2 correction, which also required making
+  ``main_norm`` sweep the ceiling as a curve.
 * **SME2:** ``cpu_supports_sme2()`` added; V7 built for both norms, verified
   bit-identical to V6, measured +17.2 % (RMSNorm) and +2.7 % (LayerNorm) in the
   DRAM regime; the pre-registered "no help" expectation is recorded as wrong.
   A 2-vector control then falsified **both** candidate explanations, leaving a
   threshold effect on load-instruction count as the supportable claim.
 * **SME2 on ZA:** the reasoned skip was retracted after measuring that ``mova``
-  is issue-bound with a 4:1 fold (not the assumed 2:1); both ZA kernels rebuilt
-  (+62 % RMSNorm, +114 % LayerNorm) and still losing to V7 — now by measurement
-  rather than extrapolation, and for a different reason than first diagnosed.
+  is issue-bound with a 4:1 fold (not the assumed 2:1); both ZA kernels were
+  rebuilt (+62 % RMSNorm, +114 % LayerNorm) and still lose to V7, now by
+  measurement rather than extrapolation, and for a different reason than first
+  diagnosed.
 * **Report corrections:** four claims already in the report were found wrong or
   overstated (the half-applied ABI fix, the single-constant roofline, the
   Welford accuracy claim, the ZA skip) and are corrected in place across
   Sprints 0/1 through 6; nine claims made *during* the sprint were refuted by
-  the next measurement. The full log is ``docs/dev-notes/sprint-errors/sprint6_errors.md``.
+  the next measurement. The full log is
+  ``docs/dev-notes/sprint-errors/sprint6_errors.md``.
 * **JIT/TEIR:** feature-dependent emission, three new encoders pinned to golden
   words, encoding diffs green for both SME2 kernels, TEIR single-thread RMSNorm
   +17.3 %.
@@ -530,10 +537,10 @@ Deliberately left open
   govern full and partial groups alike, so this is closed in the current code.)
 * **Threading past 8 cores.** Scaling is genuinely flat from ~8 threads
   (8 → 16 buys ~2 %) once chunks are group-aligned.  The earlier explanation
-  offered here — a strided walk from row chunking — was not established; see
+  offered here, a strided walk from row chunking, was not established; see
   the Sprint-5 correction box, where the mechanism behind the base-offset
   sensitivity is recorded as **unidentified**.
-* **The threshold behind V7's win.** The 2-vector control shows the gain
+* **The threshold behind V7's win.** The 2-vector control shows that the gain
   saturates between four and two load instructions per column, but not why the
   threshold sits there. Both pre-registered mechanisms were falsified; naming
   the real one needs microarchitectural counters this harness does not read.

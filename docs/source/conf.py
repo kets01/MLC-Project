@@ -7,7 +7,7 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = 'MLC Lab'
-copyright = '2026, "Ketsia Kemkuini" "Mariza Yamdjeu"'
+copyright = '2026, Ketsia Kemkuini Mariza Yamdjeu'
 author = '"Ketsia Kemkuini" "Mariza Yamdjeu"'
 release = '0.1'
 
