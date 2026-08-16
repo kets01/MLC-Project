@@ -23,6 +23,6 @@ Our usage is recorded below.
        report's structure and consistency. It also assisted with implementation
        and with drafting report text, which we rewrite in our own words.
        Complete codes comments
-    * - GPT-5.6 sol
-      - Review our paper, generate vectorized Latex code version of the images
-        in ``source/_static/figures`` for the paper
+   * - GPT-5.6 sol
+     - Review our paper, generate vectorized Latex code version of the images
+       in ``source/_static/figures`` for the paper
