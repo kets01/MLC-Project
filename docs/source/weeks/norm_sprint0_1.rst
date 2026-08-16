@@ -55,7 +55,7 @@ verification harness (including numerical-stability stress cases), and a
 reproducible GiB/s measurement that sets the roofline target for all future
 kernels.
 
-Canonical kernel signature (decision A)
+Canonical kernel signature
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Both norms share a single interface defined in ``include/norm/norm.hpp`` under
@@ -82,7 +82,7 @@ registration — no layer invents its own.
                       int64_t ld_a, int64_t ld_b,
                       float epsilon);
 
-Reference implementations (decision B/C)
+Reference implementations 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``src/norm/reference.cpp`` implements both norms as deliberately simple scalar
@@ -102,20 +102,9 @@ Sum of squares ``Σx²``, divide by N, add ε, take the inverse square root, the
 scale by γ.  No mean subtraction and no β — one reduction stage instead of two,
 so two traversals of the input instead of three.
 
-.. note::
 
-   Three separate claims, kept separate (Sprint 10). **Semantics:** RMSNorm
-   omits mean-centering, hence one fewer reduction and one fewer traversal.
-   **Literature:** Zhang & Sennrich (NeurIPS 2019) report *comparable task
-   performance* with runtime reductions of roughly **7–64 %** across their
-   experiments — not a single "10–40 %" figure. **Our measurement:** 1.8–2.3×
-   on the shapes evaluated here (Sprint 2). Earlier revisions collapsed these
-   into "~10–40 % faster at equal accuracy", which overstated the literature
-   and conflated kernel numerics with model accuracy: our tests show our
-   RMSNorm matches an *RMSNorm reference*, which says nothing about whether
-   substituting RMSNorm for LayerNorm preserves accuracy in a given network.
 
-Correctness harness (decision B)
+Correctness harness
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``tests/test_norm.cpp`` covers four cases for each norm:
@@ -134,7 +123,7 @@ Correctness harness (decision B)
 All tests run on the CI runner (M1/M2, no SME required) with tolerance
 ``epsilon = 1e-5``.
 
-Bandwidth harness and roofline (decision E)
+Bandwidth harness and roofline
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``apps/main_norm.cpp`` measures:
@@ -168,8 +157,7 @@ Bandwidth harness and roofline (decision E)
    compared against a real ceiling.  This is what the scalar oracle actually
    costs, and it is the honest starting point for Sprint 2's speed-ups.
 
-**Roofline target:** the streaming-mode ceiling at the shape's own footprint
-(Sprint 6 §1.2).  For these six shapes that is 104.7–117.2 GiB/s — all of them
+**Roofline target:** the streaming-mode ceiling at the shape's own footprint.  For these six shapes that is 104.7–117.2 GiB/s — all of them
 are cache-resident, so none of them faces the 59.5 GiB/s DRAM figure.
 
 .. list-table:: Sprint 1 — reference GiB/s (scalar C++, Apple M4, Release, re-measured in Sprint 6)
@@ -238,7 +226,7 @@ Sprint 1 status
 ~~~~~~~~~~~~~~~
 
 - **Reference:** both ``layer_norm_ref`` and ``rms_norm_ref`` implemented and
-  merged (PR #24).
+  merged.
 - **Signature:** canonical interface pinned in ``include/norm/norm.hpp``.
 - **Tests:** 8 Catch2 cases (4 per norm), all green on CI, including
   large-magnitude stability-stress inputs.

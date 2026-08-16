@@ -376,7 +376,7 @@ is why it is the incumbent.  On FP32 accuracy the two are comparable, with the
 ordering depending on the shift magnitude.  Welford's ablation row is kept with
 both measurements, not just the throughput number.
 
-LayerNorm vs RMSNorm on the same harness (decision C)
+LayerNorm vs RMSNorm on the same harness 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Best variant vs best variant (both V6), same shapes:

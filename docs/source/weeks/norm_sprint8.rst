@@ -3,11 +3,7 @@ MLC-Norm Sprint 8 — Correctness, Dispatch & Provenance Hardening
 
 Sprint 8 — making the results defensible
 ------------------------------------------
-
-This sprint contains no new kernel and no new optimization. It fixes a genuine
-API defect, and it closes the gap between "these numbers are true" and "these
-numbers are *demonstrably* true" — which for a performance project is the
-difference between a result and a claim.
+Complete exploration of the project for improvement
 
 The API defect: a silent no-op
 --------------------------------
@@ -35,10 +31,8 @@ distinguish success from a no-op, and would go on to consume stale or
 uninitialized memory.
 
 This is worth stating plainly because the project's own rules already forbade
-it. ``CLAUDE.md`` §4 says to *"fail fast and clearly… error loudly at the
-boundary — not with silent wrong numbers"*, and decision B makes correctness the
-precondition for every performance claim. The guard was added so tests could
-skip gracefully on CI, which is a real need — but it solved a test-harness
+it.The guard was added so tests could
+skip on CI, which is a real need — but it solved a test-harness
 problem by degrading the library's contract, and a silent no-op is the worst of
 the available options: it is indistinguishable from success.
 

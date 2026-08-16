@@ -96,4 +96,44 @@ Week 7
     * Performed the GFLOPS performance analysis for the heavy math tasks.
  
 
+Final Project: LayerNorm and RMSNorm
+------------------------------------
+
+The final project was developed jointly and the workload was split 
+between us. Responsibilities were divided across the two
+normalization paths while common infrastructure, benchmarking, validation,
+analysis, and final deliverables were shared.
+
+* **Ketsia Kemkuini**:
+    * Developed and optimized the **RMSNorm** path, including the scalar
+      reference, SSVE variants, four-block grouping, SME2 V7, the V7x2 control,
+      and ZA-based implementations.
+    * Contributed to the **JIT code-generation path**, including optimized
+      V6/V7 emission and validation against the corresponding hand-written
+      kernels.
+    * Contributed to the **performance evaluation**, including the kernel
+      ablation, bandwidth measurements, streaming-transition measurements,
+      small-shape crossover experiments, and interpretation of the
+      working-set-dependent behavior.
+    * Contributed to the **external baseline and reproducibility workflow**,
+      including PyTorch/ExecuTorch benchmarking, output verification, result
+      provenance, and submission-oriented build infrastructure.
+    * Co-developed the **TEIR/JIT integration**, debugging and correctness
+      checks, and co-authored the final report and presentation.
+
+* **Mariza Yamdjeu**:
+    * Developed and optimized the **LayerNorm** path, including the scalar
+      reference, SSVE variants, independent accumulators, four-block grouping,
+      SME2 V7, Welford, and ZA-based implementations.
+    * Contributed to the **JIT code-generation path**, including integration of
+      generated normalization kernels with the common runtime interface and
+      validation of generated instruction streams.
+    * Contributed to the **numerical and performance evaluation**, including
+      the LayerNorm stability study, variance-estimator comparison, correctness
+      analysis, and interpretation of the optimization results.
+    * Contributed to the **TEIR and parallel-execution path**, including
+      normalization integration, runtime shape/stride propagation, outer
+      scheduling, and OpenMP scaling experiments.
+    * Co-developed the **TEIR/JIT integration**, debugging and correctness
+      checks, and co-authored the final report and presentation.
 

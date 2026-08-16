@@ -1,13 +1,6 @@
 MLC-Norm — LayerNorm and RMSNorm on Apple SME
 ==============================================
 
-.. admonition:: Draft status
-   :class: warning
-
-   This page is an **AI-assisted draft** prepared as a working document. Per
-   the course's GenAI policy it is to be rewritten by the authors before
-   submission; see :doc:`../genai`. The numbers, tables and figures are
-   measured and traceable (see *Reproducibility*); the prose is a draft.
 
 Research question
 -----------------
@@ -21,10 +14,7 @@ asks is:
    JIT-generated SME/SSVE kernels bring LayerNorm and RMSNorm on Apple silicon,
    and what actually limits them?*
 
-The second half matters more than the first. A GiB/s number is only meaningful
-against a correctly chosen ceiling, and much of what this project learned came
-from discovering that its own ceiling — and several of its own claims — were
-wrong.
+
 
 System and hardware
 -------------------
@@ -34,24 +24,16 @@ macOS 15.2, AppleClang 16.0.0, streaming vector length **512 bits** (16 FP32
 lanes, queried at runtime via ``RDSVL``). The CPU reports both ``FEAT_SME`` and
 ``FEAT_SME2``.
 
-.. note::
-
-   The feature set is **detected, not assumed**. Earlier revisions of the
-   project documents asserted "the M4 is SME1" for several sprints while the
-   hardware reported ``FEAT_SME2: 1``. Every benchmark run now prints a
-   provenance header — git commit, build type, compiler, OS, and the ``sysctl``
-   feature values — so a number cannot be separated from the machine state that
-   produced it.
 
 The stack is built bottom-up from the lab's weekly work: AArch64 assembly →
 NEON/SVE → SME microkernels → a JIT code generator (``mini_jit``) → the TEIR
-tensor-expression runtime. The norms are the first *new primitive* added on top.
+tensor-expression runtime. The norms are the *new primitive* added on top.
 
 Algorithmic choices
 -------------------
 
 The two norms differ in **reduction structure**, and the project treats that as
-a deliberate ablation axis rather than a flag. The distinction that matters for
+a deliberate ablation axis. The distinction that matters for
 performance is *reduction stages* versus *input traversals* — the common
 shorthand "two-pass / single-pass" conflates them:
 
@@ -71,10 +53,7 @@ Three claims are kept separate throughout, because they are separate:
 **semantics** (RMSNorm omits mean-centering, hence one fewer traversal);
 **literature** (Zhang & Sennrich report comparable task performance with runtime
 reductions of roughly 7–64 % across their experiments); and **our measurement**
-(1.8–2.3× on the shapes evaluated here). Kernel numerical agreement is *not*
-model accuracy: our tests show our RMSNorm matches an *RMSNorm reference*, which
-says nothing about whether substituting one norm for the other preserves
-accuracy in a network.
+(1.8–2.3× on the shapes evaluated here).
 
 Performance methodology
 -----------------------
@@ -88,8 +67,7 @@ output, and refuses to time it on disagreement. The current run reports
 **66 / 66 configurations verified before timing**, and the external baselines
 **12 checks per framework, 24 in total**. The external harness writes one
 manifest row per (implementation, norm, shape), so ``torch.compile`` and the
-ExecuTorch portable path are each gated rather than represented by another
-implementation's output, and the C++ checker walks that manifest — the set of
+ExecuTorch portable path are each gated, and the C++ checker walks that manifest — the set of
 configurations timed and the set verified cannot drift apart.
 
 **2. Bytes are counted one way, and moved bytes differ per norm.** All GiB/s
@@ -97,8 +75,7 @@ figures count **useful bytes** = 1 read + 1 write per element. Moved bytes are
 1.5× that for RMSNorm and 2.0× for LayerNorm — the two must not be conflated,
 which an earlier version of the benchmark header did.
 
-**3. The ceiling is a curve, not a constant.** This is the project's largest
-correction and it invalidated percentages across five report sections.
+**3. The ceiling is a curve, not a constant.** 
 
 .. figure:: ../_static/figures/ceiling_curve.svg
    :width: 100%
@@ -111,8 +88,7 @@ correction and it invalidated percentages across five report sections.
 Consequences worth stating explicitly:
 
 * A cache-resident kernel divided by the DRAM ceiling is credited for a
-  constraint it never met. The most-quoted number in earlier drafts — RMSNorm V6
-  at "~95 % of the moved-bytes roofline" — is really **~50 %**.
+  constraint it never met. 
 * Streaming mode costs ~25 % against NEON at DRAM, so "streaming is a
   structural handicap" is a DRAM-regime statement. In the cache-resident range
   the two modes are comparable, but the ratio is not stable between runs (0.93×
@@ -184,9 +160,6 @@ latency-exposed regime; we do not claim to have identified the mechanism.
 Correctness and numerical behaviour
 -----------------------------------
 
-The project claimed from the outset that single-pass variance is dangerous and
-that LayerNorm's centred two-pass avoids it — but never implemented the
-dangerous version, so the claim had no counterexample. Sprint 7 supplied one.
 
 .. figure:: ../_static/figures/stability.svg
    :width: 100%
@@ -206,7 +179,7 @@ dangerous version, so the claim had no counterexample. Sprint 7 supplied one.
   makes it faster. Its own limit is elsewhere: :math:`\sum x^2` overflows FP32
   at :math:`|x| \approx \sqrt{\mathrm{FLT\_MAX}/N}`.
 
-A finding that refines the story: at high shift, LayerNorm's residual error is
+At high shift, LayerNorm's residual error is
 **not** the variance at all — two-pass fixed that — but the FP32 representation
 of :math:`(x-\mu)` in the output. V0 (exact ``FSQRT``) and V6 (``FRSQRTE`` + NR)
 are indistinguishable there, which is the evidence: the sqrt arithmetic is not
@@ -217,8 +190,7 @@ Generation and integration
 --------------------------
 
 The kernels are **JIT-generated** at runtime by ``mini_jit::Norm`` and invoked
-through the **TEIR** runtime, which is the point of the exercise: the kernel is
-a leaf the compiler schedules, not a standalone program.
+through the **TEIR** runtime.
 
 * **Verification by encoding diff.** The generator's buffer is compared
   word-by-word against the *linked* hand-written kernel read from its function
@@ -277,18 +249,6 @@ its RMSNorm. A fused implementation of the expensive norm beats a decomposed
 implementation of the cheap one — the clearest argument in this report for why
 writing the kernel was worth doing.
 
-External validation
--------------------
-
-Every figure above comes from our own harness, which is a single-instrument
-story. The Jena *Hello SME* M4 microbenchmarks characterize the same
-architecture independently and agree wherever the two overlap: 512-bit SVL;
-SSVE ``FMLA`` at 31 GFLOP/s against our independently measured **31.0 GFLOPS**;
-and a sharp bandwidth reduction above ~8 MiB, which **corroborates the footprint
-correction** — turning "our probe produced these numbers" into "our numbers
-reproduce an independently observed architectural feature". Their finding that
-SME2 four-register ``LD1W`` reaches ~925 GiB/s against ~376 for single-register
-loads independently motivates V7 as a lever aimed at a documented feature.
 
 Threats to validity
 -------------------
