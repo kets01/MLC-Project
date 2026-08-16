@@ -63,6 +63,14 @@ BASE_LABELS = ["ours (V7)", "torch\neager", "torch\ncompile",
 BASE_RMS = [24.63, 2.82, 6.04, 1.85, 4.14]
 BASE_LN = [13.52, 7.36, 4.45, 5.95, 5.98]
 
+# Sprint 7.6, threaded: our V7 against the best baseline at each thread count,
+# 4096x8192 (DRAM-bound) and 128x64 (where threading destroys our kernel).
+THR = [1, 2, 4, 10]
+THR_OURS_BIG = [24.64, 29.14, 35.76, 41.28]     # RMSNorm V7, 4096x8192
+THR_BASE_BIG = [5.83, 9.94, 11.00, 14.10]       # best framework, same rows
+THR_OURS_SMALL = [23.63, 1.88, 1.88, 1.88]      # RMSNorm V7, 128x64
+THR_BASE_SMALL = [8.99, 9.04, 8.88, 9.10]       # best framework, same rows
+
 
 def _bar_group(f, i, n, values_colours, label, label_size=10.5,
                value_fmt="{:.1f}"):
@@ -296,6 +304,47 @@ def fig_baselines():
         OUT / "baselines.svg")
 
 
+def fig_threaded():
+    """Two panels: the lead narrowing at scale, and the small-shape collapse."""
+    f = Fig(width=840, height=470, pad_l=86, pad_t=74, pad_b=82)
+    f.set_scales(1, 10, 0, 45, xlog=True)
+    f.frame("Adding threads: our kernel vs the best framework at each count",
+            "threads  (log scale)", "GiB/s  (useful bytes)",
+            "RMSNorm V7, P-core biased. Solid = 4096x8192 (DRAM-bound); "
+            "dashed = 128x64, where threading collapses our kernel.")
+    f.yticks([0, 10, 20, 30, 40])
+    f.xticks(THR, [str(t) for t in THR])
+
+    f.polyline(zip(THR, THR_OURS_BIG), BLUE)
+    f.markers(list(zip(THR, THR_OURS_BIG)), BLUE)
+    f.polyline(zip(THR, THR_BASE_BIG), VERM)
+    f.markers(list(zip(THR, THR_BASE_BIG)), VERM)
+
+    f.polyline(zip(THR, THR_OURS_SMALL), BLUE, dash="5 4")
+    f.markers(list(zip(THR, THR_OURS_SMALL)), BLUE)
+    f.polyline(zip(THR, THR_BASE_SMALL), VERM, dash="5 4")
+    f.markers(list(zip(THR, THR_BASE_SMALL)), VERM)
+
+    f.add_legend("ours (V7)", BLUE)
+    f.add_legend("best framework", VERM)
+
+    # The narrowing margin is the finding on the solid pair.
+    f.callout(["margin narrows 4.2x -> 2.9x:", "they scale better than we do"],
+              tx=f.px(2.15), ty=f.py(41.5), size=10.5, fill=INK,
+              weight="600", leader=False)
+    # The collapse is the finding on the dashed pair.
+    f.callout(["128x64: threading costs us 12.6x", "(cpu/wall 0.75 - blocked, not busy)"],
+              tx=f.px(1.9), ty=f.py(14.0), target=(2, 1.88), size=10.5,
+              fill=BLUE, weight="600")
+
+    f.draw_legend(prefer=[(f.pl + f.plot_w * 0.62, f.pt + 12)])
+    f.footnote(["Group granularity caps usable threads at M/256, so our "
+                "occupancy tops out at 6.6 against PyTorch's 7.8 -- which is",
+                "why the lead erodes. 96/96 correctness checks passed across "
+                "all four thread counts."])
+    return f.save(OUT / "threaded.svg")
+
+
 def fig_traversals():
     """Structure diagram: boxes sized to their text, plus a traffic bar."""
     f = Fig(width=840, height=330, pad_l=132, pad_t=64, pad_b=40)
@@ -356,5 +405,5 @@ def fig_traversals():
 
 if __name__ == "__main__":
     for fn in (fig_ceiling, fig_ablation, fig_stability, fig_crossover,
-               fig_baselines, fig_traversals):
+               fig_baselines, fig_threaded, fig_traversals):
         print("wrote", fn())
