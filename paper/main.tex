@@ -58,7 +58,7 @@ into a tiled-execution-IR runtime, verifying every configuration against a
 float64 oracle before it is timed. The best kernels reach 33\,\% of a
 footprint-matched bandwidth ceiling on useful bytes at cache-resident shapes and
 42\,\% in the DRAM regime, and outrun PyTorch 2.13 and ExecuTorch 1.4.1 by
-1.5--2.1$\times$ (LayerNorm) and 4.2--5.8$\times$ (RMSNorm) single-threaded.
+1.3--2.1$\times$ (LayerNorm) and 4.0--5.3$\times$ (RMSNorm) single-threaded.
 
 The negative and corrective results are the more transferable ones. Using the
 ZA matrix accumulator as a residency buffer \emph{loses} by 24--37\,\% even
@@ -281,7 +281,7 @@ to be timed, compares its complete output, and refuses to produce a timing on
 disagreement. An earlier version verified each row but still printed GiB/s
 beside a failure flag, which a reader scanning the throughput column would never
 notice. The submitted run reports \textbf{66/66 configurations verified before
-timing}, and the external baselines 6/6 each.
+timing}, and the external baselines 12 each.
 
 \subsection{Bytes are counted one way}
 
@@ -899,9 +899,10 @@ which would have to include boundary conversion.
 \emph{Correctness gates the comparison.} Every library output is dumped and
 verified against our float64 reference before its throughput is quoted; all
 agree to $\le$3.1e--6, so the numbers compare implementations of the same
-function. Both drivers dump every benchmarked shape and write a manifest that
-the checker walks, so the set of shapes timed and the set gated cannot drift
-apart.
+function. The manifest carries one row per (implementation, norm, shape) and the
+checker walks it, so \code{torch.compile} and the ExecuTorch portable path are
+each gated rather than represented by another implementation's output:
+\textbf{12 checks per framework, 24 in total, all passing}.
 
 \emph{One thread, same shapes, same byte convention, pinned versions.}
 
@@ -927,12 +928,12 @@ the XNNPACK delegate.}
 shape & \textbf{(V7)} & eager & compile & portable & XNNPACK \\
 \midrule
 \multicolumn{6}{l}{\emph{LayerNorm}} \\
-1024$\times$2048 & \textbf{16.47} & 7.89 & 4.63 & 6.17 & 6.06 \\
-4096$\times$8192 & \textbf{13.52} & 7.35 & 4.44 & 5.92 & 5.93 \\
+1024$\times$2048 & \textbf{16.47} & 7.79 & 4.55 & 6.16 & 6.25 \\
+4096$\times$8192 & \textbf{13.52} & 7.52 & 4.43 & 5.87 & 5.98 \\
 \midrule
 \multicolumn{6}{l}{\emph{RMSNorm}} \\
-1024$\times$2048 & \textbf{38.45} & 3.44 & 6.65 & 4.27 & 6.64 \\
-4096$\times$8192 & \textbf{24.63} & 2.77 & 5.90 & 3.26 & 4.19 \\
+1024$\times$2048 & \textbf{38.45} & 3.19 & 7.19 & 4.23 & 4.40 \\
+4096$\times$8192 & \textbf{24.63} & 2.82 & 6.12 & 3.27 & 4.22 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -940,8 +941,8 @@ shape & \textbf{(V7)} & eager & compile & portable & XNNPACK \\
 \subsection{The result is about fusion, not kernel quality}
 
 We are ahead of both baselines at every shape (Fig.~\ref{fig:baselines}):
-LayerNorm by 1.5--2.1$\times$ and
-RMSNorm by 4.2--5.8$\times$. The asymmetry is the interesting part, and it is
+LayerNorm by 1.3--2.1$\times$ and
+RMSNorm by 4.0--5.3$\times$. The asymmetry is the interesting part, and it is
 not about our kernels. Profiling what each module dispatches to on CPU shows
 \code{torch.nn.LayerNorm} reaching a single fused kernel, while
 \code{torch.nn.RMSNorm} decomposes into elementwise multiply, power, sum and
@@ -1057,7 +1058,7 @@ JIT-generated SME kernels invoked through a compiler runtime, verifying each
 step against a float64 oracle. The best kernels reach $\approx$33\,\% of a
 footprint-matched ceiling on useful bytes ($\approx$50\,\% on moved bytes) at
 cache-resident shapes and $\approx$42\,\% at DRAM, and beat two general-purpose
-frameworks by 1.5--5.8$\times$.
+frameworks by 1.3--5.3$\times$.
 
 The more useful outcomes are the negative and corrective ones. The ZA tile is
 the wrong tool for a bandwidth-dominated horizontal reduction, and it took a
