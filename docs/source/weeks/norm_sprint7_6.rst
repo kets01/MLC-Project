@@ -1,5 +1,5 @@
-MLC-Norm Sprint 7.6 — Threaded External Comparison
-====================================================
+MLC-Norm Sprint 7.6: Threaded External Comparison
+=================================================
 
 Closing a gap this report named itself
 ----------------------------------------
