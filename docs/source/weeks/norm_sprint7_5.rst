@@ -84,24 +84,39 @@ Method
 Correctness first
 ~~~~~~~~~~~~~~~~~~~
 
-.. list-table:: max\|diff\| vs our float64 reference, M=128 N=64
+.. list-table:: max\|diff\| vs our float64 reference, worst over the three shapes
    :header-rows: 1
 
    * - implementation
      - LayerNorm
      - RMSNorm
      - verdict
-   * - PyTorch 2.13.0
+   * - ``torch_eager``
      - 1.19e-06
      - 2.38e-07
      - same function
-   * - ExecuTorch 1.4.1
+   * - ``torch_compile``
+     - 1.31e-06
+     - 9.54e-07
+     - same function
+   * - ``et_portable``
      - 3.10e-06
-     - 3.58e-07
+     - 2.27e-06
+     - same function
+   * - ``et_xnnpack``
+     - 3.10e-06
+     - 2.27e-06
      - same function
 
-Both agree with our reference to FP32 rounding, so the throughput numbers below
-compare implementations of the *same* function.
+All four agree with our reference to FP32 rounding, so the throughput numbers
+below compare implementations of the *same* function. Every row of both results
+tables has its own entry here: **12 checks per framework, 24 in total, all
+passing**. The harness writes one manifest row per (implementation, norm,
+shape) and the C++ checker walks that manifest, so the set of configurations
+*timed* and the set *verified* cannot drift apart. Earlier versions dumped one
+output per norm — the eager PyTorch result and whichever ExecuTorch mode was
+available — which left ``torch.compile`` and the second ExecuTorch mode timed
+and published but never checked.
 
 Results
 ~~~~~~~~~
@@ -121,24 +136,24 @@ per row is the one our margin is quoted against.
      - our margin
    * - 128×64
      - **16.84**
-     - 11.18
-     - 3.87
-     - 1.41
-     - 5.01
-     - 1.5×
+     - 13.08
+     - 4.09
+     - 4.05
+     - 5.07
+     - 1.3×
    * - 1024×2048 (16 MiB)
-     - **16.49**
-     - 7.89
-     - 4.63
-     - 6.17
-     - 6.06
+     - **16.47**
+     - 7.79
+     - 4.55
+     - 6.16
+     - 6.25
      - 2.1×
    * - 4096×8192 (256 MiB)
-     - **13.54**
-     - 7.35
-     - 4.44
-     - 5.92
-     - 5.93
+     - **13.52**
+     - 7.52
+     - 4.43
+     - 5.87
+     - 5.98
      - 1.8×
 
 .. list-table:: RMSNorm — GiB/s, higher is better
@@ -152,29 +167,29 @@ per row is the one our margin is quoted against.
      - ET XNNPACK
      - our margin
    * - 128×64
-     - **38.56**
-     - 7.52
-     - 4.52
-     - 2.51
-     - 3.23
-     - 5.1×
+     - **39.58**
+     - 9.16
+     - 4.76
+     - 2.54
+     - 3.06
+     - 4.3×
    * - 1024×2048 (16 MiB)
-     - **38.46**
-     - 3.44
-     - 6.65
-     - 4.27
-     - 6.64
-     - 5.8×
+     - **38.45**
+     - 3.19
+     - 7.19
+     - 4.23
+     - 4.40
+     - 5.3×
    * - 4096×8192 (256 MiB)
-     - **24.65**
-     - 2.77
-     - 5.90
-     - 3.26
-     - 4.19
-     - 4.2×
+     - **24.63**
+     - 2.82
+     - 6.12
+     - 3.27
+     - 4.22
+     - 4.0×
 
-We are ahead of both baselines at every shape: **LayerNorm by 1.5–2.1×** and
-**RMSNorm by 4.2–5.8×**. That asymmetry is the interesting part, and it is not
+We are ahead of both baselines at every shape: **LayerNorm by 1.3–2.1×** and
+**RMSNorm by 4.0–5.3×**. That asymmetry is the interesting part, and it is not
 about our kernels.
 
 Fusion, not kernel quality, explains the asymmetry
@@ -196,8 +211,8 @@ Profiling what each PyTorch module actually dispatches to on CPU:
 ``_fused_rms_norm`` exists at the dispatcher level, but the CPU self time is
 dominated by the elementwise ops around it: **on CPU, eager RMSNorm decomposes**,
 each pass reading and writing the whole tensor. That is why eager RMSNorm sits
-at 2.77 GiB/s while ``torch.compile`` — which fuses the decomposition —
-roughly doubles it to 5.90.
+at 2.82 GiB/s while ``torch.compile`` — which fuses the decomposition —
+roughly doubles it to 6.12.
 
 The consequence is a clean, attributable inversion:
 
@@ -236,18 +251,18 @@ that survived contact.
      - outcome
    * - **P1** — PyTorch eager slow, we win 5–10×, from dispatch overhead and
        lack of fusion
-     - **Partly wrong.** RMSNorm 4.2–5.8× (just under the range), LayerNorm
-       only 1.5–2.1× (well under). The stated *reason* is also wrong for
+     - **Partly wrong.** RMSNorm 4.0–5.3× (just under the range), LayerNorm
+       only 1.3–2.1× (well under). The stated *reason* is also wrong for
        LayerNorm, which is fully fused and well optimized. The attribution
        splits by norm, not by framework.
    * - **P2** — ExecuTorch portable slower than PyTorch eager
      - **Confirmed but narrowly**, and much closer than on the old version:
-       LayerNorm 5.92 vs 7.35, RMSNorm 3.26 vs 2.77 (portable actually *wins*
+       LayerNorm 5.87 vs 7.52, RMSNorm 3.27 vs 2.82 (portable actually *wins*
        here, because eager RMSNorm decomposes).
    * - **P3** — RMSNorm decomposes rather than running a fused kernel
      - **Confirmed, and in PyTorch as well as ExecuTorch** — which was not
        predicted. The profiler trace above is the evidence, and the
-       eager-vs-compile gap (2.77 → 5.90) is its cost.
+       eager-vs-compile gap (2.82 → 6.12) is its cost.
    * - **P4** — we may lose
      - **Not realized against these two.** See the limits below — it is not
        settled by this experiment.
@@ -267,15 +282,15 @@ materially different baselines:
      - current stack
    * - torch.compile RMSNorm
      - 3.02
-     - **5.90**
+     - **6.12**
    * - ExecuTorch portable RMSNorm
      - 0.62
-     - **3.26**
+     - **3.27**
    * - ExecuTorch portable LayerNorm
      - 2.77
-     - **5.92**
+     - **5.87**
 
-Our RMSNorm margin would have read 8–13× against the old stack and is 4.2–5.8×
+Our RMSNorm margin would have read 8–13× against the old stack and is 4.0–5.3×
 against the current one. **The kernels did not change; the baseline did.** Any
 "N× faster than library X" claim is a statement about a specific version on a
 specific day, and is quoted here with versions attached for that reason.
@@ -322,7 +337,7 @@ and the report does not claim it is:
 The defensible claim is therefore narrow and worth stating precisely: *against
 two general-purpose frameworks at current versions, in their own layouts,
 single-threaded, and verified to compute the same function on every benchmarked
-shape, our kernels are 1.5–2.1× (LayerNorm) and 4.2–5.8× (RMSNorm) faster; the
+shape, our kernels are 1.3–2.1× (LayerNorm) and 4.0–5.3× (RMSNorm) faster; the
 RMSNorm margin is largely the absence of a fused CPU kernel on their side; and
 no specialist vendor kernel was measured, so this is not a state-of-the-art
 claim.*
@@ -340,8 +355,8 @@ Reproducing
 
    # PINNED, not floated: the margins above are a statement about specific
    # versions.  The same harness on torch 2.4.0 / executorch 0.3.0 gave
-   # torch.compile RMSNorm 3.02 GiB/s against 5.90 here, which would have made
-   # our RMSNorm margin read 8-13x instead of 4.2-5.8x.  The kernels did not
+   # torch.compile RMSNorm 3.02 GiB/s against 6.12 here, which would have made
+   # our RMSNorm margin read 8-13x instead of 4.0-5.3x.  The kernels did not
    # change; the baseline did.
    uv pip install --python /tmp/et312/bin/python \
        -r bench/baselines/requirements-baselines.txt

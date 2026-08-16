@@ -85,12 +85,12 @@ Three rules, each adopted after a measurement error forced it.
 produced for code that has not first matched the float64 reference *on that
 exact shape*. The gate runs the function about to be timed, compares its full
 output, and refuses to time it on disagreement. The current run reports
-**66 / 66 configurations verified before timing**. For the external baselines,
-6 checks per framework (both norms at three shapes) were gated the same way,
-covering the eager PyTorch outputs and the delegated ExecuTorch outputs. The
-harness now writes one manifest row per *implementation*, so ``torch.compile``
-and the ExecuTorch portable path are gated separately as well; those figures
-must be regenerated on the pinned environment before they are quoted.
+**66 / 66 configurations verified before timing**, and the external baselines
+**12 checks per framework, 24 in total**. The external harness writes one
+manifest row per (implementation, norm, shape), so ``torch.compile`` and the
+ExecuTorch portable path are each gated rather than represented by another
+implementation's output, and the C++ checker walks that manifest — the set of
+configurations timed and the set verified cannot drift apart.
 
 **2. Bytes are counted one way, and moved bytes differ per norm.** All GiB/s
 figures count **useful bytes** = 1 read + 1 write per element. Moved bytes are
@@ -262,7 +262,7 @@ External comparison
    verified to compute the same function before timing.
 
 Against **PyTorch 2.13.0** and **ExecuTorch 1.4.1** (including the XNNPACK
-delegate), our kernels are **1.5–2.1× faster on LayerNorm** and **4.2–5.8× on
+delegate), our kernels are **1.3–2.1× faster on LayerNorm** and **4.0–5.3× on
 RMSNorm**. The asymmetry is not about our kernels: in our PyTorch 2.13.0
 profiler trace on the M4, eager ``torch.nn.RMSNorm`` decomposes into multiple
 ATen operations (``mul``, ``pow``, ``sum``, ``div_``), whereas
