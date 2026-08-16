@@ -319,9 +319,9 @@ that survived contact.
    * - **P1** — PyTorch eager slow, we win 5–10×, from dispatch overhead and
        lack of fusion
      - **Partly wrong.** RMSNorm 4.1–5.9× (inside the range at one shape,
-       just under at the others), LayerNorm only 1.3–1.9× (well under). The stated *reason* is also wrong for
-       LayerNorm, which is fully fused and well optimized. The attribution
-       splits by norm, not by framework.
+       just under at the others), LayerNorm only 1.3–1.9× (well under). The
+       stated *reason* is also wrong for LayerNorm, which is fully fused and
+       well optimized. The attribution splits by norm, not by framework.
    * - **P2** — ExecuTorch portable slower than PyTorch eager
      - **Confirmed on both norms**, though much closer than on the old
        version: LayerNorm 5.95 vs 7.36, RMSNorm 1.85 vs 2.82. An earlier,
@@ -409,7 +409,7 @@ and the report does not claim it is:
 The defensible claim is therefore narrow and worth stating precisely: *against
 two general-purpose frameworks at current versions, in their own layouts,
 single-threaded, and verified to compute the same function on every benchmarked
-shape, our kernels are 1.3–2.1× (LayerNorm) and 4.0–5.3× (RMSNorm) faster; the
+shape, our kernels are 1.3–1.9× (LayerNorm) and 4.1–5.9× (RMSNorm) faster; the
 RMSNorm margin is largely the absence of a fused CPU kernel on their side; and
 no specialist vendor kernel was measured, so this is not a state-of-the-art
 claim.*
