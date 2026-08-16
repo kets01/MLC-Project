@@ -9,10 +9,6 @@ Sprint 2c: Hand-Written SSVE LayerNorm Kernel
 reference across 6 test cases, and integrate into the shared build on branch
 ``feat/sprint2-layernorm-ssve``.
 
-This sprint is done by **Mariza**; RMSNorm SSVE and the Sprint-2 ablation are
-handled separately by **Ketsia**, and are documented in
-:doc:`norm_sprint2_rmsnorm`.
-
 Key design decisions
 ~~~~~~~~~~~~~~~~~~~~
 
