@@ -58,7 +58,7 @@ into a tiled-execution-IR runtime, verifying every configuration against a
 float64 oracle before it is timed. The best kernels reach 33\,\% of a
 footprint-matched bandwidth ceiling on useful bytes at cache-resident shapes and
 42\,\% in the DRAM regime, and outrun PyTorch 2.13 and ExecuTorch 1.4.1 by
-1.5--2.1$\times$ (LayerNorm) and 4.2--5.8$\times$ (RMSNorm) single-threaded.
+1.3--1.9$\times$ (LayerNorm) and 4.1--5.9$\times$ (RMSNorm) single-threaded.
 
 The negative and corrective results are the more transferable ones. Using the
 ZA matrix accumulator as a residency buffer \emph{loses} by 24--37\,\% even
@@ -281,7 +281,7 @@ to be timed, compares its complete output, and refuses to produce a timing on
 disagreement. An earlier version verified each row but still printed GiB/s
 beside a failure flag, which a reader scanning the throughput column would never
 notice. The submitted run reports \textbf{66/66 configurations verified before
-timing}, and the external baselines 6/6 each.
+timing}, and the external baselines 12 each.
 
 \subsection{Bytes are counted one way}
 
@@ -899,11 +899,23 @@ which would have to include boundary conversion.
 \emph{Correctness gates the comparison.} Every library output is dumped and
 verified against our float64 reference before its throughput is quoted; all
 agree to $\le$3.1e--6, so the numbers compare implementations of the same
-function. Both drivers dump every benchmarked shape and write a manifest that
-the checker walks, so the set of shapes timed and the set gated cannot drift
-apart.
+function. The manifest carries one row per (implementation, norm, shape) and the
+checker walks it, so \code{torch.compile} and the ExecuTorch portable path are
+each gated rather than represented by another implementation's output:
+\textbf{12 checks per framework, 24 in total, all passing}.
 
-\emph{One thread, same shapes, same byte convention, pinned versions.}
+\emph{One thread, same shapes, same byte convention, pinned versions.} One
+thread required two settings rather than one: \code{torch.set\_num\_threads(1)}
+does not reach ExecuTorch, which runs its own pthreadpool and defaulted to ten
+workers---one per core---while we described the run as serial. We found it by
+measuring CPU-time over wall-time (${\approx}1.0$ if serial) instead of trusting
+the setting, and fixed it with \code{\_unsafe\_reset\_threadpool(1)}; the
+manifest header now records the resulting count. The correction moved numbers
+both ways: ExecuTorch portable RMSNorm at 1024$\times$2048 fell 4.23$\to$1.92
+once it stopped using ten cores against our one, while XNNPACK RMSNorm at
+128$\times$64 \emph{rose} 3.06$\to$8.42, its threadpool having cost more to
+synchronise than the 32\,KiB of work it distributed. The RMSNorm margin we
+previously reported was measured against a baseline given ten times the compute.
 
 \begin{figure}[t]
 \centering
@@ -927,21 +939,28 @@ the XNNPACK delegate.}
 shape & \textbf{(V7)} & eager & compile & portable & XNNPACK \\
 \midrule
 \multicolumn{6}{l}{\emph{LayerNorm}} \\
-1024$\times$2048 & \textbf{16.47} & 7.89 & 4.63 & 6.17 & 6.06 \\
-4096$\times$8192 & \textbf{13.52} & 7.35 & 4.44 & 5.92 & 5.93 \\
+1024$\times$2048 & \textbf{16.47} & 8.53 & 4.60 & 6.12 & 6.18 \\
+4096$\times$8192 & \textbf{13.52} & 7.36 & 4.45 & 5.95 & 5.98 \\
 \midrule
 \multicolumn{6}{l}{\emph{RMSNorm}} \\
-1024$\times$2048 & \textbf{38.45} & 3.44 & 6.65 & 4.27 & 6.64 \\
-4096$\times$8192 & \textbf{24.63} & 2.77 & 5.90 & 3.26 & 4.19 \\
+1024$\times$2048 & \textbf{38.45} & 5.21 & 6.51 & 1.92 & 5.10$^{\dagger}$ \\
+4096$\times$8192 & \textbf{24.63} & 2.82 & 6.04 & 1.85 & 4.14 \\
 \bottomrule
 \end{tabular}
+
+\vspace{2pt}
+\raggedright\footnotesize $^{\dagger}$This configuration fails
+non-deterministically in ExecuTorch 1.4.1 (\code{error: 0x23}, preceded by
+\code{No chains}) in roughly one run in three; three identical in-process
+trials gave two successes and one failure. The figure is from a successful,
+verified run, but carries less confidence than the others.
 \end{table}
 
 \subsection{The result is about fusion, not kernel quality}
 
 We are ahead of both baselines at every shape (Fig.~\ref{fig:baselines}):
-LayerNorm by 1.5--2.1$\times$ and
-RMSNorm by 4.2--5.8$\times$. The asymmetry is the interesting part, and it is
+LayerNorm by 1.3--1.9$\times$ and
+RMSNorm by 4.1--5.9$\times$. The asymmetry is the interesting part, and it is
 not about our kernels. Profiling what each module dispatches to on CPU shows
 \code{torch.nn.LayerNorm} reaching a single fused kernel, while
 \code{torch.nn.RMSNorm} decomposes into elementwise multiply, power, sum and
@@ -952,10 +971,108 @@ fuses it and roughly doubles its throughput.
 That produces a clean inversion. Within our implementation RMSNorm is
 1.8--2.3$\times$ faster than LayerNorm, exactly as the traffic ratio says it
 should be. Within PyTorch eager the ordering \emph{flips}, and its LayerNorm is
-$2.7\times$ faster than its RMSNorm---purely because the cheaper operation is
+$2.6\times$ faster than its RMSNorm---purely because the cheaper operation is
 the one without a fused CPU kernel. \emph{A fused implementation of the
 expensive norm beats a decomposed implementation of the cheap one}, which is the
 clearest argument in this report for why writing the kernel was worth doing.
+
+\subsection{With more than one thread}
+\label{sec:threaded}
+
+Restricting every implementation to one thread answers a question about kernel
+efficiency, not about deployment, so we repeated the comparison at 1, 2, 4 and
+10 threads. Two settings are needed rather than one and neither can be trusted:
+libomp workers do \emph{not} inherit the main thread's QoS (probed, workers
+1--3 come up \code{DEFAULT}), so the P-core request is issued per worker inside
+the parallel region, and every row carries measured CPU-seconds per wall-second
+rather than a requested thread count. The gate runs per thread count, since a
+different pool size can select a different kernel: \textbf{96 of 96 checks
+passed}.
+
+macOS has no thread-to-core pinning API, so ``performance cores'' is a QoS bias
+and not a guarantee. We test it by contrast against \code{QOS\_CLASS\_BACKGROUND},
+which macOS \emph{does} confine to the E cluster: at the DRAM-bound rows the
+P-biased run is 1.43--1.66$\times$ faster, so the two demonstrably reached
+different clusters. At 1024$\times$2048 on two threads the ratio is 1.04$\times$,
+which is consistent rather than awkward---that working set is largely
+cache-resident, so the run is not bandwidth-bound and the cluster barely
+matters. We claim the label only where it is load-bearing.
+
+The margins survive at the two larger shapes (Table~\ref{tab:threaded}):
+2.9--5.9$\times$ on RMSNorm and 1.6--2.4$\times$ on LayerNorm across all thread
+counts. Two results go against us, and they are the informative ones.
+
+\textbf{Threading our kernel below ${\sim}1$\,MiB destroys it.} At
+128$\times$64 our RMSNorm falls from 23.63\,GiB/s on one thread to 1.88 on
+two---12.6$\times$ slower---and the comparison flips from 2.63$\times$ ahead to
+0.21$\times$. Those rows measure cpu/wall ${\approx}0.75$, \emph{below} one: the
+threads are not contending for bandwidth, they are blocked in the fork/join,
+which 32\,KiB of work cannot amortize. The frameworks degrade far more
+gracefully because they decline to distribute work this small. Our
+decomposition has no minimum problem size, and a caller that threads
+unconditionally---exactly what a naive runtime integration does---makes a small
+norm an order of magnitude slower.
+
+\textbf{Group granularity caps our occupancy.} Work is distributed in whole
+256-row blocks so no thread is handed the predicated tail, and 256 is a multiple
+of $4\cdot\text{VL}$ for every plausible SVL, which is what keeps the
+distribution vector-length agnostic. It also fixes the usable thread count at
+$M/256$: at 1024$\times$2048 only four blocks exist, so the ten-thread row is
+really four, and our occupancy caps at 3.21 against PyTorch's 7.37. That is why
+our RMSNorm lead at the DRAM shape narrows monotonically with thread count,
+4.23$\times$ to 2.93$\times$. Dropping to 64-row blocks would unlock more
+threads at SVL${=}512$ and reintroduce the tail on any wider SVL---the trade the
+VLA discipline exists to avoid.
+
+Both statistics are quoted in Table~\ref{tab:threaded} because on several
+framework rows they disagree enough to change the answer. PyTorch eager's
+LayerNorm at 1024$\times$2048 reports best 28.42 against median 11.03, a
+cache-lucky outlier rather than sustained throughput, while ours on the same row
+is 24.83 against 24.06. On best-versus-best we lose those two cells
+0.87$\times$; on median-versus-median we win them 2.18$\times$. We report both
+rather than the flattering one: at that shape the two are close enough that the
+answer depends on which statistic is quoted, and that is the finding.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/threaded}
+\caption{RMSNorm V7 against the strongest framework at each thread count. Solid:
+4096$\times$8192, where our lead narrows as cores are added. Dashed:
+128$\times$64, where threading collapses our kernel while the frameworks stay
+flat.}
+\label{fig:threaded}
+\end{figure}
+
+\begin{table}[t]
+\caption{Threaded comparison, GiB/s, best (median). Margin is ours over the best
+baseline, computed on best and on median. Bold marks rows where we lose.
+96/96 correctness checks passed.}
+\label{tab:threaded}
+\centering
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+shape & thr & \textbf{ours} & best & margin & margin \\
+      &     & \textbf{(V7)} & baseline & (best) & (median) \\
+\midrule
+\multicolumn{6}{l}{\emph{RMSNorm}} \\
+128$\times$64     & 1  & \textbf{23.63} & 8.99  & 2.63$\times$ & 2.97$\times$ \\
+128$\times$64     & 4  & 1.88  & 8.88  & \textbf{0.21$\times$} & \textbf{0.22$\times$} \\
+1024$\times$2048  & 4  & \textbf{53.48} & 17.72 & 3.02$\times$ & 5.10$\times$ \\
+1024$\times$2048  & 10 & \textbf{52.80} & 10.17 & 5.19$\times$ & 5.37$\times$ \\
+4096$\times$8192  & 4  & \textbf{35.76} & 11.00 & 3.25$\times$ & 3.52$\times$ \\
+4096$\times$8192  & 10 & \textbf{41.28} & 14.10 & 2.93$\times$ & 3.83$\times$ \\
+\midrule
+\multicolumn{6}{l}{\emph{LayerNorm}} \\
+128$\times$64     & 1  & \textbf{11.81} & 11.54 & 1.02$\times$ & \textbf{0.94$\times$} \\
+128$\times$64     & 4  & 1.78  & 4.56  & \textbf{0.39$\times$} & \textbf{0.40$\times$} \\
+1024$\times$2048  & 4  & 24.83 & 28.42 & \textbf{0.87$\times$} & 2.18$\times$ \\
+1024$\times$2048  & 10 & \textbf{24.97} & 20.04 & 1.25$\times$ & 2.42$\times$ \\
+4096$\times$8192  & 4  & \textbf{22.75} & 11.45 & 1.99$\times$ & 2.12$\times$ \\
+4096$\times$8192  & 10 & \textbf{25.37} & 15.55 & 1.63$\times$ & 2.39$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{What this comparison does not establish}
 
@@ -972,8 +1089,10 @@ correctness-gated harness; it is withdrawn rather than restated.
 
 Framework margins are also version statements. On the previous stack the same
 harness would have made our RMSNorm margin read 8--13$\times$ instead of
-4.2--5.8$\times$. The kernels did not change; the baseline did. Versions are
-pinned and the run manifests are checked in.
+4.1--5.9$\times$. The kernels did not change; the baseline did. Versions are
+pinned and the run manifests are checked in. The ExecuTorch half of that
+comparison is further confounded, its old-stack numbers predating the
+threadpool fix.
 
 % =========================================================================
 \section{External Validation}
@@ -1020,8 +1139,22 @@ measure the cost of substituting our kernel into a framework's tensor layout.
 include per-invocation runtime dispatch---honest for an on-device comparison,
 but not a pure kernel number.
 
-\textbf{Single-threaded except where stated.} The frameworks parallelize by
-default; our threaded results are reported separately against a chip ceiling.
+\textbf{Single-threaded except where stated.} Enforcing one thread took two
+independent settings, and we verified it by measuring CPU-time over wall-time
+rather than by trusting either. The threaded comparison is
+Sec.~\ref{sec:threaded}.
+
+\textbf{Our row-parallel decomposition has no minimum problem size} and is
+catastrophic below ${\sim}1$\,MiB, and its 256-row group alignment caps usable
+threads at $M/256$. Both are measured in Sec.~\ref{sec:threaded} and neither is
+fixed here.
+
+\textbf{One baseline configuration is intermittently unreproducible}, as
+Table~\ref{tab:external} marks: ExecuTorch's XNNPACK RMSNorm at
+1024$\times$2048 fails inside the library rather than in our harness. Measured
+deliberately over 40 trials it fails about one attempt in \emph{two}, not the
+one in three we first estimated, at every thread count; a second failure mode
+aborts the process outright and cannot be retried in-process.
 
 \textbf{Group granularity distorts small shapes.} Below 64 rows the kernel does
 a full group's work regardless, so small-$M$ figures reflect that rather than
@@ -1057,7 +1190,7 @@ JIT-generated SME kernels invoked through a compiler runtime, verifying each
 step against a float64 oracle. The best kernels reach $\approx$33\,\% of a
 footprint-matched ceiling on useful bytes ($\approx$50\,\% on moved bytes) at
 cache-resident shapes and $\approx$42\,\% at DRAM, and beat two general-purpose
-frameworks by 1.5--5.8$\times$.
+frameworks by 1.3--5.3$\times$.
 
 The more useful outcomes are the negative and corrective ones. The ZA tile is
 the wrong tool for a bandwidth-dominated horizontal reduction, and it took a

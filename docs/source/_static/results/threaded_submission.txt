@@ -1,0 +1,285 @@
+Threaded five-way comparison — MLC-Norm Sprint 7.6
+generated: 2026-08-16T07:38:03Z  host: arm64 macOS 15.2
+cores: 4 performance + 6 efficiency
+
+Best-of-N GiB/s, useful bytes (1R+1W), each implementation in its native
+row-major/column-major layout. Threads requested per framework AND per
+worker; occupancy (cpu/wall) measured rather than assumed.
+
+==============================================================
+OUR COLUMN  (apps/main_norm.cpp, section SPRINT 7.6)
+==============================================================
+  SPRINT 7.6 - THREADED EXTERNAL COMPARISON (our column)
+  ================================================================================================
+  Shapes and byte convention identical to the single-threaded
+  external comparison, so the two tables compose.  Kernel: V7 (SME2).
+  This M4 is 4 P-cores + 6 E-cores; workers request
+  USER_INTERACTIVE QoS (P-core bias).  macOS exposes no pinning API,
+  so 'P-core' is a request - see the QoS control at the end.
+  cpu/wall = CPU-seconds per wall-second: the MEASURED occupancy,
+  not the requested one.
+  
+  Worker QoS actually in effect (4-thread region):
+    worker 0: USER_INTERACTIVE
+    worker 1: USER_INTERACTIVE
+    worker 2: USER_INTERACTIVE
+    worker 3: USER_INTERACTIVE
+    (set per worker inside the parallel region: libomp workers do
+     NOT inherit the main thread's QoS - probed, workers 1-3 come
+     up DEFAULT if it is only set on the main thread.)
+  
+  RMSNorm V7 (SME2)   (moved = 1.50x useful)
+  shape           threads      GiB/s    median   speedup   cpu/wall     %1core   correct
+  --------------------------------------------------------------------------------------
+  128x64                1      23.63     23.63     1.00x       1.23      39.7%       yes
+  128x64                2       1.88      1.87     0.08x       0.75       3.2%       yes
+  128x64                4       1.88      1.86     0.08x       0.75       3.2%       yes   <- capped at 2 (only 2 group-aligned row-blocks at M=128)
+  128x64               10       1.88      1.87     0.08x       0.76       3.2%       yes   <- capped at 2 (only 2 group-aligned row-blocks at M=128)
+  
+  1024x2048             1      38.46     38.45     1.00x       1.00      64.7%       yes
+  1024x2048             2      51.24     46.86     1.33x       1.61      86.2%       yes
+  1024x2048             4      53.48     52.08     1.39x       3.21      90.0%       yes
+  1024x2048            10      52.80     52.13     1.37x       3.21      88.8%       yes   <- capped at 4 (only 4 group-aligned row-blocks at M=1024)
+  
+  4096x8192             1      24.64     24.59     1.00x       1.00      41.5%       yes
+  4096x8192             2      29.14     29.06     1.18x       1.66      49.0%       yes
+  4096x8192             4      35.76     35.71     1.45x       3.38      60.2%       yes
+  4096x8192            10      41.28     40.95     1.68x       6.56      69.4%       yes
+  
+  LayerNorm V7 (SME2)   (moved = 2.00x useful)
+  shape           threads      GiB/s    median   speedup   cpu/wall     %1core   correct
+  --------------------------------------------------------------------------------------
+  128x64                1      11.81     10.61     1.00x       1.22      19.9%       yes
+  128x64                2       1.82      1.76     0.15x       0.81       3.1%       yes
+  128x64                4       1.78      1.76     0.15x       0.82       3.0%       yes   <- capped at 2 (only 2 group-aligned row-blocks at M=128)
+  128x64               10       1.78      1.77     0.15x       0.82       3.0%       yes   <- capped at 2 (only 2 group-aligned row-blocks at M=128)
+  
+  1024x2048             1      16.48     16.33     1.00x       1.00      27.7%       yes
+  1024x2048             2      23.19     23.08     1.41x       1.69      39.0%       yes
+  1024x2048             4      24.83     24.06     1.51x       3.34      41.8%       yes
+  1024x2048            10      24.97     24.19     1.51x       3.36      42.0%       yes   <- capped at 4 (only 4 group-aligned row-blocks at M=1024)
+  
+  4096x8192             1      13.56     13.53     1.00x       1.00      22.8%       yes
+  4096x8192             2      18.14     18.11     1.34x       1.73      30.5%       yes
+  4096x8192             4      22.75     22.72     1.68x       3.44      38.3%       yes
+  4096x8192            10      25.37     24.77     1.87x       6.39      42.7%       yes
+  
+  QoS control: same kernel, same threads, same data - only the QoS differs
+  USER_INTERACTIVE is a P-core BIAS; BACKGROUND is an E-core GUARANTEE.
+  shape           threads      P-biased    background     ratio
+  -------------------------------------------------------------
+  1024x2048             2         47.93         46.30     1.04x
+  1024x2048             4         47.06         32.82     1.43x
+  4096x8192             2         29.25         17.62     1.66x
+  4096x8192             4         35.53         22.92     1.55x
+  
+  A ratio near 1.0x would mean the QoS request changed nothing and the
+  'P-core' label is unsupported; a ratio well above 1.0x means the two
+  runs reached different clusters.
+
+==============================================================
+PYTORCH  (bench/baselines/torch_norm_bench.py --threads N)
+==============================================================
+  ############ torch, 1 thread(s) ############
+  torch 2.13.0, threads=1, p-core qos=yes
+  GiB/s: useful bytes (1R+1W); native row-major layout
+  
+  128x64
+    LayerNorm eager   best   11.54  median   11.27  p10-p90   10.14-  11.36  cpu/wall  1.10
+    RMSNorm   eager   best    8.99  median    7.79  p10-p90    6.67-   8.88  cpu/wall  1.01
+    LayerNorm compile best    3.95  median    3.83  p10-p90    3.22-   3.93  cpu/wall  1.00
+    RMSNorm   compile best    4.44  median    4.30  p10-p90    4.20-   4.43  cpu/wall  1.00
+  
+  1024x2048
+    LayerNorm eager   best    7.82  median    7.68  p10-p90    7.58-   7.79  cpu/wall  1.00
+    RMSNorm   eager   best    3.27  median    2.97  p10-p90    2.87-   3.03  cpu/wall  1.00
+    LayerNorm compile best    4.53  median    4.49  p10-p90    4.46-   4.53  cpu/wall  1.00
+    RMSNorm   compile best    6.53  median    6.47  p10-p90    6.41-   6.53  cpu/wall  1.00
+  
+  4096x8192
+    LayerNorm eager   best    7.39  median    7.23  p10-p90    7.08-   7.34  cpu/wall  1.00
+    RMSNorm   eager   best    2.75  median    2.71  p10-p90    2.68-   2.73  cpu/wall  1.00
+    LayerNorm compile best    4.41  median    4.36  p10-p90    4.32-   4.39  cpu/wall  1.00
+    RMSNorm   compile best    5.83  median    3.25  p10-p90    2.04-   4.93  cpu/wall  1.00
+  
+  Each timed implementation has a separate output entry in manifest.txt.
+  ############ torch, 2 thread(s) ############
+  torch 2.13.0, threads=2, p-core qos=yes
+  GiB/s: useful bytes (1R+1W); native row-major layout
+  
+  128x64
+    LayerNorm eager   best    6.34  median    5.89  p10-p90    4.98-   6.13  cpu/wall  1.06
+    RMSNorm   eager   best    9.04  median    8.72  p10-p90    7.77-   8.94  cpu/wall  1.03
+    LayerNorm compile best    1.79  median    1.19  p10-p90    0.95-   1.51  cpu/wall  1.06
+    RMSNorm   compile best    2.93  median    2.78  p10-p90    2.46-   2.90  cpu/wall  1.11
+  
+  1024x2048
+    LayerNorm eager   best   26.80  median   10.65  p10-p90   10.43-  10.89  cpu/wall  1.97
+    RMSNorm   eager   best    4.60  median    3.53  p10-p90    3.41-   4.44  cpu/wall  1.96
+    LayerNorm compile best    7.84  median    7.79  p10-p90    7.68-   7.83  cpu/wall  1.96
+    RMSNorm   compile best   10.58  median   10.53  p10-p90   10.41-  10.57  cpu/wall  1.95
+  
+  4096x8192
+    LayerNorm eager   best   10.97  median   10.59  p10-p90   10.28-  10.79  cpu/wall  1.96
+    RMSNorm   eager   best    3.49  median    3.41  p10-p90    3.35-   3.47  cpu/wall  1.96
+    LayerNorm compile best    7.58  median    7.45  p10-p90    7.38-   7.53  cpu/wall  1.97
+    RMSNorm   compile best    9.94  median    9.73  p10-p90    8.90-   9.88  cpu/wall  1.93
+  
+  Each timed implementation has a separate output entry in manifest.txt.
+  ############ torch, 4 thread(s) ############
+  torch 2.13.0, threads=4, p-core qos=yes
+  GiB/s: useful bytes (1R+1W); native row-major layout
+  
+  128x64
+    LayerNorm eager   best    4.25  median    3.59  p10-p90    2.57-   3.94  cpu/wall  1.32
+    RMSNorm   eager   best    8.88  median    8.64  p10-p90    7.72-   8.82  cpu/wall  1.01
+    LayerNorm compile best    1.26  median    1.10  p10-p90    1.00-   1.22  cpu/wall  1.37
+    RMSNorm   compile best    2.25  median    2.18  p10-p90    1.87-   2.25  cpu/wall  1.33
+  
+  1024x2048
+    LayerNorm eager   best   28.42  median   11.03  p10-p90   10.75-  27.21  cpu/wall  3.75
+    RMSNorm   eager   best    4.51  median    3.49  p10-p90    3.37-   3.62  cpu/wall  3.78
+    LayerNorm compile best    9.47  median    9.21  p10-p90    9.07-   9.38  cpu/wall  3.41
+    RMSNorm   compile best   17.72  median   10.21  p10-p90   10.16-  10.45  cpu/wall  3.71
+  
+  4096x8192
+    LayerNorm eager   best   11.45  median   10.74  p10-p90   10.39-  11.12  cpu/wall  3.71
+    RMSNorm   eager   best    3.79  median    3.54  p10-p90    3.48-   3.62  cpu/wall  3.73
+    LayerNorm compile best   10.47  median    9.38  p10-p90    9.02-  10.38  cpu/wall  3.36
+    RMSNorm   compile best   11.00  median   10.15  p10-p90    9.87-  10.89  cpu/wall  3.48
+  
+  Each timed implementation has a separate output entry in manifest.txt.
+  ############ torch, 10 thread(s) ############
+  torch 2.13.0, threads=10, p-core qos=yes
+  GiB/s: useful bytes (1R+1W); native row-major layout
+  
+  128x64
+    LayerNorm eager   best    2.40  median    1.74  p10-p90    1.45-   1.93  cpu/wall  2.16
+    RMSNorm   eager   best    9.10  median    8.88  p10-p90    7.83-   9.05  cpu/wall  1.01
+    LayerNorm compile best    0.62  median    0.36  p10-p90    0.33-   0.57  cpu/wall  2.34
+    RMSNorm   compile best    1.49  median    1.34  p10-p90    1.14-   1.44  cpu/wall  1.99
+  
+  1024x2048
+    LayerNorm eager   best   20.04  median    9.98  p10-p90    9.78-  11.01  cpu/wall  7.16
+    RMSNorm   eager   best    3.86  median    3.27  p10-p90    3.20-   3.69  cpu/wall  7.37
+    LayerNorm compile best    9.75  median    9.36  p10-p90    9.21-   9.50  cpu/wall  6.87
+    RMSNorm   compile best   10.17  median    9.70  p10-p90    9.57-  10.10  cpu/wall  7.25
+  
+  4096x8192
+    LayerNorm eager   best   10.38  median    5.03  p10-p90    3.29-  10.13  cpu/wall  8.01
+    RMSNorm   eager   best    4.07  median    3.53  p10-p90    3.41-   3.82  cpu/wall  7.77
+    LayerNorm compile best   15.55  median   10.38  p10-p90   10.04-  10.82  cpu/wall  7.54
+    RMSNorm   compile best   14.10  median   10.68  p10-p90   10.30-  11.18  cpu/wall  7.66
+  
+  Each timed implementation has a separate output entry in manifest.txt.
+==============================================================
+EXECUTORCH  (bench/baselines/executorch_norm_bench.py --threads N)
+==============================================================
+  ############ executorch, 1 thread(s) ############
+  executorch 1.4.1, torch 2.13.0, torch threads=1, et threadpool=1, p-core qos=yes
+  GiB/s: useful bytes (1R+1W); native row-major layout
+  
+  128x64
+    LayerNorm portable best    5.03  median    4.97  p10-p90    4.44-   5.00  cpu/wall  1.12
+    LayerNorm xnnpack  best    5.07  median    4.96  p10-p90    4.51-   5.07  cpu/wall  1.03
+    RMSNorm   portable best    2.50  median    2.49  p10-p90    2.41-   2.50  cpu/wall  1.03
+    RMSNorm   xnnpack  best    8.28  median    7.96  p10-p90    7.27-   8.19  cpu/wall  1.16
+  
+  1024x2048
+    LayerNorm portable best    6.24  median    6.21  p10-p90    6.12-   6.24  cpu/wall  1.00
+    LayerNorm xnnpack  best    6.26  median    6.01  p10-p90    5.55-   6.24  cpu/wall  1.00
+    RMSNorm   portable best    1.91  median    1.90  p10-p90    1.90-   1.91  cpu/wall  1.00
+    RMSNorm   xnnpack  best    4.44  median    4.35  p10-p90    4.33-   4.41  cpu/wall  1.00
+  
+  4096x8192
+    LayerNorm portable best    5.89  median    5.77  p10-p90    5.73-   5.87  cpu/wall  1.00
+    LayerNorm xnnpack  best    5.94  median    5.85  p10-p90    5.76-   5.93  cpu/wall  1.00
+    RMSNorm   portable best    1.84  median    1.84  p10-p90    1.83-   1.84  cpu/wall  1.00
+    RMSNorm   xnnpack  best    4.11  median    4.07  p10-p90    4.04-   4.09  cpu/wall  1.00
+  
+  Each timed implementation has a separate output entry in manifest.txt.
+  ############ executorch, 2 thread(s) ############
+  executorch 1.4.1, torch 2.13.0, torch threads=2, et threadpool=2, p-core qos=yes
+  GiB/s: useful bytes (1R+1W); native row-major layout
+  
+  128x64
+    LayerNorm portable best    4.49  median    4.41  p10-p90    4.14-   4.47  cpu/wall  1.04
+    LayerNorm xnnpack  best    5.09  median    4.97  p10-p90    4.21-   5.05  cpu/wall  1.05
+    RMSNorm   portable best    2.56  median    2.50  p10-p90    2.29-   2.54  cpu/wall  1.03
+    RMSNorm   xnnpack  best    5.12  median    4.65  p10-p90    4.25-   5.03  cpu/wall  1.42
+  
+  1024x2048
+    LayerNorm portable best   11.99  median    7.04  p10-p90    6.96-  11.40  cpu/wall  1.56
+    LayerNorm xnnpack  best    7.16  median    6.98  p10-p90    6.94-   7.06  cpu/wall  1.61
+    RMSNorm   portable best    2.80  median    2.78  p10-p90    2.77-   2.80  cpu/wall  1.69
+    RMSNorm   xnnpack  best    6.88  median    4.87  p10-p90    4.82-   5.11  cpu/wall  1.56   [2 attempts]
+  
+  4096x8192
+    LayerNorm portable best    7.15  median    6.87  p10-p90    6.68-   7.05  cpu/wall  1.62
+    LayerNorm xnnpack  best    7.16  median    6.90  p10-p90    6.83-   7.08  cpu/wall  1.62
+    RMSNorm   portable best    2.74  median    2.71  p10-p90    2.70-   2.73  cpu/wall  1.68
+    RMSNorm   xnnpack  best    4.79  median    4.72  p10-p90    4.68-   4.77  cpu/wall  1.57
+  
+  Each timed implementation has a separate output entry in manifest.txt.
+  ############ executorch, 4 thread(s) ############
+  [method_meta.cpp:53] Invalid tag: 0 input idx: 0
+  [result.h:170] In function CheckOk(), assert failed: hasValue_
+  ############ executorch, 10 thread(s) ############
+  executorch 1.4.1, torch 2.13.0, torch threads=10, et threadpool=10, p-core qos=yes
+  GiB/s: useful bytes (1R+1W); native row-major layout
+  
+  128x64
+    LayerNorm portable best    5.03  median    4.85  p10-p90    4.57-   4.96  cpu/wall  1.08
+    LayerNorm xnnpack  best    4.93  median    4.86  p10-p90    4.15-   4.93  cpu/wall  1.06
+    RMSNorm   portable best    2.56  median    2.50  p10-p90    2.25-   2.54  cpu/wall  1.03
+    RMSNorm   xnnpack  best    2.74  median    1.02  p10-p90    0.86-   1.98  cpu/wall  5.18
+  
+  1024x2048
+    LayerNorm portable best   12.81  median    6.71  p10-p90    6.56-   9.66  cpu/wall  4.66
+    LayerNorm xnnpack  best    6.69  median    6.61  p10-p90    6.48-   6.68  cpu/wall  5.10
+    RMSNorm   portable best    4.12  median    3.42  p10-p90    3.37-   3.51  cpu/wall  4.61
+    RMSNorm   xnnpack  best    4.79  median    4.74  p10-p90    4.44-   4.77  cpu/wall  4.68   [4 attempts]
+  
+  4096x8192
+    LayerNorm portable best    7.18  median    6.82  p10-p90    6.74-   6.96  cpu/wall  5.48
+    LayerNorm xnnpack  best    7.36  median    6.78  p10-p90    6.65-   7.25  cpu/wall  5.51
+    RMSNorm   portable best    3.62  median    3.49  p10-p90    3.46-   3.61  cpu/wall  4.87
+    RMSNorm   xnnpack  best    5.39  median    4.60  p10-p90    4.57-   5.33  cpu/wall  5.08
+  
+  Each timed implementation has a separate output entry in manifest.txt.
+  ############ ET RERUN DONE ############
+  
+  ---- the 4-thread run above aborted natively; repeated at shell level ----
+  executorch 1.4.1, torch 2.13.0, torch threads=4, et threadpool=4, p-core qos=yes
+  GiB/s: useful bytes (1R+1W); native row-major layout
+  
+  128x64
+    LayerNorm portable best    4.48  median    4.37  p10-p90    4.12-   4.43  cpu/wall  1.11
+    LayerNorm xnnpack  best    4.56  median    4.45  p10-p90    4.17-   4.55  cpu/wall  1.04
+    RMSNorm   portable best    2.56  median    2.53  p10-p90    2.45-   2.55  cpu/wall  1.02
+    RMSNorm   xnnpack  best    5.55  median    3.73  p10-p90    3.01-   4.93  cpu/wall  2.09
+  
+  1024x2048
+    LayerNorm portable best   11.32  median    6.72  p10-p90    6.65-  11.07  cpu/wall  2.68
+    LayerNorm xnnpack  best    6.84  median    6.75  p10-p90    6.52-   6.80  cpu/wall  2.80
+    RMSNorm   portable best    3.03  median    3.02  p10-p90    3.01-   3.03  cpu/wall  2.51
+    RMSNorm   xnnpack  best    4.95  median    4.82  p10-p90    3.42-   4.93  cpu/wall  2.64
+  
+  4096x8192
+    LayerNorm portable best    7.07  median    6.78  p10-p90    6.72-   6.98  cpu/wall  2.77
+    LayerNorm xnnpack  best    7.16  median    6.87  p10-p90    6.80-   7.15  cpu/wall  2.81
+    RMSNorm   portable best    3.18  median    3.05  p10-p90    2.91-   3.17  cpu/wall  2.56
+    RMSNorm   xnnpack  best    4.74  median    4.63  p10-p90    4.62-   4.69  cpu/wall  2.64
+  
+  Each timed implementation has a separate output entry in manifest.txt.
+  
+=== correctness gate, all 8 runs ===
+  torch_t1     12 / 12 checks passed.
+  torch_t2     12 / 12 checks passed.
+  torch_t4     12 / 12 checks passed.
+  torch_t10    12 / 12 checks passed.
+  et_t1        12 / 12 checks passed.
+  et_t2        12 / 12 checks passed.
+  et_t4        12 / 12 checks passed.
+  et_t10       12 / 12 checks passed.
+  TOTAL: 96 / 96 checks passed

@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="840" height="470" viewBox="0 0 840 470">
+<rect width="840" height="470" fill="white"/>
+<line x1="86.0" y1="388.0" x2="810.0" y2="388.0" stroke="#e6e6e6" stroke-width="1.0" stroke-linecap="round"/>
+<text x="77.0" y="392.0" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="11.5" text-anchor="end" fill="#6b7280" font-weight="400">0</text>
+<line x1="86.0" y1="318.2" x2="810.0" y2="318.2" stroke="#e6e6e6" stroke-width="1.0" stroke-linecap="round"/>
+<text x="77.0" y="322.2" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="11.5" text-anchor="end" fill="#6b7280" font-weight="400">10</text>
+<line x1="86.0" y1="248.4" x2="810.0" y2="248.4" stroke="#e6e6e6" stroke-width="1.0" stroke-linecap="round"/>
+<text x="77.0" y="252.4" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="11.5" text-anchor="end" fill="#6b7280" font-weight="400">20</text>
+<line x1="86.0" y1="178.7" x2="810.0" y2="178.7" stroke="#e6e6e6" stroke-width="1.0" stroke-linecap="round"/>
+<text x="77.0" y="182.7" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="11.5" text-anchor="end" fill="#6b7280" font-weight="400">30</text>
+<line x1="86.0" y1="108.9" x2="810.0" y2="108.9" stroke="#e6e6e6" stroke-width="1.0" stroke-linecap="round"/>
+<text x="77.0" y="112.9" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="11.5" text-anchor="end" fill="#6b7280" font-weight="400">40</text>
+<polyline points="86.0,216.1 303.9,184.7 521.9,138.5 810.0,100.0" fill="none" stroke="#0072B2" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="86.0" cy="216.1" r="3.8" fill="white" stroke="#0072B2" stroke-width="2.2"/>
+<circle cx="303.9" cy="184.7" r="3.8" fill="white" stroke="#0072B2" stroke-width="2.2"/>
+<circle cx="521.9" cy="138.5" r="3.8" fill="white" stroke="#0072B2" stroke-width="2.2"/>
+<circle cx="810.0" cy="100.0" r="3.8" fill="white" stroke="#0072B2" stroke-width="2.2"/>
+<polyline points="86.0,347.3 303.9,318.6 521.9,311.2 810.0,289.6" fill="none" stroke="#D55E00" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="86.0" cy="347.3" r="3.8" fill="white" stroke="#D55E00" stroke-width="2.2"/>
+<circle cx="303.9" cy="318.6" r="3.8" fill="white" stroke="#D55E00" stroke-width="2.2"/>
+<circle cx="521.9" cy="311.2" r="3.8" fill="white" stroke="#D55E00" stroke-width="2.2"/>
+<circle cx="810.0" cy="289.6" r="3.8" fill="white" stroke="#D55E00" stroke-width="2.2"/>
+<polyline points="86.0,223.1 303.9,374.9 521.9,374.9 810.0,374.9" fill="none" stroke="#0072B2" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 4"/>
+<circle cx="86.0" cy="223.1" r="3.8" fill="white" stroke="#0072B2" stroke-width="2.2"/>
+<circle cx="303.9" cy="374.9" r="3.8" fill="white" stroke="#0072B2" stroke-width="2.2"/>
+<circle cx="521.9" cy="374.9" r="3.8" fill="white" stroke="#0072B2" stroke-width="2.2"/>
+<circle cx="810.0" cy="374.9" r="3.8" fill="white" stroke="#0072B2" stroke-width="2.2"/>
+<polyline points="86.0,325.3 303.9,324.9 521.9,326.0 810.0,324.5" fill="none" stroke="#D55E00" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="5 4"/>
+<circle cx="86.0" cy="325.3" r="3.8" fill="white" stroke="#D55E00" stroke-width="2.2"/>
+<circle cx="303.9" cy="324.9" r="3.8" fill="white" stroke="#D55E00" stroke-width="2.2"/>
+<circle cx="521.9" cy="326.0" r="3.8" fill="white" stroke="#D55E00" stroke-width="2.2"/>
+<circle cx="810.0" cy="324.5" r="3.8" fill="white" stroke="#D55E00" stroke-width="2.2"/>
+<text x="40.0" y="28.0" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="17" text-anchor="start" fill="#1a1a1a" font-weight="700">Adding threads: our kernel vs the best framework at each count</text>
+<text x="40.0" y="46.0" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="11.5" text-anchor="start" fill="#6b7280" font-weight="400">RMSNorm V7, P-core biased. Solid = 4096x8192 (DRAM-bound); dashed = 128x64, where threading collapses our kernel.</text>
+<line x1="86.0" y1="388.0" x2="810.0" y2="388.0" stroke="#9aa0a6" stroke-width="1.0" stroke-linecap="round"/>
+<text x="448.0" y="432.0" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="12.5" text-anchor="middle" fill="#1a1a1a" font-weight="400">threads  (log scale)</text>
+<text x="20" y="231.0" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="12.5" text-anchor="middle" fill="#1a1a1a" transform="rotate(-90 20 231.0)">GiB/s  (useful bytes)</text>
+<line x1="86.0" y1="388.0" x2="86.0" y2="393.0" stroke="#9aa0a6" stroke-width="1.0" stroke-linecap="round"/>
+<text x="86.0" y="407.0" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#1a1a1a" font-weight="400">1</text>
+<line x1="303.9" y1="388.0" x2="303.9" y2="393.0" stroke="#9aa0a6" stroke-width="1.0" stroke-linecap="round"/>
+<text x="303.9" y="407.0" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#1a1a1a" font-weight="400">2</text>
+<line x1="521.9" y1="388.0" x2="521.9" y2="393.0" stroke="#9aa0a6" stroke-width="1.0" stroke-linecap="round"/>
+<text x="521.9" y="407.0" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#1a1a1a" font-weight="400">4</text>
+<line x1="810.0" y1="388.0" x2="810.0" y2="393.0" stroke="#9aa0a6" stroke-width="1.0" stroke-linecap="round"/>
+<text x="810.0" y="407.0" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="11" text-anchor="middle" fill="#1a1a1a" font-weight="400">10</text>
+<text x="326.7" y="98.4" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="10.5" text-anchor="start" fill="#1a1a1a" font-weight="600">margin narrows 4.2x -&gt; 2.9x:</text>
+<text x="326.7" y="111.9" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="10.5" text-anchor="start" fill="#1a1a1a" font-weight="600">they scale better than we do</text>
+<line x1="287.8" y1="281.8" x2="303.9" y2="374.9" stroke="#6b7280" stroke-width="0.9" stroke-dasharray="2,3" stroke-linecap="round"/>
+<circle cx="303.9" cy="374.9" r="2.6" fill="#6b7280"/>
+<text x="287.8" y="290.3" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="10.5" text-anchor="start" fill="#0072B2" font-weight="600">128x64: threading costs us 12.6x</text>
+<text x="287.8" y="303.8" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="10.5" text-anchor="start" fill="#0072B2" font-weight="600">(cpu/wall 0.75 - blocked, not busy)</text>
+<rect x="526.9" y="80.0" width="128.0" height="48.0" rx="4" fill="white" opacity="0.88" stroke="#e2e5e9" stroke-width="1.0"/>
+<rect x="534.9" y="90.0" width="20.0" height="4.0" rx="2" fill="#0072B2" opacity="1.0"/>
+<text x="562.9" y="95.0" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="12" text-anchor="start" fill="#1a1a1a" font-weight="400">ours (V7)</text>
+<rect x="534.9" y="109.0" width="20.0" height="4.0" rx="2" fill="#D55E00" opacity="1.0"/>
+<text x="562.9" y="114.0" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="12" text-anchor="start" fill="#1a1a1a" font-weight="400">best framework</text>
+<text x="40.0" y="449.0" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="10.5" text-anchor="start" fill="#6b7280" font-weight="400">Group granularity caps usable threads at M/256, so our occupancy tops out at 6.6 against PyTorch's 7.8 -- which is</text>
+<text x="40.0" y="462.0" font-family="Inter,Helvetica Neue,Helvetica,Arial,sans-serif" font-size="10.5" text-anchor="start" fill="#6b7280" font-weight="400">why the lead erodes. 96/96 correctness checks passed across all four thread counts.</text>
+</svg>

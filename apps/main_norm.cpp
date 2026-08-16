@@ -6,6 +6,7 @@
 #include <numeric>
 #include <sstream>
 #include <string>
+#include <sys/resource.h>  // getrusage: measured thread occupancy
 #include <vector>
 #include "norm/norm.hpp"
 #include "norm/stability.hpp"  // Sprint 7a: FP32 variance estimators
@@ -38,6 +39,72 @@ static void request_p_core() {
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
 }
+
+// Everything from here to the end of this block serves the threaded sections
+// only, so it is compiled out without OpenMP — otherwise the strict-warning
+// build fails on unused functions, which is how CI (whose runner has no
+// libomp) caught this.
+#if BENCH_HAS_OMP
+
+// What QoS the OpenMP workers should request.  Three states because the two
+// non-default ones answer different questions:
+//
+//   PCore      — USER_INTERACTIVE, a BIAS toward the P cluster (not a
+//                guarantee; macOS has no thread-to-core pinning API).
+//   Background — the one direction macOS does guarantee: confined to the E
+//                cores.  The control that turns "we asked for P-cores" into a
+//                measurement, since a difference between the two proves they
+//                reached different clusters.
+//   Default    — leave whatever libomp gave the worker.  This is what the
+//                Sprint-6 full-chip scaling section measured and continues to
+//                measure: biasing 16 threads toward 4 P-cores would distort
+//                the very occupancy curve that section exists to show.
+enum class WorkerQos { Default, PCore, Background };
+static WorkerQos g_worker_qos = WorkerQos::Default;
+
+static void request_worker_core() {
+#ifdef __APPLE__
+    switch (g_worker_qos) {
+        case WorkerQos::PCore:
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+            break;
+        case WorkerQos::Background:
+            pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
+            break;
+        case WorkerQos::Default:
+            break;
+    }
+#endif
+}
+
+static const char* qos_name() {
+#ifdef __APPLE__
+    switch (qos_class_self()) {
+        case QOS_CLASS_USER_INTERACTIVE: return "USER_INTERACTIVE";
+        case QOS_CLASS_USER_INITIATED:   return "USER_INITIATED";
+        case QOS_CLASS_DEFAULT:          return "DEFAULT";
+        case QOS_CLASS_UTILITY:          return "UTILITY";
+        case QOS_CLASS_BACKGROUND:       return "BACKGROUND";
+        default:                         return "UNSPECIFIED";
+    }
+#else
+    return "n/a";
+#endif
+}
+
+// CPU-seconds consumed per wall-second: ~1.0 for a serial run, rising toward
+// the worker count when threads genuinely run concurrently.  This is the
+// instrument that caught the ExecuTorch threadpool defaulting to 10 workers
+// while the harness described itself as single-threaded, so every threaded row
+// below carries it rather than trusting omp_set_num_threads().
+static double cpu_seconds() {
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    return (double)ru.ru_utime.tv_sec + 1e-6 * (double)ru.ru_utime.tv_usec
+         + (double)ru.ru_stime.tv_sec + 1e-6 * (double)ru.ru_stime.tv_usec;
+}
+
+#endif  // BENCH_HAS_OMP
 
 // ---------------------------------------------------------------------------
 // Timing helpers
@@ -1522,6 +1589,101 @@ static void sprint6_consolidated_ablation(double peak_ssve, double peak_chip) {
 //
 // ---------------------------------------------------------------------------
 
+#if BENCH_HAS_OMP
+
+// GROUP-ALIGNED WORK DISTRIBUTION — measured, not cosmetic.
+//
+// V6/V7 process 4*VL rows per group and send the remainder to a single-block
+// predicated tail that touches 64 B per column instead of 256 B — the low
+// access density V6 exists to fix.  A naive chunk = M/nthreads hands EVERY
+// thread such a tail whenever nthreads does not divide M into multiples of the
+// group, which is exactly the thread counts that measured ~45% slower than
+// their neighbours.  It looked like core heterogeneity; it was the scheduler
+// handing the kernel work it is bad at.
+//
+// So distribute in whole row-blocks.  256 is a multiple of 4*VL for every
+// plausible SVL, which keeps this VLA-safe without querying SVL from C++
+// (decision D).  Shapes with too few rows to fill 256-row blocks fall back to
+// 64, the group size itself at SVL=512; below that the shape simply cannot be
+// split further without paying the tail on every thread.
+static int64_t row_block_for(int64_t M) {
+    return (M >= 4 * 256) ? 256 : 64;
+}
+
+// How many threads this shape can actually occupy: one whole row-block each.
+// Returning fewer than requested is a property of the kernel's granularity,
+// not a scheduling accident, so callers report it rather than hide it.
+static int usable_threads(int64_t M, int requested) {
+    const int64_t blocks = (M + row_block_for(M) - 1) / row_block_for(M);
+    return static_cast<int>(std::min<int64_t>(requested, std::max<int64_t>(blocks, 1)));
+}
+
+// Thread t's [first row, row count) under the group-aligned scheme.  `aligned
+// = false` reproduces the naive scheme, kept so the cliff can be measured.
+static std::pair<int64_t, int64_t> row_span(int64_t M, int t, int nthreads,
+                                            bool aligned) {
+    if (!aligned) {
+        const int64_t chunk = M / nthreads;
+        const int64_t r0    = static_cast<int64_t>(t) * chunk;
+        return { r0, (t == nthreads - 1) ? (M - r0) : chunk };
+    }
+    const int64_t rb      = row_block_for(M);
+    const int64_t nblocks = (M + rb - 1) / rb;
+    const int64_t base    = nblocks / nthreads;
+    const int64_t extra   = nblocks % nthreads;
+    const int64_t b0      = t * base + std::min<int64_t>(t, extra);
+    const int64_t nb      = base + (t < extra ? 1 : 0);
+    const int64_t r0      = b0 * rb;
+    if (r0 >= M) return { 0, 0 };
+    return { r0, std::min<int64_t>(nb * rb, M - r0) };
+}
+
+// One row-parallel invocation of an RMSNorm / LayerNorm kernel.
+//
+// request_p_core() is called INSIDE the parallel region, per worker, and that
+// placement is load-bearing: libomp workers do NOT inherit the main thread's
+// QoS class.  Probed directly, a 4-thread region entered from a
+// USER_INTERACTIVE main thread reports USER_INTERACTIVE on worker 0 (which is
+// the main thread) and DEFAULT on workers 1-3.  Setting it on the main thread
+// alone therefore biases exactly one thread toward a P-core.
+static void run_rms_threaded(KernelFnBench fn, const float* a, float* b,
+                             const float* gamma, int64_t M, int64_t N,
+                             int64_t ld, int nthreads, bool aligned = true) {
+    // One thread means no parallel region at all, not a region of size one.
+    // Opening one costs a fork/join per call, which is invisible at 256 MiB and
+    // dominates at 32 KiB -- it would make the 1-thread row disagree with the
+    // published single-threaded figure for the same kernel and shape.
+    if (nthreads <= 1) { fn(a, b, gamma, M, N, ld, ld, 1e-5f); return; }
+    omp_set_num_threads(nthreads);
+    #pragma omp parallel num_threads(nthreads)
+    {
+        request_worker_core();
+        #pragma omp for schedule(static)
+        for (int t = 0; t < nthreads; ++t) {
+            auto [r0, rows] = row_span(M, t, nthreads, aligned);
+            if (rows > 0) fn(a + r0, b + r0, gamma, rows, N, ld, ld, 1e-5f);
+        }
+    }
+}
+
+static void run_ln_threaded(LNKernelFnBench fn, const float* a, float* b,
+                            const float* gamma, const float* beta,
+                            int64_t M, int64_t N, int64_t ld, int nthreads,
+                            bool aligned = true) {
+    if (nthreads <= 1) { fn(a, b, gamma, beta, M, N, ld, ld, 1e-5f); return; }
+    omp_set_num_threads(nthreads);
+    #pragma omp parallel num_threads(nthreads)
+    {
+        request_worker_core();
+        #pragma omp for schedule(static)
+        for (int t = 0; t < nthreads; ++t) {
+            auto [r0, rows] = row_span(M, t, nthreads, aligned);
+            if (rows > 0) fn(a + r0, b + r0, gamma, beta, rows, N, ld, ld, 1e-5f);
+        }
+    }
+}
+#endif  // BENCH_HAS_OMP
+
 static void openmp_scaling_section(double peak_ssve, double peak_chip) {
     std::cout << "\n" << std::string(96, '=') << "\n"
               << "SPRINT 6 - OpenMP ROW-PARALLEL SCALING, PER VARIANT\n"
@@ -1555,55 +1717,16 @@ static void openmp_scaling_section(double peak_ssve, double peak_chip) {
               << "and 16 is deliberate oversubscription.\n"
               << "'moved' = physical traffic (RMSNorm 2R+1W = 1.5x useful, LayerNorm 3R+1W = 2x).\n\n";
 
-    // GROUP-ALIGNED WORK DISTRIBUTION — measured, not cosmetic.
-    //
-    // V6/V7 process 4*VL rows per group and send the remainder to a
-    // single-block predicated tail that touches 64 B per column instead of
-    // 256 B — the low access density V6 exists to fix.  A naive
-    // chunk = M/nthreads hands EVERY thread such a tail whenever nthreads does
-    // not divide M into multiples of the group, which is exactly the thread
-    // counts that measured ~45% slower than their neighbours.  It looked like
-    // core heterogeneity; it was the scheduler handing the kernel work it is
-    // bad at.
-    //
-    // So distribute in whole row-blocks.  kRowBlock = 256 is a multiple of
-    // 4*VL for every plausible SVL, which keeps this VLA-safe without querying
-    // SVL from C++ (decision D).
-    const int64_t kRowBlock = 256;
-    const int64_t nblocks   = (M + kRowBlock - 1) / kRowBlock;
-
-    auto span = [&](int t, int nthreads, bool aligned) {
-        if (!aligned) {                       // the naive scheme, kept to show the cliff
-            const int64_t chunk = M / nthreads;
-            const int64_t r0    = static_cast<int64_t>(t) * chunk;
-            return std::pair<int64_t,int64_t>{ r0, (t == nthreads - 1) ? (M - r0) : chunk };
-        }
-        const int64_t base  = nblocks / nthreads;
-        const int64_t extra = nblocks % nthreads;
-        const int64_t b0    = t * base + std::min<int64_t>(t, extra);
-        const int64_t nb    = base + (t < extra ? 1 : 0);
-        const int64_t r0    = b0 * kRowBlock;
-        return std::pair<int64_t,int64_t>{ r0, std::min<int64_t>(nb * kRowBlock, M - r0) };
-    };
-
+    // Work distribution, the P-core QoS request and the group-alignment
+    // rationale all live in row_span() / run_*_threaded() at file scope, shared
+    // with the threaded external comparison below.
     auto run_rms = [&](KernelFnBench fn, int nthreads, bool aligned = true) {
-        omp_set_num_threads(nthreads);
-        #pragma omp parallel for schedule(static)
-        for (int t = 0; t < nthreads; ++t) {
-            auto [r0, rows] = span(t, nthreads, aligned);
-            if (rows > 0)
-                fn(a.data() + r0, b.data() + r0, gamma.data(), rows, N, ld, ld, 1e-5f);
-        }
+        run_rms_threaded(fn, a.data(), b.data(), gamma.data(),
+                         M, N, ld, nthreads, aligned);
     };
     auto run_ln = [&](LNKernelFnBench fn, int nthreads, bool aligned = true) {
-        omp_set_num_threads(nthreads);
-        #pragma omp parallel for schedule(static)
-        for (int t = 0; t < nthreads; ++t) {
-            auto [r0, rows] = span(t, nthreads, aligned);
-            if (rows > 0)
-                fn(a.data() + r0, b.data() + r0, gamma.data(), beta.data(),
-                   rows, N, ld, ld, 1e-5f);
-        }
+        run_ln_threaded(fn, a.data(), b.data(), gamma.data(), beta.data(),
+                        M, N, ld, nthreads, aligned);
     };
 
     auto header = [&](const char* norm, double moved_factor) {
@@ -1706,6 +1829,214 @@ static void openmp_scaling_section(double peak_ssve, double peak_chip) {
         }
         std::cout << "\n";
     }
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 7.6 — our half of the THREADED external comparison.
+//
+// The single-threaded external table compares five implementations; this
+// produces our column of the same table at 1/2/4/10 threads, on the same three
+// shapes, so the framework runs (bench/baselines/*.py --threads N) can be set
+// beside it.  Deliberately separate from the Sprint-6 section above: that one
+// is a published per-variant scaling result at one DRAM shape, and its numbers
+// are cited in the report, so it is left measuring exactly what it measured.
+//
+// Only V7 appears here (V6 where SME2 is absent) because V7 is the variant the
+// external table quotes.  The interesting question is not which of our variants
+// threads best — Sprint 6 answered that — but whether our lead over the
+// frameworks survives when both sides get more cores.
+// ---------------------------------------------------------------------------
+
+static void threaded_external_section(double peak_ssve) {
+    std::cout << "\n" << std::string(96, '=') << "\n"
+              << "SPRINT 7.6 - THREADED EXTERNAL COMPARISON (our column)\n"
+              << std::string(96, '=') << "\n";
+#if !BENCH_HAS_OMP
+    (void)peak_ssve;
+    std::cout << "OpenMP not available in this build - skipped.\n";
+    return;
+#else
+    if (!cpu_supports_sme()) {
+        (void)peak_ssve;
+        std::cout << "SME not detected - skipped.\n";
+        return;
+    }
+
+    g_worker_qos = WorkerQos::PCore;
+
+    const bool sme2 = cpu_supports_sme2();
+    const char* tag = sme2 ? "V7 (SME2)" : "V6 (SME1)";
+    const KernelFnBench   rms_k = sme2 ? rms_norm_ssve_v7   : rms_norm_ssve_v6;
+    const LNKernelFnBench ln_k  = sme2 ? layer_norm_ssve_v7 : layer_norm_ssve_v6;
+
+    const int threads[] = {1, 2, 4, 10};
+    const int reps = 5;
+
+    // 4 P-cores + 6 E-cores on this M4, and macOS has no thread-to-core pinning
+    // API, so 4 threads at USER_INTERACTIVE QoS is a REQUEST for the P cluster,
+    // not a guarantee.  The control experiment below is what tests it.
+    std::cout << "Shapes and byte convention identical to the single-threaded\n"
+              << "external comparison, so the two tables compose.  Kernel: " << tag << ".\n"
+              << "This M4 is 4 P-cores + 6 E-cores; workers request\n"
+              << "USER_INTERACTIVE QoS (P-core bias).  macOS exposes no pinning API,\n"
+              << "so 'P-core' is a request - see the QoS control at the end.\n"
+              << "cpu/wall = CPU-seconds per wall-second: the MEASURED occupancy,\n"
+              << "not the requested one.\n\n";
+
+    // libomp reuses one worker pool, so this reports the QoS the kernels
+    // actually run under rather than the one the main thread asked for.
+    std::cout << "Worker QoS actually in effect (4-thread region):\n";
+    {
+        std::vector<std::string> seen(4);
+        #pragma omp parallel num_threads(4)
+        {
+            request_worker_core();
+            const int id = omp_get_thread_num();
+            if (id >= 0 && id < 4) seen[(size_t)id] = qos_name();
+        }
+        for (int i = 0; i < 4; ++i)
+            std::cout << "  worker " << i << ": " << seen[(size_t)i] << "\n";
+        std::cout << "  (set per worker inside the parallel region: libomp workers do\n"
+                  << "   NOT inherit the main thread's QoS - probed, workers 1-3 come\n"
+                  << "   up DEFAULT if it is only set on the main thread.)\n\n";
+    }
+
+    struct Shape { int64_t m, n; };
+    const Shape shapes[] = { {128, 64}, {1024, 2048}, {4096, 8192} };
+
+    for (int layer = 0; layer <= 1; ++layer) {
+        const char* norm_name   = layer ? "LayerNorm" : "RMSNorm";
+        const double moved      = layer ? 2.0 : 1.5;
+
+        std::cout << norm_name << " " << tag
+                  << "   (moved = " << std::setprecision(2) << std::fixed << moved
+                  << "x useful)\n"
+                  << std::left  << std::setw(14) << "shape"
+                  << std::right << std::setw(9)  << "threads"
+                  << std::setw(11) << "GiB/s"
+                  << std::setw(10) << "median"
+                  << std::setw(10) << "speedup"
+                  << std::setw(11) << "cpu/wall"
+                  << std::setw(11) << "%1core"
+                  << std::setw(10) << "correct" << "\n"
+                  << std::string(86, '-') << "\n";
+
+        for (const Shape& sh : shapes) {
+            const int64_t M = sh.m, N = sh.n, ld = M;
+            const size_t  sz = (size_t)ld * (size_t)N;
+            const double  bytes = norm_bytes(M, N);
+
+            std::vector<float> a(sz), b(sz, 0.0f), expect(sz, 0.0f);
+            std::vector<float> gamma(N), beta(N);
+            for (size_t i = 0; i < sz; ++i) a[i] = 0.01f * float(i % 97);
+            for (int64_t j = 0; j < N; ++j) {
+                gamma[j] = 1.0f + 0.001f * float(j % 13);
+                beta[j]  = 0.01f * float(j % 7);
+            }
+            if (layer) layer_norm_ref(a.data(), expect.data(), gamma.data(),
+                                      beta.data(), M, N, ld, ld, 1e-5f);
+            else       rms_norm_ref(a.data(), expect.data(), gamma.data(),
+                                    M, N, ld, ld, 1e-5f);
+
+            std::string label = std::to_string(M) + "x" + std::to_string(N);
+            double base = 0.0;
+
+            for (int t : threads) {
+                // Group granularity, not the scheduler, caps the useful thread
+                // count on short tensors: a thread that gets less than one
+                // whole row-block would pay the predicated tail V6 exists to
+                // avoid.  Reported rather than silently rounded down.
+                const int use = usable_threads(M, t);
+
+                std::fill(b.begin(), b.end(), -1.0f);
+                if (layer) run_ln_threaded(ln_k, a.data(), b.data(), gamma.data(),
+                                           beta.data(), M, N, ld, use);
+                else       run_rms_threaded(rms_k, a.data(), b.data(), gamma.data(),
+                                            M, N, ld, use);
+                const bool ok = max_abs_dev(b, expect) <= 1e-3;
+
+                const double c0 = cpu_seconds();
+                const auto   w0 = Clock::now();
+                const Stats st = bench_stats([&] {
+                    if (layer) run_ln_threaded(ln_k, a.data(), b.data(), gamma.data(),
+                                               beta.data(), M, N, ld, use);
+                    else       run_rms_threaded(rms_k, a.data(), b.data(), gamma.data(),
+                                                M, N, ld, use);
+                }, reps);
+                const double wall = std::chrono::duration<double>(Clock::now() - w0).count();
+                const double occupancy = (cpu_seconds() - c0) / wall;
+
+                const double gibs = to_gibs(bytes, st.best);
+                const double gmed = to_gibs(bytes, st.median);
+                if (t == 1) base = gibs;
+
+                std::cout << std::left  << std::setw(14) << label
+                          << std::right << std::setw(9)  << t
+                          << std::fixed << std::setprecision(2)
+                          << std::setw(11) << gibs
+                          << std::setw(10) << gmed
+                          << std::setw(9)  << (gibs / base) << "x"
+                          << std::setw(11) << occupancy
+                          << std::setprecision(1)
+                          << std::setw(10) << (100.0 * gibs / peak_ssve) << "%"
+                          << std::setw(10) << (ok ? "yes" : "NO");
+                if (use != t)
+                    std::cout << "   <- capped at " << use
+                              << " (only " << ((M + row_block_for(M) - 1) / row_block_for(M))
+                              << " group-aligned row-blocks at M=" << M << ")";
+                std::cout << "\n";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    // ---- The P-core claim, tested rather than asserted --------------------
+    // BACKGROUND QoS is the one direction macOS guarantees: those threads are
+    // confined to the E-cores.  If the two columns below differ, the
+    // USER_INTERACTIVE run demonstrably reached cores the BACKGROUND run could
+    // not - which is the evidence, and it also prices the two clusters.
+    std::cout << "QoS control: same kernel, same threads, same data - only the QoS differs\n"
+              << "USER_INTERACTIVE is a P-core BIAS; BACKGROUND is an E-core GUARANTEE.\n"
+              << std::left  << std::setw(14) << "shape"
+              << std::right << std::setw(9)  << "threads"
+              << std::setw(14) << "P-biased"
+              << std::setw(14) << "background"
+              << std::setw(10) << "ratio" << "\n"
+              << std::string(61, '-') << "\n";
+
+    for (const Shape& sh : { Shape{1024, 2048}, Shape{4096, 8192} }) {
+        const int64_t M = sh.m, N = sh.n, ld = M;
+        const size_t  sz = (size_t)ld * (size_t)N;
+        const double  bytes = norm_bytes(M, N);
+        std::vector<float> a(sz), b(sz, 0.0f), gamma(N, 1.0f);
+        for (size_t i = 0; i < sz; ++i) a[i] = 0.01f * float(i % 97);
+
+        for (int t : {2, 4}) {
+            const int use = usable_threads(M, t);
+            g_worker_qos = WorkerQos::PCore;
+            const double hi = to_gibs(bytes, bench([&] {
+                run_rms_threaded(rms_k, a.data(), b.data(), gamma.data(),
+                                 M, N, ld, use); }, reps));
+            g_worker_qos = WorkerQos::Background;
+            const double bg = to_gibs(bytes, bench([&] {
+                run_rms_threaded(rms_k, a.data(), b.data(), gamma.data(),
+                                 M, N, ld, use); }, reps));
+            g_worker_qos = WorkerQos::PCore;
+
+            std::cout << std::left  << std::setw(14)
+                      << (std::to_string(M) + "x" + std::to_string(N))
+                      << std::right << std::setw(9) << t
+                      << std::fixed << std::setprecision(2)
+                      << std::setw(14) << hi << std::setw(14) << bg
+                      << std::setw(9)  << (hi / bg) << "x\n";
+        }
+    }
+    std::cout << "\nA ratio near 1.0x would mean the QoS request changed nothing and the\n"
+              << "'P-core' label is unsupported; a ratio well above 1.0x means the two\n"
+              << "runs reached different clusters.\n";
+
+    g_worker_qos = WorkerQos::Default;
 #endif
 }
 
@@ -2273,6 +2604,8 @@ int main() {
         openmp_scaling_section((double)peak_ssve, (double)peak_chip);
 
     teir_threading_section((double)peak_ssve, (double)peak_chip);
+
+    threaded_external_section((double)peak_ssve);
 
     return 0;
 }

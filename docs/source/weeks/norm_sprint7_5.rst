@@ -63,7 +63,8 @@ Method
   Every library output is dumped to raw FP32 and verified against our float64
   reference *before* its throughput is quoted. This is what catches the failure
   mode above — two sides computing different functions.
-* **One thread**, same shapes, same byte convention (useful = 1R + 1W).
+* **One thread**, same shapes, same byte convention (useful = 1R + 1W). One
+  thread has to be enforced *per framework*, not once — see below.
 * **Versions used for the reported run**, on a standalone Python 3.12 installed
   specifically for this: **PyTorch 2.13.0** and **ExecuTorch 1.4.1**, with the
   **XNNPACK delegate** — the path that is actually deployed on device —
@@ -81,27 +82,108 @@ Method
    newer interpreter was installed instead, so the strongest available path is
    the one measured.
 
+"One thread" is two settings, not one
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The first version of this comparison called ``torch.set_num_threads(1)`` and
+declared the whole experiment single-threaded. That is true for PyTorch and
+false for ExecuTorch: **ExecuTorch runs its own pthreadpool**, which
+``torch.set_num_threads`` does not reach. Querying it directly,
+``portable_lib._threadpool_get_thread_count()`` returned **10** — one worker per
+core on this M4 — while we were describing the run as single-threaded.
+
+The way we caught it was to stop trusting the setting and measure the
+consequence instead: CPU time divided by wall time, from
+``resource.getrusage``, which is ~1.0 for a genuinely serial run and rises
+toward the worker count otherwise.
+
+.. list-table:: CPU-seconds per wall-second, 4096×8192
+   :header-rows: 1
+
+   * - path
+     - restricted by ``set_num_threads``?
+     - LayerNorm
+     - RMSNorm
+   * - PyTorch eager
+     - yes
+     - 1.00
+     - 1.00
+   * - ``torch.compile``
+     - yes
+     - 1.00
+     - 1.00
+   * - ExecuTorch portable
+     - **no**
+     - 1.00
+     - **2.50**
+   * - ExecuTorch XNNPACK
+     - **no**
+     - 1.00
+     - **1.71**
+
+Only the RMSNorm rows were actually threaded, which is why the error was easy
+to miss: three of the four numbers in each column looked fine. The fix is one
+call, ``portable_lib._unsafe_reset_threadpool(1)``, made before any model is
+loaded; the benchmark now prints the resulting count and records it in the
+manifest header (``# threads 1 (executorch threadpool 1)``) so the claim is
+checkable from the artifact rather than taken on trust.
+
+It changed published numbers in both directions. ExecuTorch portable RMSNorm at
+1024×2048 fell from 4.23 to 1.92 GiB/s once it stopped using ten cores against
+our one. XNNPACK RMSNorm at 128×64 *rose*, 3.06 → 8.42, because on a 32 KiB
+tensor the threadpool's synchronization cost more than the work it distributed.
+The correction is not uniformly favourable to us and is not meant to be; the
+previous RMSNorm margin of 4.0–5.3× was measured against a baseline that had
+been given ten times the compute.
+
+.. warning::
+
+   **One configuration is not reproducible.** ExecuTorch 1.4.1's XNNPACK
+   delegate fails intermittently on RMSNorm at 1024×2048 with
+   ``Failed to execute method forward, error: 0x23``, preceded by
+   ``[method.cpp:987] No chains``. Three identical trials in one process gave
+   two successes and one failure, so the lowering itself is non-deterministic —
+   it is not our input or our harness. Two of the three full runs behind this
+   sprint dropped that row. The number reported for it comes from a run in
+   which it succeeded and was verified like every other row, but it deserves
+   less confidence than its neighbours.
+
 Correctness first
 ~~~~~~~~~~~~~~~~~~~
 
-.. list-table:: max\|diff\| vs our float64 reference, M=128 N=64
+.. list-table:: max\|diff\| vs our float64 reference, worst over the three shapes
    :header-rows: 1
 
    * - implementation
      - LayerNorm
      - RMSNorm
      - verdict
-   * - PyTorch 2.13.0
+   * - ``torch_eager``
      - 1.19e-06
      - 2.38e-07
      - same function
-   * - ExecuTorch 1.4.1
+   * - ``torch_compile``
+     - 1.31e-06
+     - 9.54e-07
+     - same function
+   * - ``et_portable``
      - 3.10e-06
-     - 3.58e-07
+     - 2.27e-06
+     - same function
+   * - ``et_xnnpack``
+     - 3.10e-06
+     - 2.27e-06
      - same function
 
-Both agree with our reference to FP32 rounding, so the throughput numbers below
-compare implementations of the *same* function.
+All four agree with our reference to FP32 rounding, so the throughput numbers
+below compare implementations of the *same* function. Every row of both results
+tables has its own entry here: **12 checks per framework, 24 in total, all
+passing**. The harness writes one manifest row per (implementation, norm,
+shape) and the C++ checker walks that manifest, so the set of configurations
+*timed* and the set *verified* cannot drift apart. Earlier versions dumped one
+output per norm — the eager PyTorch result and whichever ExecuTorch mode was
+available — which left ``torch.compile`` and the second ExecuTorch mode timed
+and published but never checked.
 
 Results
 ~~~~~~~~~
@@ -121,24 +203,24 @@ per row is the one our margin is quoted against.
      - our margin
    * - 128×64
      - **16.84**
-     - 11.18
-     - 3.87
-     - 1.41
-     - 5.01
-     - 1.5×
+     - 12.85
+     - 3.97
+     - 5.05
+     - 4.95
+     - 1.3×
    * - 1024×2048 (16 MiB)
-     - **16.49**
-     - 7.89
-     - 4.63
-     - 6.17
-     - 6.06
-     - 2.1×
+     - **16.47**
+     - 8.53
+     - 4.60
+     - 6.12
+     - 6.18
+     - 1.9×
    * - 4096×8192 (256 MiB)
-     - **13.54**
-     - 7.35
-     - 4.44
-     - 5.92
-     - 5.93
+     - **13.52**
+     - 7.36
+     - 4.45
+     - 5.95
+     - 5.98
      - 1.8×
 
 .. list-table:: RMSNorm — GiB/s, higher is better
@@ -152,29 +234,29 @@ per row is the one our margin is quoted against.
      - ET XNNPACK
      - our margin
    * - 128×64
-     - **38.56**
-     - 7.52
-     - 4.52
-     - 2.51
-     - 3.23
-     - 5.1×
+     - **39.58**
+     - 9.04
+     - 4.48
+     - 2.53
+     - 8.42
+     - 4.4×
    * - 1024×2048 (16 MiB)
-     - **38.46**
-     - 3.44
-     - 6.65
-     - 4.27
-     - 6.64
-     - 5.8×
+     - **38.45**
+     - 5.21
+     - 6.51
+     - 1.92
+     - 5.10
+     - 5.9×
    * - 4096×8192 (256 MiB)
-     - **24.65**
-     - 2.77
-     - 5.90
-     - 3.26
-     - 4.19
-     - 4.2×
+     - **24.63**
+     - 2.82
+     - 6.04
+     - 1.85
+     - 4.14
+     - 4.1×
 
-We are ahead of both baselines at every shape: **LayerNorm by 1.5–2.1×** and
-**RMSNorm by 4.2–5.8×**. That asymmetry is the interesting part, and it is not
+We are ahead of both baselines at every shape: **LayerNorm by 1.3–1.9×** and
+**RMSNorm by 4.1–5.9×**. That asymmetry is the interesting part, and it is not
 about our kernels.
 
 Fusion, not kernel quality, explains the asymmetry
@@ -196,8 +278,8 @@ Profiling what each PyTorch module actually dispatches to on CPU:
 ``_fused_rms_norm`` exists at the dispatcher level, but the CPU self time is
 dominated by the elementwise ops around it: **on CPU, eager RMSNorm decomposes**,
 each pass reading and writing the whole tensor. That is why eager RMSNorm sits
-at 2.77 GiB/s while ``torch.compile`` — which fuses the decomposition —
-roughly doubles it to 5.90.
+at 2.82 GiB/s while ``torch.compile`` — which fuses the decomposition —
+roughly doubles it to 6.04.
 
 The consequence is a clean, attributable inversion:
 
@@ -212,7 +294,7 @@ The consequence is a clean, attributable inversion:
      - 1.8–2.3× faster than our LayerNorm
    * - PyTorch (eager)
      - LayerNorm
-     - 2.7× faster than its RMSNorm
+     - 2.6× faster than its RMSNorm
 
 The mathematics says RMSNorm should be the *cheaper* operation — one pass, no
 mean, 2R+1W against LayerNorm's 3R+1W, which is exactly decision C's premise and
@@ -236,18 +318,20 @@ that survived contact.
      - outcome
    * - **P1** — PyTorch eager slow, we win 5–10×, from dispatch overhead and
        lack of fusion
-     - **Partly wrong.** RMSNorm 4.2–5.8× (just under the range), LayerNorm
-       only 1.5–2.1× (well under). The stated *reason* is also wrong for
-       LayerNorm, which is fully fused and well optimized. The attribution
-       splits by norm, not by framework.
+     - **Partly wrong.** RMSNorm 4.1–5.9× (inside the range at one shape,
+       just under at the others), LayerNorm only 1.3–1.9× (well under). The
+       stated *reason* is also wrong for LayerNorm, which is fully fused and
+       well optimized. The attribution splits by norm, not by framework.
    * - **P2** — ExecuTorch portable slower than PyTorch eager
-     - **Confirmed but narrowly**, and much closer than on the old version:
-       LayerNorm 5.92 vs 7.35, RMSNorm 3.26 vs 2.77 (portable actually *wins*
-       here, because eager RMSNorm decomposes).
+     - **Confirmed on both norms**, though much closer than on the old
+       version: LayerNorm 5.95 vs 7.36, RMSNorm 1.85 vs 2.82. An earlier,
+       unpinned measurement had portable *winning* the RMSNorm row; that was
+       the ExecuTorch threadpool, not the kernel (see the threading note
+       above).
    * - **P3** — RMSNorm decomposes rather than running a fused kernel
      - **Confirmed, and in PyTorch as well as ExecuTorch** — which was not
        predicted. The profiler trace above is the evidence, and the
-       eager-vs-compile gap (2.77 → 5.90) is its cost.
+       eager-vs-compile gap (2.82 → 6.12) is its cost.
    * - **P4** — we may lose
      - **Not realized against these two.** See the limits below — it is not
        settled by this experiment.
@@ -267,15 +351,18 @@ materially different baselines:
      - current stack
    * - torch.compile RMSNorm
      - 3.02
-     - **5.90**
+     - **6.04**
    * - ExecuTorch portable RMSNorm
      - 0.62
-     - **3.26**
+     - **1.85**
    * - ExecuTorch portable LayerNorm
      - 2.77
-     - **5.92**
+     - **5.95**
 
-Our RMSNorm margin would have read 8–13× against the old stack and is 4.2–5.8×
+The ExecuTorch rows are not a clean version comparison: the old-stack numbers
+were taken before we pinned the ExecuTorch threadpool, so they include whatever
+parallelism it chose by default. The ``torch.compile`` row is comparable.
+Our RMSNorm margin would have read 8–13× against the old stack and is 4.1–5.9×
 against the current one. **The kernels did not change; the baseline did.** Any
 "N× faster than library X" claim is a statement about a specific version on a
 specific day, and is quoted here with versions attached for that reason.
@@ -322,7 +409,7 @@ and the report does not claim it is:
 The defensible claim is therefore narrow and worth stating precisely: *against
 two general-purpose frameworks at current versions, in their own layouts,
 single-threaded, and verified to compute the same function on every benchmarked
-shape, our kernels are 1.5–2.1× (LayerNorm) and 4.2–5.8× (RMSNorm) faster; the
+shape, our kernels are 1.3–1.9× (LayerNorm) and 4.1–5.9× (RMSNorm) faster; the
 RMSNorm margin is largely the absence of a fused CPU kernel on their side; and
 no specialist vendor kernel was measured, so this is not a state-of-the-art
 claim.*
@@ -340,8 +427,8 @@ Reproducing
 
    # PINNED, not floated: the margins above are a statement about specific
    # versions.  The same harness on torch 2.4.0 / executorch 0.3.0 gave
-   # torch.compile RMSNorm 3.02 GiB/s against 5.90 here, which would have made
-   # our RMSNorm margin read 8-13x instead of 4.2-5.8x.  The kernels did not
+   # torch.compile RMSNorm 3.02 GiB/s against 6.12 here, which would have made
+   # our RMSNorm margin read 8-13x instead of 4.0-5.3x.  The kernels did not
    # change; the baseline did.
    uv pip install --python /tmp/et312/bin/python \
        -r bench/baselines/requirements-baselines.txt
@@ -375,7 +462,10 @@ What is left open
   vendor implementation, in either direction.**
 * **Threaded comparison.** Everything here is single-threaded; the frameworks
   parallelize by default and our TEIR path scales to 2.1×, so a multi-thread
-  comparison is a separate question with a separate ceiling.
+  comparison is a separate question with a separate ceiling. **Answered in
+  Sprint 7.6** (:doc:`norm_sprint7_6`), which repeats this comparison at 1/2/4/10
+  threads: the margins survive at the two larger shapes, and two new limits of
+  our own decomposition show up that one thread could not expose.
 * **The integration question.** As stated in the method, this measures each
   implementation in its preferred layout. What it would cost to substitute our
   kernel for a framework operator on the framework's own tensor representation
