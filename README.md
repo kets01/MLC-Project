@@ -18,7 +18,6 @@ MLC-Project/
 ├── data/                   Input and TEIR data
 ├── docs/                   Documentation and checked-in results
 ├── paper/                  Final report
-├── presentation/           Final presentation
 └── .github/                CI workflows
 ```
 
