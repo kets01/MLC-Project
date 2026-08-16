@@ -44,6 +44,7 @@ shapes while maintaining peak hardware performance.
 
 Performance Results (GEMM)
 We benchmarked the GEMM generator across 27 different dimension combinations. The results show significant scaling as matrix volume increases.
+
 +--------------------+----------------------+
 | Dimensions (M,N,K) | Performance (GFLOPS) |
 +====================+======================+
