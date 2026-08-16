@@ -63,7 +63,8 @@ Method
   Every library output is dumped to raw FP32 and verified against our float64
   reference *before* its throughput is quoted. This is what catches the failure
   mode above — two sides computing different functions.
-* **One thread**, same shapes, same byte convention (useful = 1R + 1W).
+* **One thread**, same shapes, same byte convention (useful = 1R + 1W). One
+  thread has to be enforced *per framework*, not once — see below.
 * **Versions used for the reported run**, on a standalone Python 3.12 installed
   specifically for this: **PyTorch 2.13.0** and **ExecuTorch 1.4.1**, with the
   **XNNPACK delegate** — the path that is actually deployed on device —
@@ -80,6 +81,72 @@ Method
    Sprint-6 error: handicapping the baseline and calling the gap a win. A
    newer interpreter was installed instead, so the strongest available path is
    the one measured.
+
+"One thread" is two settings, not one
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The first version of this comparison called ``torch.set_num_threads(1)`` and
+declared the whole experiment single-threaded. That is true for PyTorch and
+false for ExecuTorch: **ExecuTorch runs its own pthreadpool**, which
+``torch.set_num_threads`` does not reach. Querying it directly,
+``portable_lib._threadpool_get_thread_count()`` returned **10** — one worker per
+core on this M4 — while we were describing the run as single-threaded.
+
+The way we caught it was to stop trusting the setting and measure the
+consequence instead: CPU time divided by wall time, from
+``resource.getrusage``, which is ~1.0 for a genuinely serial run and rises
+toward the worker count otherwise.
+
+.. list-table:: CPU-seconds per wall-second, 4096×8192
+   :header-rows: 1
+
+   * - path
+     - restricted by ``set_num_threads``?
+     - LayerNorm
+     - RMSNorm
+   * - PyTorch eager
+     - yes
+     - 1.00
+     - 1.00
+   * - ``torch.compile``
+     - yes
+     - 1.00
+     - 1.00
+   * - ExecuTorch portable
+     - **no**
+     - 1.00
+     - **2.50**
+   * - ExecuTorch XNNPACK
+     - **no**
+     - 1.00
+     - **1.71**
+
+Only the RMSNorm rows were actually threaded, which is why the error was easy
+to miss: three of the four numbers in each column looked fine. The fix is one
+call, ``portable_lib._unsafe_reset_threadpool(1)``, made before any model is
+loaded; the benchmark now prints the resulting count and records it in the
+manifest header (``# threads 1 (executorch threadpool 1)``) so the claim is
+checkable from the artifact rather than taken on trust.
+
+It changed published numbers in both directions. ExecuTorch portable RMSNorm at
+1024×2048 fell from 4.23 to 1.92 GiB/s once it stopped using ten cores against
+our one. XNNPACK RMSNorm at 128×64 *rose*, 3.06 → 8.42, because on a 32 KiB
+tensor the threadpool's synchronization cost more than the work it distributed.
+The correction is not uniformly favourable to us and is not meant to be; the
+previous RMSNorm margin of 4.0–5.3× was measured against a baseline that had
+been given ten times the compute.
+
+.. warning::
+
+   **One configuration is not reproducible.** ExecuTorch 1.4.1's XNNPACK
+   delegate fails intermittently on RMSNorm at 1024×2048 with
+   ``Failed to execute method forward, error: 0x23``, preceded by
+   ``[method.cpp:987] No chains``. Three identical trials in one process gave
+   two successes and one failure, so the lowering itself is non-deterministic —
+   it is not our input or our harness. Two of the three full runs behind this
+   sprint dropped that row. The number reported for it comes from a run in
+   which it succeeded and was verified like every other row, but it deserves
+   less confidence than its neighbours.
 
 Correctness first
 ~~~~~~~~~~~~~~~~~~~
@@ -136,23 +203,23 @@ per row is the one our margin is quoted against.
      - our margin
    * - 128×64
      - **16.84**
-     - 13.08
-     - 4.09
-     - 4.05
-     - 5.07
+     - 12.85
+     - 3.97
+     - 5.05
+     - 4.95
      - 1.3×
    * - 1024×2048 (16 MiB)
      - **16.47**
-     - 7.79
-     - 4.55
-     - 6.16
-     - 6.25
-     - 2.1×
+     - 8.53
+     - 4.60
+     - 6.12
+     - 6.18
+     - 1.9×
    * - 4096×8192 (256 MiB)
      - **13.52**
-     - 7.52
-     - 4.43
-     - 5.87
+     - 7.36
+     - 4.45
+     - 5.95
      - 5.98
      - 1.8×
 
@@ -168,28 +235,28 @@ per row is the one our margin is quoted against.
      - our margin
    * - 128×64
      - **39.58**
-     - 9.16
-     - 4.76
-     - 2.54
-     - 3.06
-     - 4.3×
+     - 9.04
+     - 4.48
+     - 2.53
+     - 8.42
+     - 4.4×
    * - 1024×2048 (16 MiB)
      - **38.45**
-     - 3.19
-     - 7.19
-     - 4.23
-     - 4.40
-     - 5.3×
+     - 5.21
+     - 6.51
+     - 1.92
+     - 5.10
+     - 5.9×
    * - 4096×8192 (256 MiB)
      - **24.63**
      - 2.82
-     - 6.12
-     - 3.27
-     - 4.22
-     - 4.0×
+     - 6.04
+     - 1.85
+     - 4.14
+     - 4.1×
 
-We are ahead of both baselines at every shape: **LayerNorm by 1.3–2.1×** and
-**RMSNorm by 4.0–5.3×**. That asymmetry is the interesting part, and it is not
+We are ahead of both baselines at every shape: **LayerNorm by 1.3–1.9×** and
+**RMSNorm by 4.1–5.9×**. That asymmetry is the interesting part, and it is not
 about our kernels.
 
 Fusion, not kernel quality, explains the asymmetry
@@ -212,7 +279,7 @@ Profiling what each PyTorch module actually dispatches to on CPU:
 dominated by the elementwise ops around it: **on CPU, eager RMSNorm decomposes**,
 each pass reading and writing the whole tensor. That is why eager RMSNorm sits
 at 2.82 GiB/s while ``torch.compile`` — which fuses the decomposition —
-roughly doubles it to 6.12.
+roughly doubles it to 6.04.
 
 The consequence is a clean, attributable inversion:
 
@@ -227,7 +294,7 @@ The consequence is a clean, attributable inversion:
      - 1.8–2.3× faster than our LayerNorm
    * - PyTorch (eager)
      - LayerNorm
-     - 2.7× faster than its RMSNorm
+     - 2.6× faster than its RMSNorm
 
 The mathematics says RMSNorm should be the *cheaper* operation — one pass, no
 mean, 2R+1W against LayerNorm's 3R+1W, which is exactly decision C's premise and
@@ -251,14 +318,16 @@ that survived contact.
      - outcome
    * - **P1** — PyTorch eager slow, we win 5–10×, from dispatch overhead and
        lack of fusion
-     - **Partly wrong.** RMSNorm 4.0–5.3× (just under the range), LayerNorm
-       only 1.3–2.1× (well under). The stated *reason* is also wrong for
+     - **Partly wrong.** RMSNorm 4.1–5.9× (inside the range at one shape,
+       just under at the others), LayerNorm only 1.3–1.9× (well under). The stated *reason* is also wrong for
        LayerNorm, which is fully fused and well optimized. The attribution
        splits by norm, not by framework.
    * - **P2** — ExecuTorch portable slower than PyTorch eager
-     - **Confirmed but narrowly**, and much closer than on the old version:
-       LayerNorm 5.87 vs 7.52, RMSNorm 3.27 vs 2.82 (portable actually *wins*
-       here, because eager RMSNorm decomposes).
+     - **Confirmed on both norms**, though much closer than on the old
+       version: LayerNorm 5.95 vs 7.36, RMSNorm 1.85 vs 2.82. An earlier,
+       unpinned measurement had portable *winning* the RMSNorm row; that was
+       the ExecuTorch threadpool, not the kernel (see the threading note
+       above).
    * - **P3** — RMSNorm decomposes rather than running a fused kernel
      - **Confirmed, and in PyTorch as well as ExecuTorch** — which was not
        predicted. The profiler trace above is the evidence, and the
@@ -282,15 +351,18 @@ materially different baselines:
      - current stack
    * - torch.compile RMSNorm
      - 3.02
-     - **6.12**
+     - **6.04**
    * - ExecuTorch portable RMSNorm
      - 0.62
-     - **3.27**
+     - **1.85**
    * - ExecuTorch portable LayerNorm
      - 2.77
-     - **5.87**
+     - **5.95**
 
-Our RMSNorm margin would have read 8–13× against the old stack and is 4.0–5.3×
+The ExecuTorch rows are not a clean version comparison: the old-stack numbers
+were taken before we pinned the ExecuTorch threadpool, so they include whatever
+parallelism it chose by default. The ``torch.compile`` row is comparable.
+Our RMSNorm margin would have read 8–13× against the old stack and is 4.1–5.9×
 against the current one. **The kernels did not change; the baseline did.** Any
 "N× faster than library X" claim is a statement about a specific version on a
 specific day, and is quoted here with versions attached for that reason.
